@@ -50,3 +50,19 @@ def test_dot_prefixed_excluded_paths_are_denied():
     fence2 = ScopeFence(include=[".github/"], exclude=[])
     assert fence2.allows(".github/workflows/ci.yml")
     assert fence2.allows(".github/workflows/deploy.yml")
+
+
+def test_empty_include_denies_all_paths():
+    """Test that a fence with empty include list denies all paths (fail-closed)."""
+    fence = ScopeFence(include=[], exclude=[])
+    assert not fence.allows("anything.py")
+    assert not fence.allows("src/app.py")
+    assert not fence.allows("deeply/nested/path/file.txt")
+
+
+def test_double_star_includes_deeply_nested_paths():
+    """Test that ** include pattern matches deeply nested paths."""
+    fence = ScopeFence(include=["**"], exclude=[])
+    assert fence.allows("a/b/c/d.py")
+    assert fence.allows("deeply/nested/path/to/file.txt")
+    assert fence.allows("x.py")
