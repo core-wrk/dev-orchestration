@@ -10,6 +10,27 @@ from dev_orchestration.config.models import (
 )
 from dev_orchestration.domain.enums import Tier
 
+# Independent literal declaration, decoupled from source.
+# If someone deletes a token from DENIED_COMMAND_TOKENS, the pinning test
+# fails AND the parametrized tests still have all expected cases.
+EXPECTED_DENIED_TOKENS = [
+    "deploy",
+    "wrangler",
+    "publish",
+    "push",
+    "merge",
+    "release",
+]
+
+
+def test_deny_list_contents_are_pinned():
+    """Verify the deny-list has exactly the expected tokens.
+
+    This guards against accidental modifications to DENIED_COMMAND_TOKENS.
+    If a token is added or removed from the source, this test fails.
+    """
+    assert DENIED_COMMAND_TOKENS == frozenset(EXPECTED_DENIED_TOKENS)
+
 
 def test_safe_command_is_accepted():
     cmd = ValidationCommand(command="npm run build", required_for=[Tier.STANDARD])
@@ -32,36 +53,39 @@ def test_dangerous_commands_are_rejected(command):
         ValidationCommand(command=command)
 
 
-@pytest.mark.parametrize("token", DENIED_COMMAND_TOKENS)
+@pytest.mark.parametrize("token", EXPECTED_DENIED_TOKENS)
 def test_each_denied_token_is_enforced(token):
-    """Verify each token in DENIED_COMMAND_TOKENS is independently enforced.
+    """Verify each expected token is rejected in a basic command.
 
-    This test ensures that removing any single token from DENIED_COMMAND_TOKENS
-    would cause a test failure, catching regressions in deny-list coverage.
+    This test uses EXPECTED_DENIED_TOKENS (independent literal) so that
+    if someone deletes a token from the source, we still test it here.
+    The pinning test (test_deny_list_contents_are_pinned) catches the deletion.
     """
     cmd = f"npm run {token}"
     with pytest.raises(ValidationError):
         ValidationCommand(command=cmd)
 
 
-@pytest.mark.parametrize("token", DENIED_COMMAND_TOKENS)
+@pytest.mark.parametrize("token", EXPECTED_DENIED_TOKENS)
 def test_each_denied_token_caught_as_substring(token):
     """Verify deny-list tokens are caught as substrings (e.g., predeploy, redeploy).
 
-    Ensures that tokens appearing in lifecycle hooks and other variations
-    are caught by substring matching, not just whole words.
+    This test uses EXPECTED_DENIED_TOKENS (independent literal) so that
+    if someone deletes a token from the source, we still test it here.
+    The pinning test (test_deny_list_contents_are_pinned) catches the deletion.
     """
     cmd = f"npm run pre{token}"
     with pytest.raises(ValidationError):
         ValidationCommand(command=cmd)
 
 
-@pytest.mark.parametrize("token", DENIED_COMMAND_TOKENS)
+@pytest.mark.parametrize("token", EXPECTED_DENIED_TOKENS)
 def test_denied_token_case_insensitive(token):
     """Verify deny-list tokens are matched case-insensitively.
 
-    This test ensures that removing .lower() from denied_tokens would break,
-    catching regressions in case-folding.
+    This test uses EXPECTED_DENIED_TOKENS (independent literal) and verifies
+    that uppercase variants are still caught. It ensures that removing .lower()
+    from denied_tokens would break, catching regressions in case-folding.
     """
     cmd = f"npm run {token.upper()}"
     with pytest.raises(ValidationError):
