@@ -1,0 +1,42 @@
+from enum import StrEnum
+
+
+class Tier(StrEnum):
+    TRIVIAL = "trivial"
+    STANDARD = "standard"
+    SUBSTANTIAL = "substantial"
+    HIGH_RISK = "high_risk"
+
+
+class ProjectClass(StrEnum):
+    CLIENT_APPLICATION = "client_application"
+    INTERNAL_UTILITY = "internal_utility"
+    INTERNAL_OPERATING_SYSTEM = "internal_operating_system"
+    MARKETING_WEBSITE = "marketing_website"
+
+
+class RunState(StrEnum):
+    CREATED = "CREATED"
+    CLASSIFIED = "CLASSIFIED"
+    PLANNED = "PLANNED"
+    PLAN_REVIEWED = "PLAN_REVIEWED"
+    PLAN_FINALIZED = "PLAN_FINALIZED"
+    AWAITING_APPROVAL = "AWAITING_APPROVAL"
+    APPROVED = "APPROVED"
+    EXECUTING = "EXECUTING"
+    VALIDATING = "VALIDATING"
+    IMPLEMENTATION_REVIEW = "IMPLEMENTATION_REVIEW"
+    REMEDIATION = "REMEDIATION"
+    FINAL_VERIFICATION = "FINAL_VERIFICATION"
+    COMPLETE_LOCAL = "COMPLETE_LOCAL"
+    BLOCKED = "BLOCKED"
+    ESCALATED = "ESCALATED"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+
+
+class Outcome(StrEnum):
+    PASS = "PASS"
+    CHANGES_REQUIRED = "CHANGES_REQUIRED"
+    BLOCKED = "BLOCKED"
+    ESCALATE = "ESCALATE"
