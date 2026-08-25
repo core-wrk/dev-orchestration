@@ -44,6 +44,25 @@ def test_commit_records_only_named_paths(repo):
     assert "b.txt" in repo.status_porcelain()
 
 
+def test_commit_return_value_is_the_actual_new_head(repo):
+    base_sha = subprocess.run(
+        ["git", "-C", str(repo.root), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    (repo.root / "a.txt").write_text("a\n")
+    sha = repo.commit("ai(run): add a", ["a.txt"])
+    expected_sha = subprocess.run(
+        ["git", "-C", str(repo.root), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert sha == expected_sha
+    assert sha != base_sha
+
+
 def test_changed_files_lists_paths_since_base(repo):
     base = repo.current_commit()
     (repo.root / "c.txt").write_text("c\n")
