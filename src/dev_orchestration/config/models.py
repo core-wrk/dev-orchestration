@@ -18,18 +18,25 @@ class DeniedCommandError(ValueError):
 def denied_tokens(command: str) -> set[str]:
     """Return the deny-list tokens present in `command`.
 
-    Splits on every non-alphanumeric run so `deploy:prod` and `predeploy`
-    are both reduced to comparable words. Fails closed by design: a false
-    positive costs one renamed script, a false negative deploys production.
+    Searches for each deny-list token as a substring in the lowercased command.
+    This catches commands like `npm run predeploy`, `npm run redeploy`, etc.
+    Fails closed by design: a false positive costs one renamed script, a false
+    negative deploys production silently. The deny-list is not overridable.
     """
-    words = set(re.split(r"[^a-z0-9]+", command.lower()))
-    return words & DENIED_COMMAND_TOKENS
+    lowered = command.lower()
+    found = set()
+    for token in DENIED_COMMAND_TOKENS:
+        if token in lowered:
+            found.add(token)
+    return found
 
 
 class ValidationCommand(BaseModel):
     command: str
     required_for: list[Tier] = Field(default_factory=list)
     timeout_seconds: int = 1800
+
+    model_config = {"frozen": True}
 
     @field_validator("command")
     @classmethod
@@ -38,8 +45,8 @@ class ValidationCommand(BaseModel):
         if found:
             raise DeniedCommandError(
                 f"command {value!r} contains prohibited token(s) "
-                f"{sorted(found)}; validation commands may not deploy, "
-                f"publish, or write to a remote"
+                f"{sorted(found)}; the deny-list is not overridable. "
+                f"validation commands may not deploy, publish, or write to a remote"
             )
         return value
 
