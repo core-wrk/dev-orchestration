@@ -1,7 +1,5 @@
 """Typed configuration. Invalid config must fail before any agent runs."""
 
-import re
-
 from pydantic import BaseModel, Field, field_validator
 
 from dev_orchestration.domain.enums import ProjectClass, Tier
