@@ -23,6 +23,10 @@ def slugify(text: str) -> str:
 
 
 def new_run_id(workflow: str, slug: str, now: datetime | None = None) -> str:
+    # Run IDs use UTC timestamps for DST-safe lexical and monotonic ordering.
+    # Naive local timestamps break sort order during DST fall-back (same hour repeats).
+    # Note: if RunManifest.created_at is added later, it must also use UTC to prevent
+    # silent disagreement between folder name and manifest.
     stamp = (now or datetime.now(UTC)).strftime("%Y%m%d-%H%M%S")
     return f"{stamp}_{workflow}_{slug}"
 
@@ -56,7 +60,17 @@ class RunStore:
     def write_plan_version(self, content: str) -> Path:
         planning = self.root / "planning"
         existing = sorted(planning.glob("plan-v*.md"))
-        next_version = len(existing) + 1
+
+        # Parse version numbers from filenames and find the maximum.
+        # Stray files like plan-vX.md (non-integer) are ignored.
+        max_version = 0
+        for path in existing:
+            match = re.match(r"plan-v(\d+)\.md$", path.name)
+            if match:
+                version = int(match.group(1))
+                max_version = max(max_version, version)
+
+        next_version = max_version + 1
         target = planning / f"plan-v{next_version}.md"
         if target.exists():
             raise PlanOverwriteError(f"{target} already exists; plans are immutable")

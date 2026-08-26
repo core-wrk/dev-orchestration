@@ -4,7 +4,6 @@ from datetime import UTC, datetime
 import pytest
 
 from dev_orchestration.artifacts.store import (
-    PlanOverwriteError,
     RunStore,
     new_run_id,
     slugify,
@@ -70,10 +69,35 @@ def test_events_append_one_json_object_per_line(store):
     assert "ts" in json.loads(lines[0])
 
 
-def test_version_gap_is_detected(store):
-    """When plan-v1.md and plan-v3.md exist, len+1 targets plan-v3.md which exists."""
+def test_version_gap_finds_max_not_len(store):
+    """Version numbering is max(existing)+1, not len(existing)+1.
+
+    With plan-v1.md and plan-v5.md present, the next version should be v6,
+    not v3 (which is what len(existing)+1 would give).
+    """
     planning = store.root / "planning"
     (planning / "plan-v1.md").write_text("# Plan v1\n", encoding="utf-8")
-    (planning / "plan-v3.md").write_text("# Plan v3\n", encoding="utf-8")
-    with pytest.raises(PlanOverwriteError):
-        store.write_plan_version("# Plan v2\n")
+    (planning / "plan-v5.md").write_text("# Plan v5\n", encoding="utf-8")
+    result = store.write_plan_version("# Plan v6\n")
+    assert result.name == "plan-v6.md"
+    assert result.read_text() == "# Plan v6\n"
+
+
+def test_sequential_plans_still_work(store):
+    """Sequential writes v1, then v2, then v3."""
+    first = store.write_plan_version("# Plan v1\n")
+    second = store.write_plan_version("# Plan v2\n")
+    third = store.write_plan_version("# Plan v3\n")
+    assert first.name == "plan-v1.md"
+    assert second.name == "plan-v2.md"
+    assert third.name == "plan-v3.md"
+
+
+def test_stray_files_do_not_crash_version_count(store):
+    """A file named plan-vX.md (non-integer) is ignored in version counting."""
+    planning = store.root / "planning"
+    (planning / "plan-v1.md").write_text("# Plan v1\n", encoding="utf-8")
+    (planning / "plan-vX.md").write_text("# Not a version\n", encoding="utf-8")
+    result = store.write_plan_version("# Plan v2\n")
+    assert result.name == "plan-v2.md"
+    assert result.read_text() == "# Plan v2\n"
