@@ -1,9 +1,14 @@
+from datetime import UTC, datetime
 from pathlib import Path
+
+import pytest
 
 from dev_orchestration.adapters.base import AgentRequest
 from dev_orchestration.adapters.codex import (
     CODEX_BUNDLE_PATH,
+    DEFAULT_TIMEOUT_SECONDS,
     CodexAdapter,
+    _last_json_object,
     discover_codex,
     parse_version,
 )
@@ -128,3 +133,93 @@ def test_healthcheck_reports_version_and_capabilities(monkeypatch):
 class _FakeCompleted:
     def __init__(self, stdout: str) -> None:
         self.stdout = stdout
+
+class _FakeProcess:
+    def __init__(self, stdout: str, returncode: int = 0) -> None:
+        self.stdout = stdout
+        self.returncode = returncode
+
+
+def _capture_subprocess_run(monkeypatch, *, stdout="", returncode=0):
+    """Monkeypatch subprocess.run inside the codex module and capture the call."""
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        return _FakeProcess(stdout=stdout, returncode=returncode)
+
+    monkeypatch.setattr("dev_orchestration.adapters.codex.subprocess.run", fake_run)
+    return calls
+
+
+def test_run_passes_the_requests_timeout_seconds(monkeypatch):
+    calls = _capture_subprocess_run(monkeypatch, stdout='{"ok": true}')
+    adapter = CodexAdapter(binary=Path("/bin/codex"))
+    request = AgentRequest(
+        role="planner", prompt="p", cwd=Path("/w"), timeout_seconds=42
+    )
+    adapter.run(request)
+    assert len(calls) == 1
+    _, kwargs = calls[0]
+    assert kwargs["timeout"] == 42
+
+
+def test_run_falls_back_to_the_default_timeout_when_unset(monkeypatch):
+    calls = _capture_subprocess_run(monkeypatch, stdout='{"ok": true}')
+    adapter = CodexAdapter(binary=Path("/bin/codex"))
+    request = AgentRequest(role="planner", prompt="p", cwd=Path("/w"))
+    assert request.timeout_seconds is None
+    adapter.run(request)
+    _, kwargs = calls[0]
+    assert kwargs["timeout"] == DEFAULT_TIMEOUT_SECONDS
+
+
+def test_run_passes_cwd_from_the_request(monkeypatch):
+    calls = _capture_subprocess_run(monkeypatch, stdout='{"ok": true}')
+    adapter = CodexAdapter(binary=Path("/bin/codex"))
+    request = AgentRequest(role="planner", prompt="p", cwd=Path("/some/work/dir"))
+    adapter.run(request)
+    _, kwargs = calls[0]
+    assert kwargs["cwd"] == Path("/some/work/dir")
+
+
+def test_run_maps_agent_result_fields_correctly(monkeypatch):
+    _capture_subprocess_run(monkeypatch, stdout='{"verdict": "PASS"}', returncode=7)
+    adapter = CodexAdapter(binary=Path("/bin/codex"))
+    request = AgentRequest(
+        role="planner", prompt="p", cwd=Path("/w"), model_alias="sol"
+    )
+    before = datetime.now(UTC)
+    result = adapter.run(request)
+    after = datetime.now(UTC)
+
+    assert result.provider == "codex"
+    assert result.model == "gpt-5.6-sol"
+    assert result.exit_code == 7
+    assert result.output == {"verdict": "PASS"}
+    assert result.started_at.tzinfo is not None
+    assert result.completed_at.tzinfo is not None
+    assert before <= result.started_at <= result.completed_at <= after
+
+
+def test_run_falls_back_to_raw_stdout_when_nothing_parses(monkeypatch):
+    _capture_subprocess_run(monkeypatch, stdout="not json at all\n")
+    adapter = CodexAdapter(binary=Path("/bin/codex"))
+    request = AgentRequest(role="planner", prompt="p", cwd=Path("/w"))
+    result = adapter.run(request)
+    assert result.output == "not json at all\n"
+
+
+@pytest.mark.parametrize(
+    "stdout,expected",
+    [
+        ('{"a": 1}\n{"b": 2}\n', {"b": 2}),
+        ("", None),
+        ("not json\nstill not json\n", None),
+        ('{"a": 1}\n[1, 2, 3]\n', {"a": 1}),
+        ('{"a": 1}\n42\n', {"a": 1}),
+    ],
+)
+def test_last_json_object_edge_cases(stdout, expected):
+    assert _last_json_object(stdout) == expected
+
