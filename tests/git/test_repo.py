@@ -2,6 +2,7 @@ import subprocess
 
 import pytest
 
+from dev_orchestration.git.guards import ProhibitedOperationError
 from dev_orchestration.git.repo import DirtyWorktreeError, GitRepo, discover_repo
 
 
@@ -74,3 +75,27 @@ def test_discover_repo_walks_up_from_a_subdirectory(repo):
     nested = repo.root / "deep" / "nested"
     nested.mkdir(parents=True)
     assert discover_repo(nested).root == repo.root
+
+
+def test_run_git_rejects_push(repo):
+    with pytest.raises(ProhibitedOperationError):
+        repo.run_git("push", "origin", "main")
+
+
+def test_run_git_rejects_merge(repo):
+    with pytest.raises(ProhibitedOperationError):
+        repo.run_git("merge", "other")
+
+
+def test_run_git_rejects_a_dynamically_built_push_verb(repo):
+    # A literal-string source scan cannot see this verb being assembled at
+    # runtime; the check inside run_git compares the actual string value,
+    # so it catches this even though no source file contains "push".
+    verb = "pu" + "sh"
+    with pytest.raises(ProhibitedOperationError):
+        repo.run_git(verb)
+
+
+def test_run_git_still_permits_ordinary_operations(repo):
+    assert repo.run_git("status", "--porcelain") == ""
+    assert len(repo.run_git("rev-parse", "HEAD")) == 40

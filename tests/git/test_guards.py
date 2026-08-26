@@ -9,12 +9,22 @@ SOURCE_ROOT = Path(__file__).resolve().parents[2] / "src"
 
 # guards.py raises on push/merge/deploy by design and legitimately contains
 # the literals; config/models.py holds the deny-list that *rejects* these
-# tokens, which is the inverse of invoking them. Both are exempt from the
-# invocation scan below. Exemptions are by relative path, not bare filename,
-# so an unrelated future models.py elsewhere is still scanned.
+# tokens, which is the inverse of invoking them; repo.py contains the
+# runtime prohibited-verb check ({"push": guards.push, "merge": guards.merge})
+# that *rejects* those verbs at call time. None of these is an invocation.
+# Exemptions are by relative path, not bare filename, so an unrelated future
+# module of the same name is still scanned. Each exemption below is paired
+# with a narrower, positive test that would fail if the file's actual
+# behavior regressed:
+#   - guards.py: test_prohibited_operations_raise
+#   - config/models.py: test_the_exempted_deny_list_still_contains_all_prohibited_tokens
+#     and test_the_exempted_config_module_has_no_subprocess_usage
+#   - git/repo.py: tests/git/test_repo.py::test_run_git_rejects_push /
+#     test_run_git_rejects_merge / test_run_git_rejects_a_dynamically_built_push_verb
 EXEMPT_RELATIVE_PATHS = {
     Path("dev_orchestration/git/guards.py"),
     Path("dev_orchestration/config/models.py"),
+    Path("dev_orchestration/git/repo.py"),
 }
 
 
@@ -52,6 +62,28 @@ def test_the_exempted_deny_list_still_contains_all_prohibited_tokens():
         "merge",
         "release",
     }
+
+
+def test_the_exempted_config_module_has_no_subprocess_usage():
+    # The literal-scan exemption for config/models.py only excuses it from
+    # the "push"/"merge" token scan because it is a deny-list, not an
+    # invocation. That exemption is a whole-file blind spot unless we also
+    # prove the file never touches subprocess at all: it is a pure Pydantic
+    # module and has no legitimate reason to invoke anything.
+    text = (SOURCE_ROOT / "dev_orchestration" / "config" / "models.py").read_text()
+    assert "subprocess" not in text
+
+
+def test_shell_equals_true_appears_nowhere():
+    # subprocess.run("git push", shell=True) contains no adjacent-quoted
+    # "push"/"merge" literal, so it walks straight through the scan above.
+    # shell=True is separately forbidden by the plan's global constraints
+    # (every subprocess call uses an argument array); enforce it here, with
+    # no exemptions — no file has a legitimate reason to use it.
+    offenders = [
+        str(path) for path in SOURCE_ROOT.rglob("*.py") if "shell=True" in path.read_text()
+    ]
+    assert offenders == []
 
 
 def test_the_sandbox_bypass_flag_appears_nowhere():

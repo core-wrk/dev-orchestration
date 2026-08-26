@@ -4,7 +4,20 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from dev_orchestration.git import guards
+
 GIT_TIMEOUT_SECONDS = 120
+
+# run_git is public and takes unrestricted *args, so any caller could in
+# principle ask it to push or merge. This is the runtime enforcement of
+# that prohibition: it works even against a verb built dynamically at call
+# time (e.g. "pu" + "sh"), which a static source scan cannot see. There is
+# no legitimate call in this framework to either verb, so there is nothing
+# valid to break.
+_PROHIBITED_VERBS = {
+    "push": guards.push,
+    "merge": guards.merge,
+}
 
 
 class GitCommandError(RuntimeError):
@@ -20,6 +33,8 @@ class GitRepo:
     root: Path
 
     def run_git(self, *args: str) -> str:
+        if args and args[0] in _PROHIBITED_VERBS:
+            _PROHIBITED_VERBS[args[0]]()
         proc = subprocess.run(
             ["git", "-C", str(self.root), *args],
             capture_output=True,
