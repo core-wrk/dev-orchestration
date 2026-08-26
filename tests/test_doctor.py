@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 import pytest
 
+import dev_orchestration.doctor as doctor_module
 from dev_orchestration.adapters.base import AdapterStatus, FakeAdapter
 from dev_orchestration.doctor import Check, render, run_checks
 
@@ -92,6 +93,7 @@ def test_cwd_outside_a_git_repository_fails_the_repository_check(tmp_path):
     checks = run_checks(tmp_path, codex=FakeAdapter(), claude=FakeAdapter())
     check = _by_name(checks, "git repository")
     assert check.ok is False
+    assert "git init" in check.detail
 
 
 def test_clean_repo_without_project_config_fails_and_names_init(tmp_path):
@@ -136,8 +138,13 @@ def test_valid_project_config_reports_scope_and_each_validation_command(tmp_path
     assert config_check.ok is True
     assert "internal_utility" in config_check.detail
 
+    # VALID_PROJECT_YAML declares include=["src/**"] and exclude=["vendor/**"].
+    # Assert the detail names include/exclude in the correct positions, so a
+    # mutation that swaps them (or renders both lists as a single unordered
+    # blob) is caught rather than merely "both strings appear somewhere".
     scope_check = _by_name(checks, "scope fence")
     assert scope_check.ok is True
+    assert scope_check.detail == "include=['src/**'] exclude=['vendor/**']"
 
     lint_check = _by_name(checks, "validation:lint")
     assert lint_check.ok is True
@@ -146,6 +153,33 @@ def test_valid_project_config_reports_scope_and_each_validation_command(tmp_path
     test_check = _by_name(checks, "validation:test")
     assert test_check.ok is True
     assert test_check.detail == "pytest"
+
+
+def test_agents_md_present_reports_ok_with_no_detail(tmp_path):
+    _init_repo(tmp_path)
+    (tmp_path / ".ai").mkdir()
+    (tmp_path / ".ai" / "project.yaml").write_text(VALID_PROJECT_YAML)
+    (tmp_path / "AGENTS.md").write_text("# AGENTS\n")
+    _commit_all(tmp_path)
+
+    checks = run_checks(tmp_path, codex=FakeAdapter(), claude=FakeAdapter())
+
+    agents_check = _by_name(checks, "AGENTS.md")
+    assert agents_check.ok is True
+    assert agents_check.detail == ""
+
+
+def test_agents_md_missing_reports_next_action(tmp_path):
+    _init_repo(tmp_path)
+    (tmp_path / ".ai").mkdir()
+    (tmp_path / ".ai" / "project.yaml").write_text(VALID_PROJECT_YAML)
+    _commit_all(tmp_path)
+
+    checks = run_checks(tmp_path, codex=FakeAdapter(), claude=FakeAdapter())
+
+    agents_check = _by_name(checks, "AGENTS.md")
+    assert agents_check.ok is False
+    assert "dev-orch init" in agents_check.detail
 
 
 def test_malformed_project_yaml_fails_config_check_without_raising(tmp_path):
@@ -181,6 +215,9 @@ def test_unavailable_codex_fails_codex_available_check(tmp_path):
     checks = run_checks(tmp_path, codex=stub, claude=FakeAdapter())
     check = _by_name(checks, "codex available")
     assert check.ok is False
+    # No "codex goal mode" check should be appended at all when codex itself
+    # is unavailable — there is nothing to report a goal-mode capability of.
+    assert "codex goal mode" not in [c.name for c in checks]
 
 
 def test_codex_with_goals_feature_but_no_headless_entry_point_reports_it(tmp_path):
@@ -196,3 +233,72 @@ def test_codex_with_goals_feature_but_no_headless_entry_point_reports_it(tmp_pat
     check = _by_name(checks, "codex goal mode")
     assert check.ok is False
     assert "no headless entry point" in check.detail
+
+
+def test_codex_without_goals_feature_states_the_exec_fallback(tmp_path):
+    stub = _StubAdapter(
+        status=AdapterStatus(
+            name="codex",
+            available=True,
+            detail="codex 1.0",
+            capabilities={"goals_feature": False, "goal_headless": False},
+        )
+    )
+    checks = run_checks(tmp_path, codex=stub, claude=FakeAdapter())
+    check = _by_name(checks, "codex goal mode")
+    assert check.ok is False
+    assert "codex exec" in check.detail
+    # No user action is possible here (goal mode simply isn't present on this
+    # build); the detail states the consequence, not a fabricated fix.
+    assert "no headless goal mode" in check.detail
+
+
+# --- environment checks --------------------------------------------------
+
+
+def test_macos_check_passes_when_platform_reports_darwin(monkeypatch, tmp_path):
+    monkeypatch.setattr(doctor_module.platform, "system", lambda: "Darwin")
+    checks = run_checks(tmp_path, codex=FakeAdapter(), claude=FakeAdapter())
+    check = _by_name(checks, "macOS")
+    assert check.ok is True
+
+
+def test_macos_check_fails_on_a_non_darwin_platform(monkeypatch, tmp_path):
+    monkeypatch.setattr(doctor_module.platform, "system", lambda: "Linux")
+    checks = run_checks(tmp_path, codex=FakeAdapter(), claude=FakeAdapter())
+    check = _by_name(checks, "macOS")
+    assert check.ok is False
+
+
+def test_python_version_check_passes_for_a_supported_version(monkeypatch, tmp_path):
+    monkeypatch.setattr(doctor_module.sys, "version_info", (3, 14, 0, "final", 0))
+    checks = run_checks(tmp_path, codex=FakeAdapter(), claude=FakeAdapter())
+    check = _by_name(checks, "python >= 3.11")
+    assert check.ok is True
+
+
+def test_python_version_check_fails_for_an_unsupported_version(monkeypatch, tmp_path):
+    monkeypatch.setattr(doctor_module.sys, "version_info", (3, 9, 0, "final", 0))
+    checks = run_checks(tmp_path, codex=FakeAdapter(), claude=FakeAdapter())
+    check = _by_name(checks, "python >= 3.11")
+    assert check.ok is False
+
+
+def test_git_available_check_passes_when_git_is_on_path(monkeypatch, tmp_path):
+    monkeypatch.setattr(doctor_module.shutil, "which", lambda name: "/usr/bin/git")
+    checks = run_checks(tmp_path, codex=FakeAdapter(), claude=FakeAdapter())
+    check = _by_name(checks, "git available")
+    assert check.ok is True
+
+
+def test_git_available_check_fails_and_names_install_when_git_is_absent(monkeypatch, tmp_path):
+    monkeypatch.setattr(doctor_module.shutil, "which", lambda name: None)
+    checks = run_checks(tmp_path, codex=FakeAdapter(), claude=FakeAdapter())
+    check = _by_name(checks, "git available")
+    assert check.ok is False
+    assert check.detail == "install git"
+
+
+def test_git_version_reports_install_git_when_git_is_absent(monkeypatch):
+    monkeypatch.setattr(doctor_module.shutil, "which", lambda name: None)
+    assert doctor_module._git_version() == "install git"

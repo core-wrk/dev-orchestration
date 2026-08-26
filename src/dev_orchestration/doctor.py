@@ -44,7 +44,7 @@ def run_checks(
         Check("git available", shutil.which("git") is not None, _git_version()),
     ]
 
-    codex = codex or CodexAdapter(binary=discover_codex())
+    codex = CodexAdapter(binary=discover_codex()) if codex is None else codex
     codex_status = codex.healthcheck()
     checks.append(Check("codex available", codex_status.available, codex_status.detail))
     if codex_status.available:
@@ -55,11 +55,11 @@ def run_checks(
                 caps.get("goal_headless", False),
                 "goals feature enabled but no headless entry point; execution uses `codex exec`"
                 if caps.get("goals_feature")
-                else "not available",
+                else "no headless goal mode; execution uses `codex exec`",
             )
         )
 
-    claude = claude or ClaudeAdapter()
+    claude = ClaudeAdapter() if claude is None else claude
     claude_status = claude.healthcheck()
     checks.append(Check("claude available", claude_status.available, claude_status.detail))
     checks.extend(_repository_checks(cwd))
@@ -79,7 +79,13 @@ def _repository_checks(cwd: Path) -> list[Check]:
     try:
         repo = discover_repo(cwd)
     except GitCommandError:
-        return [Check("git repository", False, f"{cwd} is not inside a git repository")]
+        return [
+            Check(
+                "git repository",
+                False,
+                f"{cwd} is not inside a git repository; run `git init` or re-run from inside one.",
+            )
+        ]
 
     checks = [Check("git repository", True, str(repo.root))]
 
@@ -120,11 +126,12 @@ def _repository_checks(cwd: Path) -> list[Check]:
             f"include={fence.include} exclude={fence.exclude}",
         )
     )
+    agents_md_ok = (repo.root / "AGENTS.md").exists()
     checks.append(
         Check(
             "AGENTS.md",
-            (repo.root / "AGENTS.md").exists(),
-            "missing; run `dev-orch init`",
+            agents_md_ok,
+            "" if agents_md_ok else "missing; run `dev-orch init`",
         )
     )
     for name, command in config.validation.items():
