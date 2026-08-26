@@ -1,6 +1,16 @@
+from dataclasses import FrozenInstanceError
+from datetime import UTC, datetime
 from pathlib import Path
 
-from dev_orchestration.adapters.base import AdapterStatus, AgentAdapter, AgentRequest, FakeAdapter
+import pytest
+
+from dev_orchestration.adapters.base import (
+    AdapterStatus,
+    AgentAdapter,
+    AgentRequest,
+    AgentResult,
+    FakeAdapter,
+)
 
 
 def test_fake_adapter_satisfies_the_protocol():
@@ -31,3 +41,32 @@ def test_adapter_status_capabilities_independent_instances():
     status2 = AdapterStatus(name="b", available=True)
     # These should be different dict objects
     assert status1.capabilities is not status2.capabilities
+
+
+def test_agent_request_is_frozen():
+    """Verify AgentRequest is immutable after construction."""
+    request = AgentRequest(role="test", prompt="test", cwd=Path("."))
+    with pytest.raises(FrozenInstanceError):
+        request.role = "mutated"
+
+
+def test_agent_result_is_frozen():
+    """Verify AgentResult is immutable after construction."""
+    now = datetime.now(UTC)
+    result = AgentResult(
+        provider="fake",
+        model=None,
+        exit_code=0,
+        output={},
+        started_at=now,
+        completed_at=now,
+    )
+    with pytest.raises(FrozenInstanceError):
+        result.exit_code = 1
+
+
+def test_adapter_status_is_frozen():
+    """Verify AdapterStatus is immutable after construction."""
+    status = AdapterStatus(name="test", available=True)
+    with pytest.raises(FrozenInstanceError):
+        status.available = False
