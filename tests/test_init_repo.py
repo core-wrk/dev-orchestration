@@ -45,6 +45,22 @@ def test_initialize_refuses_to_overwrite_existing_context_md(tmp_path):
     assert (tmp_path / ".ai" / "context.md").read_text() == "hand-authored notes\n"
 
 
+def test_initialize_is_atomic_on_partial_pre_existence(tmp_path):
+    # A half-initialized repository is worse than an uninitialized one. If only
+    # one target already exists, initialize_repo must check every target before
+    # writing any of them -- it must not write AGENTS.md or context.md and then
+    # discover project.yaml is blocked.
+    (tmp_path / ".ai").mkdir()
+    (tmp_path / ".ai" / "project.yaml").write_text("hand-authored: true\n")
+
+    with pytest.raises(FileExistsRefusal):
+        initialize_repo(tmp_path, CONFIG)
+
+    assert not (tmp_path / "AGENTS.md").exists()
+    assert not (tmp_path / ".ai" / "context.md").exists()
+    assert (tmp_path / ".ai" / "project.yaml").read_text() == "hand-authored: true\n"
+
+
 def test_force_allows_regeneration(tmp_path):
     # --force regenerates AGENTS.md and .ai/project.yaml (both rendered wholly
     # from config, so nothing is lost by rewriting them). It never regenerates
@@ -77,6 +93,24 @@ def test_render_project_yaml_round_trips_to_an_equal_config():
     assert restored == CONFIG
 
 
+def test_written_project_yaml_uses_the_class_alias_on_disk(tmp_path):
+    # ProjectMeta sets populate_by_name=True, so revalidating through the model
+    # reconstructs an equal object whether the key on disk is `class:` or
+    # `project_class:` -- that permissiveness is exactly what would hide a
+    # by_alias regression. Assert the raw key in the loaded mapping instead of
+    # going back through model_validate.
+    initialize_repo(tmp_path, CONFIG)
+    loaded = yaml.safe_load((tmp_path / ".ai" / "project.yaml").read_text())
+    assert "class" in loaded["project"]
+    assert "project_class" not in loaded["project"]
+
+
+def test_render_project_yaml_uses_the_class_alias_on_disk():
+    loaded = yaml.safe_load(render_project_yaml(CONFIG))
+    assert "class" in loaded["project"]
+    assert "project_class" not in loaded["project"]
+
+
 def test_agents_md_states_the_scope_fence(tmp_path):
     initialize_repo(tmp_path, CONFIG)
     text = (tmp_path / "AGENTS.md").read_text()
@@ -99,6 +133,26 @@ def test_agents_md_places_include_and_exclude_in_the_correct_scope_side(tmp_path
     for excluded in CONFIG.scope.exclude:
         assert excluded in never_modifiable, f"{excluded} missing from the never-modifiable list"
         assert excluded not in modifiable, f"{excluded} leaked into the modifiable list"
+
+
+def test_agents_md_names_every_prohibited_action(tmp_path):
+    # The whole file is generated, so no other test catches a template
+    # regression that silently drops a prohibition. Assert each one by name,
+    # plus the sentence protecting uncommitted work, rather than trusting the
+    # heading alone.
+    initialize_repo(tmp_path, CONFIG)
+    text = (tmp_path / "AGENTS.md").read_text().lower()
+    for prohibition in (
+        "push",
+        "force push",
+        "remote branch deletion",
+        "merge",
+        "deploy",
+        "publish",
+        "production data mutation",
+    ):
+        assert prohibition in text, f"missing prohibition: {prohibition}"
+    assert "uncommitted work is never modified, stashed, or worked around" in text
 
 
 def test_agents_md_answers_the_six_required_sections(tmp_path):
