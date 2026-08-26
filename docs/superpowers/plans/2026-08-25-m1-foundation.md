@@ -28,6 +28,11 @@ Every task's requirements implicitly include this section.
 - **Worktree root:** `~/.dev-orchestration/worktrees/<repo>/<run-id>/`.
 - **Run artifacts:** `.ai/runs/<run-id>/` inside the managed repository.
 - TDD throughout. Commit after each task. Never push.
+- **Encode invariants, not intelligence.** Generated agent-facing files carry only
+  what an agent cannot safely infer. Anything the repository demonstrates —
+  structure, conventions, framework choice, test layout — is read from the
+  repository, never restated. See `CONTEXT-MINIMIZATION-AUDIT.md` and
+  `ARCHITECTURE.md` section 3 in the spec package.
 
 ---
 
@@ -2194,8 +2199,26 @@ git commit -m "feat(doctor): environment and repository contract checks"
 
 **Files:**
 - Create: `src/dev_orchestration/init_repo.py`
+- Modify: `src/dev_orchestration/config/models.py` (add the `ContextPolicy` block)
 - Modify: `src/dev_orchestration/cli.py`
-- Test: `tests/test_init_repo.py`
+- Test: `tests/test_init_repo.py`, `tests/config/test_models.py`
+
+**Added by the context-minimization directive.** `ProjectConfig` gains a
+`context` block per `CONFIGURATION.md` §6:
+
+```python
+class ContextPolicy(BaseModel):
+    persistent: list[str] = Field(default_factory=lambda: ["AGENTS.md", ".ai/context.md"])
+    on_demand: dict[str, str] = Field(default_factory=dict)
+    include_prior_artifacts: Literal["relevant_only", "none"] = "relevant_only"
+    conflict_policy: Literal["fail_closed", "escalate"] = "fail_closed"
+    persistent_budget_bytes: int = 8192
+```
+
+`ProjectConfig` gains `context: ContextPolicy = Field(default_factory=ContextPolicy)`.
+Add a test that it round-trips through `model_dump(by_alias=True, mode="json")`
+like the rest of the config, and one asserting the defaults above — the
+`fail_closed` default in particular is a safety choice, not a preference.
 
 **Interfaces:**
 - Consumes: `ProjectConfig`, `ProjectClass`, `GitRepo`.
@@ -2256,6 +2279,34 @@ def test_agents_md_states_the_scope_fence(tmp_path):
     text = (tmp_path / "AGENTS.md").read_text()
     assert "node_modules/" in text
     assert "npm run build" in text
+
+
+def test_agents_md_answers_the_six_required_questions(tmp_path):
+    initialize_repo(tmp_path, CONFIG)
+    text = (tmp_path / "AGENTS.md").read_text()
+    for heading in ("## Purpose", "## Never allowed autonomously",
+                    "## Escalate", "## Scope",
+                    "## Facts that cannot be inferred", "## Where authority lives",
+                    "## Validation"):
+        assert heading in text, f"missing section: {heading}"
+
+
+def test_agents_md_carries_no_generic_engineering_advice(tmp_path):
+    # The directive: encode invariants, not intelligence. These phrases would all
+    # be true of any competently-run repository and so are not invariants.
+    initialize_repo(tmp_path, CONFIG)
+    text = (tmp_path / "AGENTS.md").read_text().lower()
+    for banned in ("write clean", "modular", "maintainable", "best practice",
+                   "remember to test", "inspect the codebase before"):
+        assert banned not in text, f"generic advice leaked into AGENTS.md: {banned}"
+
+
+def test_agents_md_stays_within_the_persistent_budget(tmp_path):
+    initialize_repo(tmp_path, CONFIG)
+    size = (tmp_path / "AGENTS.md").stat().st_size
+    assert size <= CONFIG.context.persistent_budget_bytes, (
+        f"AGENTS.md is {size} bytes, over the configured persistent budget"
+    )
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -2291,61 +2342,97 @@ def render_agents_md(config: ProjectConfig) -> str:
     scope_out = "\n".join(f"- `{p}`" for p in config.scope.exclude) or "- (none)"
     commands = (
         "\n".join(f"- `{name}`: `{cmd.command}`" for name, cmd in config.validation.items())
-        or "- (none configured)"
+        or "- (none proven yet — an unproven command is not a gate)"
     )
     return f"""# AGENTS.md — {config.project.name}
 
-Canonical agent instructions for this repository. Vendor-specific files
-(`CLAUDE.md` and equivalents) are thin pointers to this document, not a
-second source of truth.
+Persistent agent contract. Carried on every invocation, so everything here earns
+its place by being an invariant — something an agent cannot safely infer, whose
+violation would cost something.
 
-## Project
+Generic engineering practice is deliberately absent, as is anything this
+repository already demonstrates. Read the repository for structure, conventions,
+framework choice and test layout.
 
-- **Class:** `{config.project.project_class}`
-- **Orchestration config:** `.ai/project.yaml`
-- **Repository context:** `.ai/context.md`
+## Purpose
+
+_One or two sentences: what this repository is for. Written during onboarding._
+
+## Never allowed autonomously
+
+- push, force push, or remote branch deletion;
+- merge;
+- deploy or publish;
+- production data mutation.
+
+Uncommitted work is never modified, stashed, or worked around.
+
+## Escalate rather than improvise
+
+Stop and escalate on changes crossing a security, privacy, data, payment,
+architecture, or approved-scope boundary.
 
 ## Scope
 
-Agents may modify only these paths:
+Modifiable:
 
 {scope_in}
 
-Agents must never modify these paths:
+Never modifiable:
 
 {scope_out}
 
-The fence governs modification, not reference: repository code may read
-excluded paths legitimately.
+The fence governs modification, not reference — repository code may legitimately
+read excluded paths.
 
-## Validation commands
+## Facts that cannot be inferred
+
+See `.ai/context.md`. If it is empty, nothing about this repository has yet been
+found that the code does not already show.
+
+## Where authority lives
+
+| Question | Source |
+|---|---|
+| Orchestration policy for this repo | `.ai/project.yaml` |
+| Non-inferable repository facts | `.ai/context.md` |
+| What the code currently does | the repository |
+| Product intent, architecture decisions | `docs/`, retrieved on demand |
+
+Documents under `docs/` are eligible, not automatic. A task must have a reason to
+load one.
+
+## Validation
 
 {commands}
 
-Never register a command that deploys, publishes, or writes to a remote.
-
-## Boundaries
-
-- No pushes, merges, or deployments are ever performed automatically.
-- Uncommitted work is never modified, stashed, or branched around.
-- Changes crossing a security, privacy, data, payment, or architecture
-  boundary stop and escalate rather than improvise.
+A command that deploys, publishes, or writes to a remote can never be registered
+as a validation gate; the deny-list is not overridable.
 
 ## Open decision
 
 Ownership of planning state between `.ai/runs/` (dev-orchestration) and
-`.planning/` (GSD) is not yet settled. Until it is, treat `.ai/runs/` as the
-record of what a dev-orchestration run did, and do not assume either system
-enforces the other's boundaries.
+`.planning/` (GSD) is unsettled. Treat `.ai/runs/` as the record of what a
+dev-orchestration run did, and do not assume either system enforces the other's
+boundaries.
 """
 
 
 def render_context_md(config: ProjectConfig) -> str:
     return f"""# Repository context — {config.project.name}
 
-Orchestration notes that belong neither in product nor architecture
-documentation: local setup quirks, common pitfalls, generated-code
-boundaries, and repository-specific escalation triggers.
+Facts that are **both important and not safely inferable** from the code. That
+conjunction is the whole filter.
+
+Belongs here: a setup step with no trace in the repository; a pitfall that has
+already caused a real failure; a generated-code boundary that looks hand-written;
+a test-environment constraint invisible from the test files; a validation command
+proven to work — or proven not to.
+
+Does not belong here: directory structure, naming conventions, which framework is
+in use, how tests are organised. The repository shows all of these.
+
+If a reader could learn it by opening the repository, leave it out.
 
 _Populate during onboarding._
 """
@@ -2440,6 +2527,28 @@ Expected on the environment verified 2026-08-25: pytest collects 639 tests; **ru
 
 A command that does not run is not policy. Configure `test` only, and record ruff's absence in `.ai/context.md`. Do **not** add a `lint` entry.
 
+- [ ] **Step 1b: Inventory the agent-facing surface**
+
+The context-minimization directive requires onboarding to audit what agents are
+already being told, which is a different question from whether documentation is
+accurate. For each pilot repo, record in `.ai/context.md` under an
+`## Agent surface (at onboarding)` heading:
+
+```bash
+cd <repo>
+ls -a | grep -iE 'AGENTS|CLAUDE|\.codex|\.cursor|\.superpowers|\.planning'
+wc -c CLAUDE.md AGENTS.md 2>/dev/null
+```
+
+Note specifically: which agent-facing files exist, their total byte size (this is
+the persistent context surface carried on every invocation), any rule stated in
+more than one of them, and any instruction that merely restates something the
+repository already demonstrates.
+
+Expected for `helmfast-OS`: a substantial `CLAUDE.md` acting as a doc index, plus
+`.superpowers/sdd/` artifacts from a prior spec-driven run. Record the size
+before reducing it to a pointer, so the reduction is measurable.
+
 - [ ] **Step 2: Write helmfast-OS's config to a scratch file**
 
 ```yaml
@@ -2469,6 +2578,14 @@ scope:
     - "data-templates/"
     - "var/"
     - ".venv/"
+context:
+  persistent:
+    - AGENTS.md
+    - .ai/context.md
+  on_demand:
+    specifications: planning/
+  include_prior_artifacts: relevant_only
+  conflict_policy: fail_closed
 validation:
   test:
     command: ".venv/bin/python -m pytest"
@@ -2558,6 +2675,15 @@ scope:
     - "docs/"
     - "README.md"
   exclude: []
+context:
+  persistent:
+    - AGENTS.md
+    - .ai/context.md
+  on_demand:
+    product: docs/product/
+    architecture: docs/architecture/
+  include_prior_artifacts: relevant_only
+  conflict_policy: fail_closed
 validation: {}
 git:
   branch_prefix: "ai/"
@@ -2603,6 +2729,14 @@ scope:
     - "dist/"
     - ".astro/"
     - ".wrangler/"
+context:
+  persistent:
+    - AGENTS.md
+    - .ai/context.md
+  on_demand:
+    operations: docs/
+  include_prior_artifacts: relevant_only
+  conflict_policy: fail_closed
 validation:
   build:
     command: "npm run build"
@@ -2680,3 +2814,6 @@ cd /Users/andrewodonnell/GitRepos/dev-orchestration
 - [ ] All three pilot repos carry `AGENTS.md`, `.ai/project.yaml`, `.ai/context.md`
 - [ ] `helmfast-OS/CLAUDE.md` is a pointer; the original is archived; no existing file moved
 - [ ] `helmfast-OS`'s uncommitted `pipeline/ui/` work is byte-identical to before onboarding
+- [ ] Each repo's `AGENTS.md` answers the six required questions and is within the persistent budget
+- [ ] The agent surface at onboarding is recorded in each `.ai/context.md`, with before/after byte sizes
+- [ ] No generated `AGENTS.md` contains generic engineering advice (asserted by test in Task 14)

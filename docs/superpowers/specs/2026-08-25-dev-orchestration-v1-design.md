@@ -297,6 +297,54 @@ depending on provider availability.
 
 ---
 
+## 10a. Amendment — context minimization (2026-08-26)
+
+`CONTEXT-MINIMIZATION-AUDIT.md` was approved after this design was written and
+applied across all 13 specification files on branch `audit/context-minimization`
+(spec package commit `8c1c3d6`). Its governing principle now binds this build:
+
+> **Encode invariants, not intelligence.**
+
+### What changed for M1
+
+Most of M1 is unaffected — it builds configuration, git isolation, artifacts and
+adapters, none of which assemble prompts. Three things did change:
+
+- **Task 14** now also extends `ProjectConfig` with a `ContextPolicy` block
+  (`CONFIGURATION.md` §6), and its generated `AGENTS.md` template was rewritten
+  to the six-question contract in `DOCUMENTATION-STANDARD.md` §4. Three new
+  tests enforce it, including one asserting no generic engineering advice leaks
+  into a generated file and one holding it within the persistent byte budget.
+- **Task 15** gained an agent-surface inventory step, recording what each pilot
+  repo already tells its agents — and its size — before onboarding reduces it.
+- **The plan's Global Constraints** carry the principle, so every remaining
+  implementer receives it.
+
+Tasks 1–11 were reviewed against the directive and need no rework. The one
+forward-looking interface change — `AgentRequest.context: ContextPacket | None`
+— is additive and lands with the assembler, not now.
+
+### What deferred to M2, and why
+
+The context assembler itself is **Phase 5** of the specification's build
+sequence, which sits after adapters and before the workflow loop. That is M2
+territory: M1 has no stage that constructs a prompt, so building an assembler now
+would produce an untestable component with no caller.
+
+The audit's own §13 warns against turning minimization into an over-engineered
+subsystem. Deterministic path and category selection is the V1 mechanism; vector
+stores, embeddings and retrieval scoring are explicitly excluded until pilot
+evidence justifies them.
+
+### Two spec drifts closed
+
+The audit surfaced two controls that existed in **code but not in the
+specification** — the validation-command deny-list and the scope fence, both
+added during M1 as rulings. Both are now written into `CONFIGURATION.md`. The
+specification and the implementation agree again.
+
+---
+
 ## 11. Open decisions
 
 ### 11.1 GSD boundary — deferred to post-M3
@@ -325,7 +373,19 @@ Note also that `helmfast-OS` already carries two prior trails — `.superpowers/
 hand-written `planning/` folder. Any eventual consolidation should account for four
 systems, not two.
 
-### 11.2 Codex alpha instability
+### 11.2 Does minimization actually help?
+
+The design now asserts that smaller, scoped context produces better runs. That is
+a hypothesis, not a measured result, and it can fail in the other direction: an
+agent starved of a constraint fails just as surely as one that drowned in
+irrelevant material.
+
+Two mechanisms exist to answer it from evidence rather than impression — the
+`exclusions` field recorded on every context packet, and the pilot's context
+quality questions, which explicitly ask whether any failure was caused by
+withheld context. Neither is exercised until M2 and M3.
+
+### 11.3 Codex alpha instability
 
 The installed build is `0.146.0-alpha.9.2`, bundled inside a desktop application that
 auto-updates. Its `exec` contract may change without notice. Mitigated — not eliminated —
@@ -337,9 +397,9 @@ version in every manifest.
 ## 12. Out of scope for this build
 
 Deferred to V1.1, with pilot evidence informing each: the human approval gate
-(`IMPLEMENTATION-PLAN.md` phase 7); `docs audit` / `docs migrate` / `docs check` tooling
-(phase 13); the `substantial` and `high_risk` tiers beyond their policy guardrails; composite `feature` / `bugfix` / `refactor` commands (phase 12); telemetry
-export (phase 17); self-hosting (phase 16); GitHub Actions.
+(`IMPLEMENTATION-PLAN.md` phase 8); `docs audit` / `docs migrate` / `docs check` tooling
+(phase 14); the `substantial` and `high_risk` tiers beyond their policy guardrails; composite `feature` / `bugfix` / `refactor` commands (phase 13); telemetry
+export (phase 18); self-hosting (phase 17); GitHub Actions.
 
 Permanently out of scope for V1, per the source specification: autonomous push, merge,
 deployment, package publication, production data mutation, and any web dashboard.
