@@ -56,3 +56,13 @@ def test_verifier_role_is_restricted_to_read_only_tools(registry):
 def test_adapter_for_returns_the_adapter_bound_to_the_role(registry):
     assert registry.adapter_for("planner") is registry.adapters["codex"]
     assert registry.adapter_for("plan_reviewer") is registry.adapters["claude"]
+
+
+def test_build_request_carries_reasoning_from_the_binding(registry):
+    request = registry.build_request("planner", prompt="plan", cwd=Path("/w"))
+    assert request.reasoning == "high"
+
+
+def test_build_request_reasoning_is_none_when_not_configured(registry):
+    request = registry.build_request("plan_reviewer", prompt="review", cwd=Path("/w"))
+    assert request.reasoning is None
