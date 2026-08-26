@@ -8,24 +8,39 @@ from dev_orchestration.git import guards
 SOURCE_ROOT = Path(__file__).resolve().parents[2] / "src"
 
 # guards.py raises on push/merge/deploy by design and legitimately contains
-# the literals; config/models.py holds the deny-list that *rejects* these
-# tokens, which is the inverse of invoking them; repo.py contains the
-# runtime prohibited-verb check ({"push": guards.push, "merge": guards.merge})
-# that *rejects* those verbs at call time. None of these is an invocation.
-# Exemptions are by relative path, not bare filename, so an unrelated future
-# module of the same name is still scanned. Each exemption below is paired
-# with a narrower, positive test that would fail if the file's actual
-# behavior regressed:
+# the literals, including the PROHIBITED_VERBS table that repo.py's
+# run_git() delegates to at call time; config/models.py holds the
+# deny-list that *rejects* these tokens, which is the inverse of invoking
+# them. Neither is an invocation. Deliberately NOT exempted: repo.py. It
+# was exempted in an earlier revision because it briefly held its own copy
+# of the prohibited-verb table, but that made it a blind spot — a real
+# subprocess.run(["git", "push", ...]) planted directly in repo.py's body
+# (bypassing run_git and its dispatch into guards entirely) was invisible
+# to both the scan and the runtime check. The verb table was moved into
+# guards.py specifically so repo.py could be dropped from this exemption
+# list and be fully covered by the scan below, with no literals left to
+# excuse. Exemptions are by relative path, not bare filename, so an
+# unrelated future module of the same name is still scanned. Each
+# exemption is paired with a narrower, positive test that would fail if
+# the file's actual behavior regressed:
 #   - guards.py: test_prohibited_operations_raise
 #   - config/models.py: test_the_exempted_deny_list_still_contains_all_prohibited_tokens
 #     and test_the_exempted_config_module_has_no_subprocess_usage
-#   - git/repo.py: tests/git/test_repo.py::test_run_git_rejects_push /
-#     test_run_git_rejects_merge / test_run_git_rejects_a_dynamically_built_push_verb
 EXEMPT_RELATIVE_PATHS = {
     Path("dev_orchestration/git/guards.py"),
     Path("dev_orchestration/config/models.py"),
-    Path("dev_orchestration/git/repo.py"),
 }
+
+
+def test_the_exemption_list_is_exactly_guards_and_the_deny_list():
+    # Pin the exemption list itself. repo.py must never be re-added: if a
+    # future change needs an exemption there, that is itself a signal the
+    # prohibited-verb logic has leaked back out of guards.py.
+    assert EXEMPT_RELATIVE_PATHS == {
+        Path("dev_orchestration/git/guards.py"),
+        Path("dev_orchestration/config/models.py"),
+    }
+    assert len(EXEMPT_RELATIVE_PATHS) == 2
 
 
 def test_source_root_resolves_to_the_src_directory():

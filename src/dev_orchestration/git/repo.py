@@ -8,17 +8,6 @@ from dev_orchestration.git import guards
 
 GIT_TIMEOUT_SECONDS = 120
 
-# run_git is public and takes unrestricted *args, so any caller could in
-# principle ask it to push or merge. This is the runtime enforcement of
-# that prohibition: it works even against a verb built dynamically at call
-# time (e.g. "pu" + "sh"), which a static source scan cannot see. There is
-# no legitimate call in this framework to either verb, so there is nothing
-# valid to break.
-_PROHIBITED_VERBS = {
-    "push": guards.push,
-    "merge": guards.merge,
-}
-
 
 class GitCommandError(RuntimeError):
     """A git invocation exited non-zero."""
@@ -33,8 +22,13 @@ class GitRepo:
     root: Path
 
     def run_git(self, *args: str) -> str:
-        if args and args[0] in _PROHIBITED_VERBS:
-            _PROHIBITED_VERBS[args[0]]()
+        # run_git is public and takes unrestricted *args, so any caller
+        # could in principle ask it to push or merge. The prohibited-verb
+        # table lives in guards.py, not here, so that module stays the
+        # sole home of these literals and repo.py needs no exemption from
+        # the invocation scan in tests/git/test_guards.py.
+        if args:
+            guards.reject_prohibited_verb(args[0])
         proc = subprocess.run(
             ["git", "-C", str(self.root), *args],
             capture_output=True,
