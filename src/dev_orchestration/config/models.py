@@ -1,12 +1,12 @@
 """Typed configuration. Invalid config must fail before any agent runs."""
 
+from typing import Literal
+
 from pydantic import BaseModel, Field, field_validator
 
 from dev_orchestration.domain.enums import ProjectClass, Tier
 
-DENIED_COMMAND_TOKENS = frozenset(
-    {"deploy", "wrangler", "publish", "push", "merge", "release"}
-)
+DENIED_COMMAND_TOKENS = frozenset({"deploy", "wrangler", "publish", "push", "merge", "release"})
 
 
 class DeniedCommandError(ValueError):
@@ -71,6 +71,14 @@ class GitPolicy(BaseModel):
     autonomous_push: bool = False
 
 
+class ContextPolicy(BaseModel):
+    persistent: list[str] = Field(default_factory=lambda: ["AGENTS.md", ".ai/context.md"])
+    on_demand: dict[str, str] = Field(default_factory=dict)
+    include_prior_artifacts: Literal["relevant_only", "none"] = "relevant_only"
+    conflict_policy: Literal["fail_closed", "escalate"] = "fail_closed"
+    persistent_budget_bytes: int = 8192
+
+
 class ProjectConfig(BaseModel):
     schema_version: str = "1.0"
     project: ProjectMeta
@@ -78,6 +86,7 @@ class ProjectConfig(BaseModel):
     scope: Scope = Field(default_factory=Scope)
     validation: dict[str, ValidationCommand] = Field(default_factory=dict)
     git: GitPolicy = Field(default_factory=GitPolicy)
+    context: ContextPolicy = Field(default_factory=ContextPolicy)
 
 
 class RoleConfig(BaseModel):

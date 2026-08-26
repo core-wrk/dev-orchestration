@@ -3,6 +3,7 @@ from pydantic import ValidationError
 
 from dev_orchestration.config.models import (
     DENIED_COMMAND_TOKENS,
+    ContextPolicy,
     ProjectConfig,
     Scope,
     ValidationCommand,
@@ -119,3 +120,41 @@ def test_repo_config_cannot_smuggle_a_denied_command():
 def test_scope_defaults_to_whole_repo():
     assert Scope().include == ["**"]
     assert Scope().exclude == []
+
+
+def test_context_policy_defaults():
+    policy = ContextPolicy()
+    assert policy.persistent == ["AGENTS.md", ".ai/context.md"]
+    assert policy.on_demand == {}
+    assert policy.include_prior_artifacts == "relevant_only"
+    assert policy.conflict_policy == "fail_closed"
+    assert policy.persistent_budget_bytes == 8192
+
+
+def test_context_policy_conflict_default_is_fail_closed():
+    # fail_closed is a safety choice, not a preference: an agent that cannot
+    # reconcile conflicting context must stop, not guess. Assert the literal
+    # value by name so a silent flip to "escalate" is caught here.
+    assert ContextPolicy().conflict_policy == "fail_closed"
+
+
+def test_project_config_gains_context_policy_by_default():
+    config = ProjectConfig.model_validate(
+        {"project": {"name": "helmfast-site", "class": "marketing_website"}}
+    )
+    assert isinstance(config.context, ContextPolicy)
+    assert config.context.conflict_policy == "fail_closed"
+
+
+def test_context_policy_round_trips_through_config_dump():
+    config = ProjectConfig.model_validate(
+        {
+            "project": {"name": "helmfast-site", "class": "marketing_website"},
+            "context": {"conflict_policy": "escalate", "persistent_budget_bytes": 4096},
+        }
+    )
+    dumped = config.model_dump(by_alias=True, mode="json")
+    restored = ProjectConfig.model_validate(dumped)
+    assert restored.context == config.context
+    assert restored.context.conflict_policy == "escalate"
+    assert restored.context.persistent_budget_bytes == 4096
