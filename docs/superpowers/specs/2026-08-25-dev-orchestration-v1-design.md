@@ -437,10 +437,24 @@ verified byte-identical afterwards. `! codex goal mode` reports in all three rep
 the installed Codex build advertises the goals feature but exposes no headless entry
 point, so execution will use `codex exec`, exactly as §11.3 anticipated.
 
-**Defect found while onboarding.** `Repo.run_git` returns `stdout.strip()`, so
-`ensure_clean` and `doctor` lose the first character of the first porcelain line: a dirty
-`.env.example` is reported as `env.example`. The guard blocks correctly; it mis-names one
-file while doing so. Fix belongs in `git/repo.py` with a dotfile regression test.
+**Defect found while onboarding, and fixed.** `GitRepo.run_git` returned
+`stdout.strip()`, which removes the leading space from the *first* porcelain line only.
+Both consumers slice `line[3:]` assuming an intact `XY<space>PATH` prefix, so the first
+listed path lost a character: a dirty `.env.example` was reported as `env.example`. It
+only surfaces when the first entry is an unstaged modification (` M path`) — the most
+common dirty state — and the whole suite missed it because every fixture dirties the tree
+with an *untracked* file (`?? path`, no leading space). The guard always blocked
+correctly; it mis-named one file while doing so.
+
+Fixed at the source: `run_git` gained a `strip` keyword, `status_porcelain` passes
+`strip=False` and rstrips only the trailing newline. Both call sites needed no change once
+given intact input. Regression tests cover an unstaged dotfile, multiple dirty paths with
+the unstaged one first, and a mixed staged/unstaged/untracked case, asserting exact path
+strings. Verified live against `helmfast-OS`, which now reports `.env.example` correctly.
+
+This is the pilot earning its keep: twelve reviewed tasks and several rounds of mutation
+testing did not surface it, because every test constructed the one dirty state that hides
+it. Running the real binary against a real repository did, immediately.
 
 **Context minimization, measured.** The §10a directive was applied for the first time.
 In `helmfast-OS` the only pre-existing agent-facing file, a 4,930-byte `CLAUDE.md`, became
@@ -448,8 +462,29 @@ a 373-byte pointer (−92%); every rule it carried was already stated elsewhere 
 repository — the conflict-of-interest boundary in nine other files, two of them tests that
 enforce it; the ICP band in fourteen. The original is archived verbatim at
 `docs/archive/CLAUDE-original.md`.
-Total persistent surface nonetheless rose from 4,930 to 7,199 bytes, because `.ai/context.md`
-now carries the onboarding inventory itself. That is an honest result, not a win: the
-inventory is history, and if the persistent budget comes under pressure it should move
-on-demand rather than being trimmed for size. The other two repositories had no agent-facing
-files at all, so onboarding added 4,588 and 4,895 bytes to a surface of zero.
+The first measurement was worse than that headline: total persistent surface *rose*
+from 4,930 to 7,199 bytes, because the onboarding inventory had been written into
+`.ai/context.md` — a file carried on every invocation. In `helmfast-OS` that inventory was
+2,724 of 4,399 bytes, so a one-time audit record occupied most of a permanent file. The
+plan's Step 1b specified that location and the plan was wrong: DOCUMENTATION-STANDARD §15
+already designates `.ai/docs-audit/` for audit output, and an audit mandated by the
+context-minimization directive must not itself become permanent context.
+
+Each inventory was moved to `.ai/docs-audit/agent-surface.md`. Final persistent surface:
+
+| Repository | Before | After | Composition |
+|---|---|---|---|
+| `helmfast-OS` | 4,930 | **4,458** | AGENTS.md 2,427 + context.md 1,658 + CLAUDE.md pointer 373 |
+| `helmfast-app` | 0 | 3,276 | AGENTS.md 2,221 + context.md 1,055 |
+| `helmfast-site` | 0 | 3,706 | AGENTS.md 2,255 + context.md 1,451 |
+
+`helmfast-OS` is the only before/after comparison, and it fell 10% while changing character
+entirely: a doc index that restated the repository became a contract of invariants plus two
+facts that genuinely cannot be inferred — that `pipeline/runtime/prompts.py` renders its
+templates out of three fenced-off directories, so a template edit cannot be completed
+autonomously; and that `ruff` is absent, with the condition for reinstating it. The other
+two had no agent-facing files at all, so their surface is new rather than reduced.
+
+Every generated `AGENTS.md` sits at roughly 2.2–2.4 KB against the 8,192-byte persistent
+budget — around 28% of the ceiling, leaving room for repository-specific invariants that
+onboarding has not yet discovered.
