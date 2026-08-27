@@ -21,7 +21,7 @@ class DirtyWorktreeError(RuntimeError):
 class GitRepo:
     root: Path
 
-    def run_git(self, *args: str) -> str:
+    def run_git(self, *args: str, strip: bool = True) -> str:
         # run_git is public and takes unrestricted *args, so any caller
         # could in principle ask it to push or merge. The prohibited-verb
         # table lives in guards.py, not here, so that module stays the
@@ -40,10 +40,16 @@ class GitRepo:
             raise GitCommandError(
                 f"git {' '.join(args)} failed ({proc.returncode}): {proc.stderr.strip()}"
             )
-        return proc.stdout.strip()
+        return proc.stdout.strip() if strip else proc.stdout
 
     def status_porcelain(self) -> str:
-        return self.run_git("status", "--porcelain")
+        # `git status --porcelain` lines are `XY<space>PATH`, where either
+        # status character may itself be a space (e.g. an unstaged
+        # modification is ` M path`). run_git's default .strip() would eat
+        # that leading space off the *first* line only, truncating the
+        # first character of its path once callers slice past the fixed
+        # 3-character prefix. Only the trailing newline is ours to remove.
+        return self.run_git("status", "--porcelain", strip=False).rstrip("\n")
 
     def ensure_clean(self) -> None:
         status = self.status_porcelain()

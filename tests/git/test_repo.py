@@ -28,6 +28,56 @@ def test_dirty_repo_raises_and_names_the_files(repo):
     assert "dirty.txt" in str(excinfo.value)
 
 
+def test_unstaged_dotfile_modification_keeps_its_leading_character(repo):
+    # `git status --porcelain` for an unstaged modification is
+    # " M path" -- a leading space in the status field. A naive
+    # `.strip()` of the whole porcelain block eats that space off the
+    # *first* line only, truncating the first character of a dotfile
+    # path (".env.example" -> "env.example"). This is the real-world
+    # regression case: a dotfile is the most likely first entry.
+    (repo.root / ".env.example").write_text("KEY=1\n")
+    subprocess.run(["git", "-C", str(repo.root), "add", "-A"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo.root), "commit", "-q", "-m", "add env"], check=True)
+    (repo.root / ".env.example").write_text("KEY=2\n")
+    with pytest.raises(DirtyWorktreeError) as excinfo:
+        repo.ensure_clean()
+    message = str(excinfo.value)
+    assert ".env.example" in message
+    assert "env.example" not in message.replace(".env.example", "")
+
+
+def test_multiple_dirty_files_all_keep_their_full_paths_when_first_is_unstaged(repo):
+    # The truncation bug only ever touched the first porcelain line, so a
+    # single-file test cannot tell us the fix covers the general case.
+    (repo.root / ".env.example").write_text("KEY=1\n")
+    subprocess.run(["git", "-C", str(repo.root), "add", "-A"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo.root), "commit", "-q", "-m", "add env"], check=True)
+    (repo.root / ".env.example").write_text("KEY=2\n")
+    (repo.root / "second.txt").write_text("second\n")
+    with pytest.raises(DirtyWorktreeError) as excinfo:
+        repo.ensure_clean()
+    message = str(excinfo.value)
+    assert ".env.example" in message
+    assert "second.txt" in message
+    assert "env.example" not in message.replace(".env.example", "")
+
+
+def test_status_porcelain_reports_staged_unstaged_and_untracked_paths_exactly(repo):
+    (repo.root / "staged.txt").write_text("1\n")
+    subprocess.run(
+        ["git", "-C", str(repo.root), "add", "staged.txt"], check=True, capture_output=True
+    )
+    (repo.root / "README.md").write_text("changed\n")
+    (repo.root / "new.txt").write_text("new\n")
+
+    lines = repo.status_porcelain().splitlines()
+    paths = [line[3:] for line in lines]
+
+    assert "staged.txt" in paths
+    assert "README.md" in paths
+    assert "new.txt" in paths
+
+
 def test_current_commit_is_a_full_sha(repo):
     assert len(repo.current_commit()) == 40
 

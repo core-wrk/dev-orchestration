@@ -126,6 +126,44 @@ def test_uncommitted_file_fails_repository_clean_with_count_and_instruction(tmp_
     assert "commit or stash" in clean_check.detail.lower()
 
 
+def test_unstaged_dotfile_modification_keeps_its_leading_character_in_doctor_detail(tmp_path):
+    # `git status --porcelain` renders an unstaged modification as
+    # " M path" -- a leading space in the status field. Stripping the
+    # whole porcelain block eats that space off the *first* line only,
+    # truncating a leading dotfile path (".env.example" -> "env.example").
+    # ".env.example" is the real-world case that surfaced this bug.
+    _init_repo(tmp_path)
+    (tmp_path / ".env.example").write_text("KEY=1\n")
+    _commit_all(tmp_path)
+    (tmp_path / ".env.example").write_text("KEY=2\n")
+
+    checks = run_checks(tmp_path, codex=FakeAdapter(), claude=FakeAdapter())
+
+    clean_check = _by_name(checks, "repository clean")
+    assert clean_check.ok is False
+    assert ".env.example" in clean_check.detail
+    assert "env.example" not in clean_check.detail.replace(".env.example", "")
+
+
+def test_multiple_dirty_files_all_named_in_doctor_detail_when_first_is_unstaged(tmp_path):
+    # The truncation bug only ever hit the first porcelain line; a
+    # single-file case cannot show the fix generalizes.
+    _init_repo(tmp_path)
+    (tmp_path / ".env.example").write_text("KEY=1\n")
+    _commit_all(tmp_path)
+    (tmp_path / ".env.example").write_text("KEY=2\n")
+    (tmp_path / "second.txt").write_text("second\n")
+
+    checks = run_checks(tmp_path, codex=FakeAdapter(), claude=FakeAdapter())
+
+    clean_check = _by_name(checks, "repository clean")
+    assert clean_check.ok is False
+    assert "2" in clean_check.detail
+    assert ".env.example" in clean_check.detail
+    assert "second.txt" in clean_check.detail
+    assert "env.example" not in clean_check.detail.replace(".env.example", "")
+
+
 def test_valid_project_config_reports_scope_and_each_validation_command(tmp_path):
     _init_repo(tmp_path)
     (tmp_path / ".ai").mkdir()
