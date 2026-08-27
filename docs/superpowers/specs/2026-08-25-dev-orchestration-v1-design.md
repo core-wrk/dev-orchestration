@@ -403,3 +403,53 @@ export (phase 18); self-hosting (phase 17); GitHub Actions.
 
 Permanently out of scope for V1, per the source specification: autonomous push, merge,
 deployment, package publication, production data mutation, and any web dashboard.
+
+---
+
+## 13. M1 outcome (2026-08-26)
+
+M1 shipped `dev-orch init` and `dev-orch doctor`, and all three pilot repositories
+were onboarded on a local `ai/onboard-dev-orchestration` branch in each. Nothing was
+pushed, merged, or deployed.
+
+**The `ruff` gap.** §9 lists `ruff check` as a `helmfast-OS` validation command. It is
+not registered, and the table above is superseded on that point. `ruff` is configured
+nowhere in `helmfast-OS` and is not installed in its `.venv` — `python -m ruff --version`
+exits 1 with `No module named ruff`; only a stale `.ruff_cache/0.15.18` survives from an
+earlier run. Per the rule that a command must be proven before it becomes policy, only
+`test` was registered. `pytest --collect-only -q` collected **651 tests, exit 0**. The
+absence and the reinstatement condition are recorded in `helmfast-OS/.ai/context.md`.
+
+**`npm run build` passed.** `helmfast-site`'s `astro check && astro build` exited 0 —
+0 errors, 0 warnings, 0 hints across 13 files, 6 pages built. `build` is registered on
+that evidence. `npm run deploy` remains deny-listed and unregistered. One oddity worth
+remembering: the first foreground invocation produced no output and was killed after
+7 minutes; an immediate detached re-run finished in about 4 seconds.
+
+**`helmfast-app` registers no validation command at all.** It contains no `package.json`,
+`pyproject.toml` or `Makefile` — ten documentation files and a README. `validation: {}`
+is a finding, not an omission.
+
+**Checks that did not pass, and why that is correct.** `doctor` reports
+`! repository clean` in `helmfast-OS`, naming 7 pre-existing uncommitted paths. That is
+the dirty-worktree guard doing its job on real in-flight work; it was left untouched and
+verified byte-identical afterwards. `! codex goal mode` reports in all three repositories:
+the installed Codex build advertises the goals feature but exposes no headless entry
+point, so execution will use `codex exec`, exactly as §11.3 anticipated.
+
+**Defect found while onboarding.** `Repo.run_git` returns `stdout.strip()`, so
+`ensure_clean` and `doctor` lose the first character of the first porcelain line: a dirty
+`.env.example` is reported as `env.example`. The guard blocks correctly; it mis-names one
+file while doing so. Fix belongs in `git/repo.py` with a dotfile regression test.
+
+**Context minimization, measured.** The §10a directive was applied for the first time.
+In `helmfast-OS` the only pre-existing agent-facing file, a 4,930-byte `CLAUDE.md`, became
+a 373-byte pointer (−92%); every rule it carried was already stated elsewhere in the
+repository — the conflict-of-interest boundary in nine other files, two of them tests that
+enforce it; the ICP band in fourteen. The original is archived verbatim at
+`docs/archive/CLAUDE-original.md`.
+Total persistent surface nonetheless rose from 4,930 to 7,199 bytes, because `.ai/context.md`
+now carries the onboarding inventory itself. That is an honest result, not a win: the
+inventory is history, and if the persistent budget comes under pressure it should move
+on-demand rather than being trimmed for size. The other two repositories had no agent-facing
+files at all, so onboarding added 4,588 and 4,895 bytes to a surface of zero.
