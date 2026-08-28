@@ -27,8 +27,7 @@ class GitRepo:
         # table lives in guards.py, not here, so that module stays the
         # sole home of these literals and repo.py needs no exemption from
         # the invocation scan in tests/git/test_guards.py.
-        if args:
-            guards.reject_prohibited_verb(args[0])
+        guards.reject_disallowed_invocation(args)
         proc = subprocess.run(
             ["git", "-C", str(self.root), *args],
             capture_output=True,

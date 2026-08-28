@@ -149,3 +149,36 @@ def test_run_git_rejects_a_dynamically_built_push_verb(repo):
 def test_run_git_still_permits_ordinary_operations(repo):
     assert repo.run_git("status", "--porcelain") == ""
     assert len(repo.run_git("rev-parse", "HEAD")) == 40
+
+
+def test_run_git_rejects_a_leading_global_option_hiding_a_push(repo):
+    # git accepts global options before the subcommand, so a check that looks
+    # only at args[0] sees "-c", finds no prohibited name, and lets the push
+    # through. This reached subprocess before the allow-list was added.
+    with pytest.raises(ProhibitedOperationError):
+        repo.run_git("-c", "credential.helper=x", "push", "origin", "main")
+
+
+def test_run_git_rejects_pull_because_it_merges(repo):
+    with pytest.raises(ProhibitedOperationError):
+        repo.run_git("pull", "--rebase")
+
+
+@pytest.mark.parametrize("verb", ["reset", "clean", "stash", "fetch", "remote", "rebase"])
+def test_run_git_rejects_verbs_the_framework_never_uses(repo, verb):
+    # Not an exhaustive deny-list — the point is that anything outside the
+    # allow-list is refused, so verbs nobody thought to name are still caught.
+    with pytest.raises(ProhibitedOperationError):
+        repo.run_git(verb)
+
+
+def test_run_git_rejects_checkout_that_would_discard_uncommitted_work(repo):
+    (repo.root / "README.md").write_text("edited but not committed\n")
+    with pytest.raises(ProhibitedOperationError):
+        repo.run_git("checkout", "--", ".")
+    assert (repo.root / "README.md").read_text() == "edited but not committed\n"
+
+
+def test_run_git_still_creates_branches_with_checkout(repo):
+    repo.run_git("checkout", "-q", "-b", "ai/example")
+    assert repo.current_branch() == "ai/example"
