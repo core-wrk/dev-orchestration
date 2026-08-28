@@ -51,11 +51,24 @@ class AgentAdapter(Protocol):
 
 
 class FakeAdapter:
-    """Test double. Integration tests drive the engine through this."""
+    """Test double. Integration tests drive the engine through this.
 
-    def __init__(self, responses: list[dict | str] | None = None) -> None:
+    It records requests and returns canned output, so it can never write to a
+    workspace; declaring `read_only_review` is therefore accurate, not a
+    courtesy. `capabilities` is overridable so a test can build a double that
+    *lacks* a capability and assert the caller fails closed.
+    """
+
+    def __init__(
+        self,
+        responses: list[dict | str] | None = None,
+        capabilities: set[str] | None = None,
+    ) -> None:
         self._responses = list(responses or [{}])
         self.requests: list[AgentRequest] = []
+        self._capabilities = (
+            {"exec", "read_only_review"} if capabilities is None else set(capabilities)
+        )
 
     def healthcheck(self) -> AdapterStatus:
         return AdapterStatus(name="fake", available=True, version="0", detail="test double")
@@ -74,4 +87,4 @@ class FakeAdapter:
         )
 
     def supports(self, capability: str) -> bool:
-        return capability in {"exec"}
+        return capability in self._capabilities

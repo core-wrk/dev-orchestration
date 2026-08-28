@@ -3,18 +3,29 @@ from pathlib import Path
 import pytest
 
 from dev_orchestration.adapters.base import FakeAdapter
+from dev_orchestration.adapters.claude import ClaudeAdapter
 from dev_orchestration.adapters.registry import (
     DEFAULT_ROLES,
+    READ_ONLY_ROLES,
+    ReadOnlyRoleUnsupportedError,
     RoleRegistry,
     UnknownRoleError,
 )
+from dev_orchestration.config.models import RoleConfig
 
 
 @pytest.fixture
 def registry():
+    # The codex double declares only "exec", matching the real CodexAdapter,
+    # which builds its argv from a fixed sandbox mode and never reads
+    # allowed_tools. A double that claimed read_only_review would let an
+    # unenforceable binding pass every test in this file.
     return RoleRegistry(
         roles=DEFAULT_ROLES,
-        adapters={"codex": FakeAdapter(), "claude": FakeAdapter()},
+        adapters={
+            "codex": FakeAdapter(capabilities={"exec"}),
+            "claude": FakeAdapter(),
+        },
     )
 
 
@@ -24,7 +35,49 @@ def test_default_roles_match_the_specification():
     assert DEFAULT_ROLES["implementation_worker"].model == "luna"
     assert DEFAULT_ROLES["plan_reviewer"].adapter == "claude"
     assert DEFAULT_ROLES["implementation_reviewer"].adapter == "claude"
-    assert DEFAULT_ROLES["verifier"].model == "sol"
+    # verifier is bound to claude, NOT to codex/sol as CONFIGURATION.md section 2
+    # illustrates. It is in READ_ONLY_ROLES, and codex cannot honour a read-only
+    # restriction: build_exec_command ignores allowed_tools and always emits
+    # -s workspace-write. Binding it to codex would give the independent
+    # verifier write access to the worktree it exists to check.
+    assert DEFAULT_ROLES["verifier"].adapter == "claude"
+    assert "verifier" in READ_ONLY_ROLES
+
+
+def test_a_read_only_role_cannot_be_bound_to_an_adapter_that_ignores_the_restriction():
+    registry = RoleRegistry(
+        roles={"verifier": RoleConfig(adapter="codex", model="sol")},
+        adapters={"codex": FakeAdapter(capabilities={"exec"})},
+    )
+    with pytest.raises(ReadOnlyRoleUnsupportedError) as excinfo:
+        registry.build_request("verifier", prompt="verify", cwd=Path("/w"))
+    message = str(excinfo.value)
+    assert "verifier" in message
+    assert "codex" in message
+
+
+def test_every_read_only_role_default_binding_can_honour_the_restriction():
+    # Guards the whole set, not just verifier: adding a role to READ_ONLY_ROLES
+    # while binding it to an adapter that drops allowed_tools fails here.
+    adapters = {"codex": FakeAdapter(capabilities={"exec"}), "claude": FakeAdapter()}
+    registry = RoleRegistry(roles=DEFAULT_ROLES, adapters=adapters)
+    for role in READ_ONLY_ROLES:
+        request = registry.build_request(role, prompt="x", cwd=Path("/w"))
+        assert request.allowed_tools == ["Read", "Grep", "Glob"], role
+
+
+def test_the_read_only_restriction_survives_into_the_emitted_command():
+    # The join the per-task reviews could not see: registry tests asserted on
+    # the request object, adapter tests asserted on the argv, and nothing
+    # checked that the restriction actually crossed the boundary between them.
+    registry = RoleRegistry(
+        roles=DEFAULT_ROLES,
+        adapters={"codex": FakeAdapter(capabilities={"exec"}), "claude": ClaudeAdapter()},
+    )
+    request = registry.build_request("verifier", prompt="verify", cwd=Path("/w"))
+    argv = ClaudeAdapter().build_command(request)
+    assert "--allowedTools" in argv
+    assert argv[argv.index("--allowedTools") + 1] == "Read,Grep,Glob"
 
 
 def test_build_request_carries_the_configured_model(registry):
