@@ -2,8 +2,9 @@ from dev_orchestration.config.resolver import PROTECTED_DEFAULTS, resolve_policy
 
 
 def test_later_layer_wins_for_ordinary_keys():
-    resolved = resolve_policy([{"workflow": {"max_remediation_cycles": 2}},
-                               {"workflow": {"max_remediation_cycles": 5}}])
+    resolved = resolve_policy(
+        [{"workflow": {"max_remediation_cycles": 2}}, {"workflow": {"max_remediation_cycles": 5}}]
+    )
     assert resolved["workflow.max_remediation_cycles"] == 5
 
 

@@ -36,9 +36,7 @@ class ReadOnlyRoleUnsupportedError(RuntimeError):
 
 
 class RoleRegistry:
-    def __init__(
-        self, roles: dict[str, RoleConfig], adapters: dict[str, AgentAdapter]
-    ) -> None:
+    def __init__(self, roles: dict[str, RoleConfig], adapters: dict[str, AgentAdapter]) -> None:
         self.roles = roles
         self.adapters = adapters
 

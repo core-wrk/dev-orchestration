@@ -71,17 +71,14 @@ def test_exec_command_uses_verified_flags():
 
 def test_exec_command_never_bypasses_the_sandbox():
     adapter = CodexAdapter(binary=Path("/bin/codex"))
-    cmd = adapter.build_exec_command(
-        AgentRequest(role="planner", prompt="p", cwd=Path("/w"))
-    )
+    cmd = adapter.build_exec_command(AgentRequest(role="planner", prompt="p", cwd=Path("/w")))
     assert not any("dangerously" in part for part in cmd)
 
 
 def test_luna_alias_resolves_to_the_worker_model():
     adapter = CodexAdapter(binary=Path("/bin/codex"))
     cmd = adapter.build_exec_command(
-        AgentRequest(role="implementation_worker", prompt="p", cwd=Path("/w"),
-                     model_alias="luna")
+        AgentRequest(role="implementation_worker", prompt="p", cwd=Path("/w"), model_alias="luna")
     )
     assert cmd[cmd.index("-m") + 1] == "gpt-5.6-luna"
 
@@ -92,9 +89,7 @@ def test_prompt_is_its_own_argv_element_not_concatenated():
     # (or concatenated with) a preceding flag's value.
     adapter = CodexAdapter(binary=Path("/bin/codex"))
     prompt = "list files; rm -rf / && echo done"
-    cmd = adapter.build_exec_command(
-        AgentRequest(role="planner", prompt=prompt, cwd=Path("/w"))
-    )
+    cmd = adapter.build_exec_command(AgentRequest(role="planner", prompt=prompt, cwd=Path("/w")))
     assert cmd[-1] == prompt
     assert cmd.count(prompt) == 1
     assert not any(part != prompt and prompt in part for part in cmd)
@@ -134,6 +129,7 @@ class _FakeCompleted:
     def __init__(self, stdout: str) -> None:
         self.stdout = stdout
 
+
 class _FakeProcess:
     def __init__(self, stdout: str, returncode: int = 0) -> None:
         self.stdout = stdout
@@ -155,9 +151,7 @@ def _capture_subprocess_run(monkeypatch, *, stdout="", returncode=0):
 def test_run_passes_the_requests_timeout_seconds(monkeypatch):
     calls = _capture_subprocess_run(monkeypatch, stdout='{"ok": true}')
     adapter = CodexAdapter(binary=Path("/bin/codex"))
-    request = AgentRequest(
-        role="planner", prompt="p", cwd=Path("/w"), timeout_seconds=42
-    )
+    request = AgentRequest(role="planner", prompt="p", cwd=Path("/w"), timeout_seconds=42)
     adapter.run(request)
     assert len(calls) == 1
     _, kwargs = calls[0]
@@ -186,9 +180,7 @@ def test_run_passes_cwd_from_the_request(monkeypatch):
 def test_run_maps_agent_result_fields_correctly(monkeypatch):
     _capture_subprocess_run(monkeypatch, stdout='{"verdict": "PASS"}', returncode=7)
     adapter = CodexAdapter(binary=Path("/bin/codex"))
-    request = AgentRequest(
-        role="planner", prompt="p", cwd=Path("/w"), model_alias="sol"
-    )
+    request = AgentRequest(role="planner", prompt="p", cwd=Path("/w"), model_alias="sol")
     before = datetime.now(UTC)
     result = adapter.run(request)
     after = datetime.now(UTC)
@@ -222,4 +214,3 @@ def test_run_falls_back_to_raw_stdout_when_nothing_parses(monkeypatch):
 )
 def test_last_json_object_edge_cases(stdout, expected):
     assert _last_json_object(stdout) == expected
-
