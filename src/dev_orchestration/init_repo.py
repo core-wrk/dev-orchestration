@@ -19,6 +19,38 @@ class FileExistsRefusal(FileExistsError):
     """A contract file already exists and force was not requested."""
 
 
+class UncommittedContractFileError(RuntimeError):
+    """--force would overwrite a contract file that has uncommitted edits."""
+
+
+def _reject_uncommitted_targets(repo_root: Path, names: list[str]) -> None:
+    """Refuse to overwrite a contract file carrying uncommitted changes.
+
+    --force exists to re-render a generated file after the template or the
+    config changes. It does not exist to discard a user's edits. AGENTS.md in
+    particular invites hand-editing -- its own template carries a "Written
+    during onboarding" placeholder -- and an overwritten uncommitted edit is
+    in no git object and no stash, so it is gone.
+
+    Scoped to the target paths rather than the whole worktree: a user with
+    unrelated work in progress should still be able to re-run init.
+    """
+    from dev_orchestration.git.repo import GitCommandError, GitRepo
+
+    try:
+        dirty = {line[3:] for line in GitRepo(repo_root).status_porcelain().splitlines()}
+    except GitCommandError:
+        # Not a git repository: there is no uncommitted work to protect.
+        return
+    clashes = sorted(set(names) & dirty)
+    if clashes:
+        raise UncommittedContractFileError(
+            f"{', '.join(clashes)} has uncommitted changes that --force would "
+            "overwrite, and they exist in no commit or stash. Commit or stash "
+            "them first, or move the file aside."
+        )
+
+
 def render_project_yaml(config: ProjectConfig) -> str:
     return yaml.safe_dump(config.model_dump(by_alias=True, mode="json"), sort_keys=False)
 
@@ -130,6 +162,11 @@ def initialize_repo(repo_root: Path, config: ProjectConfig, force: bool = False)
         repo_root / ".ai" / "project.yaml": render_project_yaml(config),
     }
     context_path = repo_root / ".ai" / "context.md"
+
+    if force:
+        _reject_uncommitted_targets(
+            repo_root, [p.relative_to(repo_root).as_posix() for p in regenerable]
+        )
 
     if not force:
         for path in regenerable:

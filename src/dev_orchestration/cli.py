@@ -6,9 +6,23 @@ import typer
 import yaml
 
 from dev_orchestration import doctor as doctor_module
-from dev_orchestration.config.models import ProjectConfig
-from dev_orchestration.git.repo import discover_repo
-from dev_orchestration.init_repo import initialize_repo
+from dev_orchestration.config.models import DeniedCommandError, ProjectConfig
+from dev_orchestration.git.repo import GitCommandError, discover_repo
+from dev_orchestration.init_repo import (
+    FileExistsRefusal,
+    UncommittedContractFileError,
+    initialize_repo,
+)
+
+# Errors that represent a refusal or a bad input rather than a bug. The user
+# needs the message, not a traceback: every one of these already explains what
+# happened and what to do about it, and a stack trace only buries that.
+EXPECTED_ERRORS = (
+    UncommittedContractFileError,
+    FileExistsRefusal,
+    GitCommandError,
+    DeniedCommandError,
+)
 
 app = typer.Typer(
     no_args_is_help=True,
@@ -47,7 +61,12 @@ def init(
     .ai/context.md is written once and never regenerated, even with --force:
     it holds onboarding facts that cannot be recovered by reading the repo.
     """
-    repo = discover_repo(Path.cwd())
-    config = ProjectConfig.model_validate(yaml.safe_load(config_file.read_text()))
-    for path in initialize_repo(repo.root, config, force=force):
+    try:
+        repo = discover_repo(Path.cwd())
+        config = ProjectConfig.model_validate(yaml.safe_load(config_file.read_text()))
+        written = initialize_repo(repo.root, config, force=force)
+    except EXPECTED_ERRORS as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+    for path in written:
         typer.echo(f"wrote {path.relative_to(repo.root)}")
