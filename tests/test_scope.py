@@ -1,10 +1,20 @@
+import pytest
+
 from dev_orchestration.config.models import Scope
 from dev_orchestration.scope import ScopeFence
 
 HELMFAST_OS = ScopeFence(
     include=["pipeline/", "tests/", "planning/", "README.md"],
-    exclude=["marketing/", "operations/", "market-research/", "strategy/",
-             "context/", "data-templates/", "var/", ".venv/"],
+    exclude=[
+        "marketing/",
+        "operations/",
+        "market-research/",
+        "strategy/",
+        "context/",
+        "data-templates/",
+        "var/",
+        ".venv/",
+    ],
 )
 
 
@@ -66,3 +76,51 @@ def test_double_star_includes_deeply_nested_paths():
     assert fence.allows("a/b/c/d.py")
     assert fence.allows("deeply/nested/path/to/file.txt")
     assert fence.allows("x.py")
+
+
+def test_a_directory_pattern_without_a_trailing_slash_still_excludes():
+    # The natural way to write a fence in YAML. Under the previous fnmatch
+    # matcher this excluded nothing at all, so a user could fence off a
+    # secrets directory, see doctor report the fence as fine, and have it
+    # protect nothing.
+    fence = ScopeFence(include=["**"], exclude=["secrets"])
+    assert fence.allows("secrets/keys.json") is False
+    assert fence.allows("secrets") is False
+    assert fence.allows("src/app.py") is True
+
+
+def test_a_bare_pattern_does_not_match_a_merely_similar_prefix():
+    fence = ScopeFence(include=["**"], exclude=["secrets"])
+    assert fence.allows("secrets-public/readme.md") is True
+
+
+@pytest.mark.parametrize("pattern", [".git", "node_modules", ".env"])
+def test_common_dotfile_and_vendor_excludes_work_without_a_slash(pattern):
+    fence = ScopeFence(include=["**"], exclude=[pattern])
+    assert fence.allows(f"{pattern}/inner.txt") is False
+
+
+def test_a_single_star_does_not_cross_a_directory_separator():
+    # fnmatch translated * to .*, so include=["docs/*"] silently meant
+    # "everything under docs/, recursively" -- over-permissive, which is the
+    # fail-open direction for an include list.
+    fence = ScopeFence(include=["docs/*"], exclude=[])
+    assert fence.allows("docs/readme.md") is True
+    assert fence.allows("docs/nested/deep.md") is False
+
+
+def test_a_double_star_does_cross_a_directory_separator():
+    fence = ScopeFence(include=["docs/**"], exclude=[])
+    assert fence.allows("docs/nested/deep.md") is True
+
+
+@pytest.mark.parametrize(
+    "escaping",
+    ["../../etc/passwd", "/etc/passwd", "../sibling-repo/src/app.py", "a/../../b"],
+)
+def test_paths_that_escape_the_repository_are_never_allowed(escaping):
+    # A run's worktree sits under a shared worktree root, so ".." reaches
+    # sibling repositories. The default include of ["**"] matched these.
+    fence = ScopeFence(include=["**"], exclude=[])
+    assert fence.allows(escaping) is False
+    assert fence.violations([escaping]) == [escaping]
