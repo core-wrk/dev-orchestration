@@ -488,3 +488,59 @@ two had no agent-facing files at all, so their surface is new rather than reduce
 Every generated `AGENTS.md` sits at roughly 2.2–2.4 KB against the 8,192-byte persistent
 budget — around 28% of the ceiling, leaving room for repository-specific invariants that
 onboarding has not yet discovered.
+
+---
+
+## 14. Final review and safety-control hardening (2026-08-27)
+
+A whole-branch review found three Critical defects that the fifteen per-task
+reviews structurally could not: each saw one diff, and all three live in the
+seams between tasks or between a control and its call path. All are fixed.
+
+**A role marked read-only ran with write access.** `verifier` was in
+`READ_ONLY_ROLES` but bound to codex, and `CodexAdapter` never reads
+`allowed_tools` — it emits `-s workspace-write`. Task 9 defined the field,
+Task 11 consumed it, Task 10 shipped before Task 12 existed, and Task 12 then
+marked roles read-only without knowing codex ignores it. Registry tests
+asserted on the request, adapter tests on the argv, and nothing asserted the
+join. `build_request` now fails closed when a read-only role is bound to an
+adapter that does not declare `read_only_review`, which catches roles that do
+not exist yet. The `verifier` default moves to claude, superseding §2 of
+`CONFIGURATION.md`: role bindings are configurable, but a declared restriction
+being actually enforced is not negotiable.
+
+**The runtime git guard checked only the first argument.** git accepts global
+options before the subcommand, so `run_git("-c", "k=v", "push", …)` presented
+`-c` first, matched no prohibited name, and reached `subprocess`. The deny-list
+was also incomplete by construction — it named `push` and `merge`, so `pull`
+(a fetch *plus a merge*) passed under a name containing neither word, as did
+`reset`, `clean`, and `stash`. `run_git` now requires an allow-list of the
+seven verbs the framework actually invokes.
+
+**`init --force` destroyed uncommitted work.** It rewrote `AGENTS.md`
+unconditionally, and a hand-added invariant that was not yet committed is in no
+commit and no stash. `ensure_clean` existed for exactly this and was wired only
+into `doctor`, the one command that cannot cause the harm.
+
+**The source scan never looked for `deploy`.** A planted
+`subprocess.run(["npx","wrangler","deploy","--env","production"])` left the
+suite green at 180 passed, and a sentinel proved a green run *executed* it.
+`gh`, `npx`, `wrangler` and `curl` never pass through `run_git`, so for those
+the scan is the only control there is. It now parses each module and inspects
+literal `subprocess` argv lists — `deploy` and `publish` cannot be matched as
+bare substrings, because this document's own `AGENTS.md` template states the
+prohibition in prose.
+
+Also closed: the scope fence failed open on the three most natural ways to
+write it (a bare `exclude: [secrets]` excluded nothing, `*` crossed `/`, and
+`../../etc/passwd` passed under the default include); `healthcheck` raised
+instead of reporting unavailability; and plan immutability was a TOCTOU check
+rather than an atomic create.
+
+The lesson worth carrying into M2 is narrower than "test more." Every one of
+these passed a test suite that exercised the code thoroughly. What none of them
+had was a test asserting the *join* between two components, or a control traced
+from its definition to a production call site. Three controls in this milestone
+have no production caller at all — by design, since M1 builds the substrate and
+not the loop — and two of them contained defects that would have become live
+the moment M2 wired them.
