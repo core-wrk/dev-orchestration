@@ -64,7 +64,18 @@ class CodexAdapter:
                     "codex_binary in ~/.dev-orchestration/config.yaml."
                 ),
             )
-        version = parse_version(self._probe("--version").stdout)
+        # Same contract as ClaudeAdapter: healthcheck never raises.
+        # _detect_capabilities below already guarded its probes; this one did
+        # not, so a codex binary that errored took doctor down with it.
+        try:
+            version = parse_version(self._probe("--version").stdout)
+        except (subprocess.SubprocessError, OSError) as exc:
+            return AdapterStatus(
+                name=self.name,
+                available=False,
+                path=str(self.binary),
+                detail=f"codex found at {self.binary} but did not run: {exc}",
+            )
         return AdapterStatus(
             name=self.name,
             available=True,

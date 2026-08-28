@@ -1,3 +1,5 @@
+import shutil
+import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -104,9 +106,7 @@ def test_healthcheck_reports_version_and_capabilities(monkeypatch):
 def test_run_passes_the_requests_timeout_seconds(monkeypatch):
     calls = _capture_subprocess_run(monkeypatch, stdout='{"ok": true}')
     adapter = ClaudeAdapter()
-    request = AgentRequest(
-        role="plan_reviewer", prompt="p", cwd=Path("/w"), timeout_seconds=42
-    )
+    request = AgentRequest(role="plan_reviewer", prompt="p", cwd=Path("/w"), timeout_seconds=42)
     adapter.run(request)
     assert len(calls) == 1
     _, kwargs = calls[0]
@@ -135,9 +135,7 @@ def test_run_passes_cwd_from_the_request(monkeypatch):
 def test_run_maps_agent_result_fields_correctly(monkeypatch):
     _capture_subprocess_run(monkeypatch, stdout='{"verdict": "PASS"}', returncode=7)
     adapter = ClaudeAdapter()
-    request = AgentRequest(
-        role="plan_reviewer", prompt="p", cwd=Path("/w"), model_alias="opus"
-    )
+    request = AgentRequest(role="plan_reviewer", prompt="p", cwd=Path("/w"), model_alias="opus")
     before = datetime.now(UTC)
     result = adapter.run(request)
     after = datetime.now(UTC)
@@ -164,3 +162,28 @@ def test_supports_exec_and_read_only_review_capabilities():
     assert adapter.supports("exec") is True
     assert adapter.supports("read_only_review") is True
     assert adapter.supports("unknown") is False
+
+
+def test_healthcheck_reports_unavailable_when_the_binary_fails_to_run(monkeypatch):
+    # A binary on PATH that errors, hangs or is not executable is a fact for
+    # doctor to report, not a traceback that takes the whole command down.
+    monkeypatch.setattr(shutil, "which", lambda _: "/usr/local/bin/claude")
+
+    def boom(*_args, **_kwargs):
+        raise OSError("Exec format error")
+
+    monkeypatch.setattr(subprocess, "run", boom)
+    status = ClaudeAdapter().healthcheck()
+    assert status.available is False
+    assert "Exec format error" in status.detail
+
+
+def test_healthcheck_reports_unavailable_when_the_binary_times_out(monkeypatch):
+    monkeypatch.setattr(shutil, "which", lambda _: "/usr/local/bin/claude")
+
+    def hang(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired(cmd="claude", timeout=30)
+
+    monkeypatch.setattr(subprocess, "run", hang)
+    status = ClaudeAdapter().healthcheck()
+    assert status.available is False

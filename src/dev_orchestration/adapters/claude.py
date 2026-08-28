@@ -26,9 +26,24 @@ class ClaudeAdapter:
                 available=False,
                 detail="claude not found on PATH. Install Claude Code.",
             )
-        proc = subprocess.run(
-            [self.binary, "--version"], capture_output=True, text=True, timeout=30, check=False
-        )
+        # healthcheck never raises: a binary that is on PATH but errors, hangs
+        # or is not executable is *unavailable*, which is a fact doctor should
+        # report, not a traceback that takes the whole command down.
+        try:
+            proc = subprocess.run(
+                [self.binary, "--version"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+        except (subprocess.SubprocessError, OSError) as exc:
+            return AdapterStatus(
+                name=self.name,
+                available=False,
+                path=path,
+                detail=f"claude found at {path} but did not run: {exc}",
+            )
         version = proc.stdout.strip() or None
         return AdapterStatus(
             name=self.name,
