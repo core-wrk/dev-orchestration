@@ -72,9 +72,18 @@ class RunStore:
 
         next_version = max_version + 1
         target = planning / f"plan-v{next_version}.md"
-        if target.exists():
-            raise PlanOverwriteError(f"{target} already exists; plans are immutable")
-        target.write_text(content, encoding="utf-8")
+        # Exclusive create, not exists-then-write. With max+1 numbering the
+        # target cannot already exist single-threaded, so a separate exists()
+        # check was unreachable -- and as the concurrent-write guard it was
+        # kept for, it did not work: two writers both glob, both compute the
+        # same next version, both see nothing, and one silently overwrites the
+        # other's plan. "x" makes the check and the create one atomic
+        # operation in the filesystem, which is the only place it can be.
+        try:
+            with target.open("x", encoding="utf-8") as handle:
+                handle.write(content)
+        except FileExistsError as exc:
+            raise PlanOverwriteError(f"{target} already exists; plans are immutable") from exc
         return target
 
     def append_event(self, event: dict) -> None:

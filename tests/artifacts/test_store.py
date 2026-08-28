@@ -1,9 +1,11 @@
 import json
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
 from dev_orchestration.artifacts.store import (
+    PlanOverwriteError,
     RunStore,
     new_run_id,
     slugify,
@@ -101,3 +103,28 @@ def test_stray_files_do_not_crash_version_count(store):
     result = store.write_plan_version("# Plan v2\n")
     assert result.name == "plan-v2.md"
     assert result.read_text() == "# Plan v2\n"
+
+
+def test_a_concurrent_writer_cannot_silently_overwrite_a_plan(store, monkeypatch):
+    """The losing side of the real race must not clobber the winner's plan.
+
+    Reproduces the TOCTOU window rather than merely a stale directory listing:
+    both writers glob and see nothing (empty glob), and the loser's existence
+    check observes False (patched exists) because the winner has not created
+    the file yet -- and then the winner creates it before the loser writes.
+
+    An exists()-then-write implementation passes both observations and
+    overwrites. Only an atomic exclusive create can fail here, so this test
+    distinguishes the two implementations rather than just proving some guard
+    exists.
+    """
+    first = store.write_plan_version("original plan\n")
+    assert first.name == "plan-v1.md"
+
+    monkeypatch.setattr(Path, "glob", lambda self, pattern: iter([]))
+    monkeypatch.setattr(Path, "exists", lambda self: False)
+
+    with pytest.raises(PlanOverwriteError):
+        store.write_plan_version("clobbering plan\n")
+
+    assert first.read_text() == "original plan\n"
