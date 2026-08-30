@@ -128,3 +128,19 @@ def test_a_concurrent_writer_cannot_silently_overwrite_a_plan(store, monkeypatch
         store.write_plan_version("clobbering plan\n")
 
     assert first.read_text() == "original plan\n"
+
+
+def test_finding_index_round_trips_and_starts_empty(tmp_path):
+    store = RunStore(tmp_path, "r")
+    store.initialize(
+        RunManifest(
+            run_id="r",
+            repository=str(tmp_path),
+            workflow="standard",
+            tier=Tier.STANDARD,
+            project_class=ProjectClass.INTERNAL_UTILITY,
+        )
+    )
+    assert store.finding_index() == {}
+    store.record_finding_index({"src/app.py|missing bound check": "F001"})
+    assert store.finding_index() == {"src/app.py|missing bound check": "F001"}

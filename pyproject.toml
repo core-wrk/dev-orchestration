@@ -2,7 +2,7 @@
 name = "dev-orchestration"
 version = "0.1.0"
 description = "Local-first, vendor-neutral orchestration for AI-assisted development"
-requires-python = ">=3.11"
+requires-python = ">=3.13"
 dependencies = ["typer>=0.12", "pydantic>=2.7", "pyyaml>=6.0"]
 
 [project.optional-dependencies]

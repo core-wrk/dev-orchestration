@@ -13,6 +13,7 @@ from dev_orchestration.domain.findings import Finding, Severity
 from dev_orchestration.domain.run import RunManifest
 from dev_orchestration.workflow.stages import (
     MAX_REMEDIATION_CYCLES,
+    FindingIdentityAmbiguity,
     RemediationExhausted,
     execute,
     plan,
@@ -162,3 +163,58 @@ def test_verification_passes_every_criterion_to_the_model(store):
     )
     assert result.verdicts[0].criterion == "a"
     assert Category.ACCEPTANCE_CRITERIA in adapter.requests[0].context.labels()
+
+
+def _blocking(summary, line=12):
+    return {
+        "outcome": "CHANGES_REQUIRED",
+        "findings": [
+            {
+                "id": "provider-made-this-up",
+                "severity": "blocking",
+                "summary": summary,
+                "evidence_required": "a test",
+                "file": "src/app.py",
+                "line": line,
+            }
+        ],
+    }
+
+
+def test_a_repeated_finding_keeps_its_id_across_line_and_wording_drift(store):
+    adapter = Scripted(
+        [_blocking("Missing bounds check", 12), _blocking("Missing bound checks", 40)]
+    )
+    roles = registry(adapter, "implementation_reviewer")
+    first = review_implementation(roles, "plan", "diff", "evidence", [], store)
+    second = review_implementation(roles, "plan", "diff", "evidence", [], store)
+    assert first.findings[0].id == "F001"
+    assert second.findings[0].id == "F001"
+
+
+def test_a_different_finding_gets_a_new_id(store):
+    adapter = Scripted([_blocking("Missing bounds check"), _blocking("Unclosed file handle")])
+    roles = registry(adapter, "implementation_reviewer")
+    first = review_implementation(roles, "plan", "diff", "evidence", [], store)
+    second = review_implementation(roles, "plan", "diff", "evidence", [], store)
+    assert first.findings[0].id == "F001"
+    assert second.findings[0].id == "F002"
+
+
+def test_ambiguous_finding_identity_fails_closed(store):
+    store.record_finding_index(
+        {
+            "src/app.py|missing bound check": "F001",
+            "src/app.py|missing bound validation": "F002",
+        }
+    )
+    adapter = Scripted([_blocking("Missing bound check validation")])
+    with pytest.raises(FindingIdentityAmbiguity):
+        review_implementation(
+            registry(adapter, "implementation_reviewer"),
+            "plan",
+            "diff",
+            "evidence",
+            [],
+            store,
+        )

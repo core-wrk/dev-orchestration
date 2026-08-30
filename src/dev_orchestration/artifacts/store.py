@@ -167,5 +167,15 @@ class RunStore:
         version = max(existing, default=0) + 1
         return self.write_json_artifact(f"review/{prefix}-v{version}.json", value, immutable=True)
 
+    def finding_index(self) -> dict[str, str]:
+        """Map each finding identity key to the ID assigned in this run."""
+        path = self.root / "review" / "finding-index.json"
+        if not path.is_file():
+            return {}
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def record_finding_index(self, index: dict[str, str]) -> None:
+        self.write_json_artifact("review/finding-index.json", index)
+
     def append_event(self, event: dict) -> None:
         append_event(self.root / "events.jsonl", event)

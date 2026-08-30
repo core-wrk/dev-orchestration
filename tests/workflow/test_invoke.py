@@ -39,29 +39,36 @@ def request():
     return AgentRequest(role="classifier", prompt="p", cwd=Path("/w"))
 
 
-def test_valid_first_response_is_not_retried():
+def test_valid_first_response_is_not_retried(tmp_path):
     adapter = ScriptedAdapter([GOOD])
-    assert invoke_structured(adapter, request(), Classification).tier == "standard"
+    assert invoke_structured(adapter, request(), Classification, tmp_path).tier == "standard"
     assert adapter.calls == 1
     assert adapter.requests[0].expected_schema is not None
 
 
-def test_every_structured_call_attaches_generated_schema_to_both_attempts():
+def test_every_structured_call_attaches_generated_schema_to_both_attempts(tmp_path):
     adapter = ScriptedAdapter([BAD, GOOD])
-    invoke_structured(adapter, request(), Classification)
+    invoke_structured(adapter, request(), Classification, tmp_path)
     assert adapter.calls == 2
     assert adapter.requests[0].expected_schema == adapter.requests[1].expected_schema
     assert "tier" in adapter.requests[1].prompt
 
 
-def test_two_invalid_responses_escalate_rather_than_looping():
+def test_two_invalid_responses_escalate_rather_than_looping(tmp_path):
     adapter = ScriptedAdapter([BAD, BAD])
     with pytest.raises(SchemaEscalation):
-        invoke_structured(adapter, request(), Classification)
+        invoke_structured(adapter, request(), Classification, tmp_path)
     assert adapter.calls == 2
 
 
-def test_provider_nonzero_exit_is_rejected_before_payload_validation():
+def test_provider_nonzero_exit_is_rejected_before_payload_validation(tmp_path):
     adapter = ScriptedAdapter([GOOD], exit_codes=[3])
     with pytest.raises(AgentInvocationError):
-        invoke_structured(adapter, request(), Classification)
+        invoke_structured(adapter, request(), Classification, tmp_path)
+
+
+def test_the_generated_schema_is_written_where_the_caller_asks(tmp_path):
+    adapter = ScriptedAdapter([GOOD])
+    invoke_structured(adapter, request(), Classification, tmp_path / "schemas")
+    assert (tmp_path / "schemas" / "classification.json").is_file()
+    assert adapter.requests[0].expected_schema == tmp_path / "schemas" / "classification.json"

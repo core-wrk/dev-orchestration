@@ -1,6 +1,8 @@
 """Provider-neutral workflow stages."""
 
+import difflib
 import json
+import re
 from pathlib import Path
 
 from dev_orchestration.adapters.base import AgentResult
@@ -61,7 +63,9 @@ def classify(
         ],
     )
     request = _request(registry, "classifier", store, packet, store.repo_root)
-    result = invoke_structured(registry.adapter_for("classifier"), request, Classification)
+    result = invoke_structured(
+        registry.adapter_for("classifier"), request, Classification, store.root / "schemas"
+    )
     _record_result(store, "classification.json", result.model_dump(mode="json"))
     store.append_event(
         {
@@ -114,7 +118,9 @@ def review_plan(
         ],
     )
     request = _request(registry, "plan_reviewer", store, packet, store.repo_root)
-    raw = invoke_structured(registry.adapter_for("plan_reviewer"), request, ReviewResult)
+    raw = invoke_structured(
+        registry.adapter_for("plan_reviewer"), request, ReviewResult, store.root / "schemas"
+    )
     result = _renumber(raw, store)
     store.write_versioned_json("plan-review", result.model_dump(mode="json"))
     store.append_event(
@@ -127,27 +133,62 @@ def review_plan(
     return result
 
 
+class FindingIdentityAmbiguity(RuntimeError):
+    """A review round could not be matched to prior finding identity safely."""
+
+
+def _canonical_summary(summary: str) -> str:
+    words = re.findall(r"[a-z0-9]+", summary.casefold())
+    return " ".join(word[:-1] if word.endswith("s") and len(word) > 4 else word for word in words)
+
+
+def _fingerprint(finding: Finding) -> str:
+    """Identify a defect without volatile line numbers or exact phrasing."""
+    return f"{finding.file or '<none>'}|{_canonical_summary(finding.summary)}"
+
+
+def _matching_key(key: str, finding: Finding) -> bool:
+    file_name, _, summary = key.partition("|")
+    if file_name != (finding.file or "<none>"):
+        return False
+    current = _canonical_summary(finding.summary)
+    ratio = difflib.SequenceMatcher(None, summary, current).ratio()
+    old_words = set(summary.split())
+    new_words = set(current.split())
+    overlap = len(old_words & new_words) / max(len(old_words | new_words), 1)
+    return ratio >= 0.75 or overlap >= 0.8
+
+
 def _renumber(result: ReviewResult, store: RunStore) -> ReviewResult:
-    existing = _known_finding_ids(store)
+    index = store.finding_index()
+    existing = list(index.values())
+    used: set[str] = set()
     renumbered: list[Finding] = []
     for finding in result.findings:
-        finding_id = next_finding_id(existing)
-        existing.append(finding_id)
+        key = _fingerprint(finding)
+        finding_id = index.get(key)
+        if finding_id is None:
+            matches = [
+                candidate_id
+                for candidate_key, candidate_id in index.items()
+                if _matching_key(candidate_key, finding)
+            ]
+            matches = sorted(set(matches))
+            if len(matches) > 1:
+                raise FindingIdentityAmbiguity(
+                    f"finding {finding.summary!r} ambiguously matches prior IDs {matches}"
+                )
+            finding_id = matches[0] if matches else next_finding_id(existing)
+            index[key] = finding_id
+            existing.append(finding_id)
+        if finding_id in used:
+            raise FindingIdentityAmbiguity(
+                f"review round contains more than one distinct finding mapped to {finding_id}"
+            )
+        used.add(finding_id)
         renumbered.append(finding.model_copy(update={"id": finding_id}))
+    store.record_finding_index(index)
     return result.model_copy(update={"findings": renumbered})
-
-
-def _known_finding_ids(store: RunStore) -> list[str]:
-    path = store.root / "events.jsonl"
-    if not path.is_file():
-        return []
-    ids: list[str] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        try:
-            ids.extend(json.loads(line).get("finding_ids", []))
-        except json.JSONDecodeError:
-            continue
-    return ids
 
 
 def reconcile(
@@ -270,7 +311,12 @@ def review_implementation(
         ],
     )
     request = _request(registry, "implementation_reviewer", store, packet, store.repo_root)
-    raw = invoke_structured(registry.adapter_for("implementation_reviewer"), request, ReviewResult)
+    raw = invoke_structured(
+        registry.adapter_for("implementation_reviewer"),
+        request,
+        ReviewResult,
+        store.root / "schemas",
+    )
     result = _renumber(raw, store)
     store.write_versioned_json("implementation-review", result.model_dump(mode="json"))
     store.append_event(
@@ -361,7 +407,9 @@ def verify(
         ],
     )
     request = _request(registry, "verifier", store, packet, store.repo_root)
-    result = invoke_structured(registry.adapter_for("verifier"), request, Verification)
+    result = invoke_structured(
+        registry.adapter_for("verifier"), request, Verification, store.root / "schemas"
+    )
     _record_result(store, "verification/final-verification.json", result.model_dump(mode="json"))
     store.append_event(
         {

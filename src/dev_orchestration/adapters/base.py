@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
+from dev_orchestration.context.assembler import PROMPT_BUDGET_BYTES, PromptBudgetError
 from dev_orchestration.context.packet import ContextPacket
 
 
@@ -51,7 +52,13 @@ def compose_prompt(request: AgentRequest) -> str:
     if request.context is None:
         return request.prompt
     rendered = request.context.render()
-    return request.prompt if not rendered else f"{rendered}\n---\n\n{request.prompt}"
+    prompt = request.prompt if not rendered else f"{rendered}\n---\n\n{request.prompt}"
+    if len(prompt.encode("utf-8")) > PROMPT_BUDGET_BYTES:
+        raise PromptBudgetError(
+            f"final provider prompt is {len(prompt.encode('utf-8'))} bytes, over the "
+            f"{PROMPT_BUDGET_BYTES}-byte budget"
+        )
+    return prompt
 
 
 @runtime_checkable

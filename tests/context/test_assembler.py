@@ -18,7 +18,9 @@ def ref(category, content="x"):
 
 
 def test_validation_receives_no_agent_output_whatsoever():
-    assert STAGE_CONTRACTS["validation"] == frozenset({Category.COMMANDS, Category.WORKTREE})
+    assert STAGE_CONTRACTS["validation"] == frozenset(
+        {Category.COMMANDS, Category.WORKTREE, Category.CONTEXT_NOTES}
+    )
     assert Category.REVIEW_FINDINGS not in STAGE_CONTRACTS["validation"]
 
 

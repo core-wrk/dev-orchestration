@@ -1,6 +1,5 @@
 """Provider invocation with strict validation and exactly one retry."""
 
-import tempfile
 from dataclasses import replace
 from pathlib import Path
 
@@ -28,11 +27,10 @@ def invoke_structured(
     adapter: AgentAdapter,
     request: AgentRequest,
     model: type[BaseModel],
+    schema_dir: Path,
 ) -> BaseModel:
-    """Attach a generated schema to both attempts and reject non-zero exits."""
-    schema_path = request.expected_schema or write_schema(
-        model, Path(tempfile.mkdtemp(prefix="dev-orch-schema-"))
-    )
+    """Attach a durable generated schema to both attempts."""
+    schema_path = request.expected_schema or write_schema(model, schema_dir)
     request = replace(request, expected_schema=schema_path)
     result = adapter.run(request)
     if result.exit_code != 0:
