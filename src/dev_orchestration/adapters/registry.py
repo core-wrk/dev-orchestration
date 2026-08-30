@@ -17,7 +17,6 @@ DEFAULT_ROLES: dict[str, RoleConfig] = {
     "planner": RoleConfig(adapter="codex", model="sol", reasoning="high"),
     "plan_reviewer": RoleConfig(adapter="claude", model="opus"),
     "plan_reconciler": RoleConfig(adapter="codex", model="sol", reasoning="high"),
-    "goal_executor": RoleConfig(adapter="codex", model="luna", reasoning="high"),
     "implementation_worker": RoleConfig(adapter="codex", model="luna", reasoning="high"),
     "implementation_reviewer": RoleConfig(adapter="claude", model="opus"),
     # verifier is in READ_ONLY_ROLES, so it must be bound to an adapter that
@@ -95,11 +94,12 @@ def default_registry(
     project_config: ProjectConfig | None = None,
     global_config: GlobalConfig | None = None,
 ) -> RoleRegistry:
-    """Build the configured provider-neutral registry for a local run."""
-    del project_config
+    """Bind roles with framework < global < project precedence."""
     global_config = global_config or GlobalConfig()
     roles = dict(DEFAULT_ROLES)
     roles.update(global_config.roles)
+    if project_config is not None:
+        roles.update(project_config.roles)
     codex_override = None
     if global_config.codex_binary:
         codex_override = Path(global_config.codex_binary).expanduser()

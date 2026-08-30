@@ -15,6 +15,10 @@ PROTECTED_DEFAULTS: dict[str, bool] = {
 }
 
 
+class ProtectedRuleViolation(RuntimeError):
+    """A configuration layer tried to set a protected rule."""
+
+
 def _flatten(data: dict, prefix: str = "") -> dict[str, Any]:
     flat: dict[str, Any] = {}
     for key, value in data.items():
@@ -31,10 +35,14 @@ def _is_strictness_key(dotted: str) -> bool:
 
 
 def resolve_policy(layers: list[dict]) -> dict[str, Any]:
-    """Merge configuration layers into one flat dotted-key policy."""
+    """Merge configuration layers and refuse protected-rule overrides."""
     resolved: dict[str, Any] = {}
     for layer in layers:
         for key, value in _flatten(layer).items():
+            if key in PROTECTED_DEFAULTS and value is not False:
+                raise ProtectedRuleViolation(
+                    f"{key} was set to {value!r}; protected rules are not overridable"
+                )
             if _is_strictness_key(key) and key in resolved:
                 resolved[key] = bool(resolved[key]) or bool(value)
             else:

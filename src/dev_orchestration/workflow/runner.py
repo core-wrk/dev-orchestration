@@ -14,19 +14,23 @@ from dev_orchestration.context.packet import ContextRef
 from dev_orchestration.domain.enums import Outcome, RunState, Tier
 from dev_orchestration.domain.findings import Verification
 from dev_orchestration.domain.run import GitBlock, RoleBinding
-from dev_orchestration.git.repo import GitRepo
+from dev_orchestration.git.repo import EmptySnapshotError, GitRepo
 from dev_orchestration.scope import ScopeFence
 from dev_orchestration.workflow.bootstrap import (
-    RuntimeContext,
     bootstrap_run,
     resolve_run_policy,
     resolve_runtime_context,
 )
 from dev_orchestration.workflow.engine import Engine, IllegalTransitionError
 from dev_orchestration.workflow.invoke import AgentInvocationError, SchemaEscalation
-from dev_orchestration.workflow.scope_check import ScopeViolation, enforce_fence
+from dev_orchestration.workflow.scope_check import (
+    ScopeViolation,
+    enforce_fence,
+    enforce_ignored_writes,
+)
 from dev_orchestration.workflow.stages import (
     MAX_REMEDIATION_CYCLES,
+    FindingIdentityAmbiguity,
     RemediationExhausted,
     classify,
     execute,
@@ -37,7 +41,11 @@ from dev_orchestration.workflow.stages import (
     review_plan,
     verify,
 )
-from dev_orchestration.workflow.tiers import UnsupportedTierError, stages_for
+from dev_orchestration.workflow.tiers import (
+    TierDowngradeError,
+    UnsupportedTierError,
+    stages_for,
+)
 from dev_orchestration.workflow.validation import (
     ValidationOutcome,
     all_passed,
@@ -121,24 +129,6 @@ def _task_contract(
     )
 
 
-def _persist_context(store, runtime: RuntimeContext, config: ProjectConfig) -> None:
-    store.update_manifest(
-        active_profiles=[],
-        context_included=runtime.included,
-        context_excluded=runtime.excluded,
-        context_conflicts=runtime.conflicts,
-    )
-    store.write_json_artifact(
-        "context.json",
-        {
-            "included": runtime.included,
-            "excluded": runtime.excluded,
-            "conflicts": runtime.conflicts,
-            "persistent": config.context.persistent,
-        },
-    )
-
-
 def _terminal(
     engine: Engine,
     state: RunState,
@@ -172,10 +162,47 @@ def _effective_tier(
     override: Tier | None,
     minimum: Tier | None,
 ) -> Tier:
-    requested = override or classification_tier
+    requested = classification_tier
+    if override is not None:
+        if _tier_rank(override) < _tier_rank(classification_tier):
+            raise TierDowngradeError(
+                f"--tier {override} is below the classified tier {classification_tier}; "
+                "an override may raise a run's controls but never lower them"
+            )
+        requested = override
     if minimum and _tier_rank(requested) < _tier_rank(minimum):
         requested = minimum
     return requested
+
+
+def _run_worktree_stage(
+    worktree_repo: GitRepo,
+    base_commit: str,
+    fence: ScopeFence,
+    action,
+):
+    """Run an agent stage and restore all ignored side effects afterward."""
+    ignored_before = worktree_repo.ignored_paths()
+    try:
+        result = action()
+        enforce_fence(worktree_repo, base_commit, fence)
+        enforce_ignored_writes(worktree_repo, ignored_before, fence)
+    except Exception:
+        worktree_repo.restore_ignored_snapshot(ignored_before)
+        raise
+    worktree_repo.restore_ignored_snapshot(ignored_before)
+    return result
+
+
+def _run_validation_stage(worktree_repo: GitRepo, base_commit: str, fence: ScopeFence, action):
+    """Run validation while ensuring its ignored caches do not become residue."""
+    ignored_before = worktree_repo.ignored_paths()
+    try:
+        result = action()
+        enforce_fence(worktree_repo, base_commit, fence)
+        return result
+    finally:
+        worktree_repo.restore_ignored_snapshot(ignored_before)
 
 
 def execute_run(
@@ -188,8 +215,16 @@ def execute_run(
     *,
     tier_override: Tier | None = None,
     external_plan: Path | None = None,
+    acceptance_criteria_source: str = "explicit",
 ) -> RunOutcome:
     """Execute a run; every started run is returned in a terminal state."""
+    if not request_text.strip():
+        raise ContextContractError("a run requires non-empty request text")
+    acceptance_criteria = _normalize_criteria(acceptance_criteria)
+    if acceptance_criteria_source not in {"explicit", "request_fallback"}:
+        raise ContextContractError(
+            f"unknown acceptance criteria source {acceptance_criteria_source!r}"
+        )
     if tier_override is not None:
         stages_for(tier_override)
     store, worktree = bootstrap_run(
@@ -202,7 +237,11 @@ def execute_run(
         _terminal(engine, RunState.FAILED, "bootstrap did not record a base commit")
         return _outcome(engine)
     worktree_repo = GitRepo(worktree)
-    store.update_manifest(acceptance_criteria=acceptance_criteria, tier_override=tier_override)
+    store.update_manifest(
+        acceptance_criteria=acceptance_criteria,
+        acceptance_criteria_source=acceptance_criteria_source,
+        tier_override=tier_override,
+    )
     _record_roles(store, registry)
     store.update_manifest(
         available_profiles=project_config.profiles.available,
@@ -366,20 +405,29 @@ def execute_run(
             store.append_event({"event": "task_contract_written"})
 
         engine.transition(RunState.EXECUTING)
-        execute(
-            registry,
-            approved,
-            invariants,
-            runtime.references,
-            worktree,
-            store,
-            runtime.profile_constraints,
-            scope_context,
+        _run_worktree_stage(
+            worktree_repo,
+            base_commit,
+            fence,
+            lambda: execute(
+                registry,
+                approved,
+                invariants,
+                runtime.references,
+                worktree,
+                store,
+                runtime.profile_constraints,
+                scope_context,
+            ),
         )
-        enforce_fence(worktree_repo, base_commit, fence)
 
         engine.transition(RunState.VALIDATING)
-        outcomes = run_validations(project_config.validation, effective_tier, worktree)
+        outcomes = _run_validation_stage(
+            worktree_repo,
+            base_commit,
+            fence,
+            lambda: run_validations(project_config.validation, effective_tier, worktree),
+        )
         store.write_json_artifact(
             "execution/validation-v1.json", _validation_json(outcomes), immutable=True
         )
@@ -432,18 +480,27 @@ def execute_run(
                 if finding.id in implementation_review.blocking_ids()
             ]
             current_state = diff or "No committed or working-tree diff was observed."
-            remediate(
-                registry,
-                blocking,
-                approved,
-                current_state,
-                worktree,
-                store,
-                cycle=cycle,
+            _run_worktree_stage(
+                worktree_repo,
+                base_commit,
+                fence,
+                lambda blocking=blocking, current_state=current_state, cycle=cycle: remediate(
+                    registry,
+                    blocking,
+                    approved,
+                    current_state,
+                    worktree,
+                    store,
+                    cycle=cycle,
+                ),
             )
-            enforce_fence(worktree_repo, base_commit, fence)
             engine.transition(RunState.VALIDATING)
-            outcomes = run_validations(project_config.validation, effective_tier, worktree)
+            outcomes = _run_validation_stage(
+                worktree_repo,
+                base_commit,
+                fence,
+                lambda: run_validations(project_config.validation, effective_tier, worktree),
+            )
             store.write_json_artifact(
                 f"execution/validation-v{cycle + 1}.json",
                 _validation_json(outcomes),
@@ -460,7 +517,6 @@ def execute_run(
             if not all_passed(outcomes):
                 _terminal(engine, RunState.FAILED, "required validation failed after remediation")
                 return _outcome(engine)
-            enforce_fence(worktree_repo, base_commit, fence)
             diff = worktree_repo.change_diff(base_commit)
             review_inventory = worktree_repo.change_inventory(base_commit)
             engine.transition(RunState.IMPLEMENTATION_REVIEW)
@@ -475,11 +531,6 @@ def execute_run(
             if worktree_repo.change_inventory(base_commit) != review_inventory:
                 raise ContextContractError("read-only implementation review changed the worktree")
             cycle += 1
-            if cycle > MAX_REMEDIATION_CYCLES + 1 and implementation_review.blocking_ids():
-                raise RemediationExhausted(
-                    f"blocking findings {implementation_review.blocking_ids()} remained after "
-                    f"{MAX_REMEDIATION_CYCLES} remediation cycles"
-                )
 
         if implementation_review.outcome in {Outcome.BLOCKED, Outcome.ESCALATE}:
             target = (
@@ -505,24 +556,37 @@ def execute_run(
         )
         if worktree_repo.change_inventory(base_commit) != review_inventory:
             raise ContextContractError("read-only verification changed the worktree")
+        verdict_criteria = [verdict.criterion for verdict in verification.verdicts]
         all_verdicts_pass = all(verdict.verdict == "PASS" for verdict in verification.verdicts)
+        criteria_bound = (
+            list(verification.criteria) == list(acceptance_criteria)
+            and verdict_criteria == list(acceptance_criteria)
+            and all(verdict.evidence.strip() for verdict in verification.verdicts)
+        )
         if (
-            verification.outcome is not Outcome.PASS
+            not criteria_bound
+            or verification.outcome is not Outcome.PASS
             or not all_verdicts_pass
             or set(verification.unresolved_finding_ids) & set(implementation_review.blocking_ids())
-            or implementation_review.blocking_ids()
         ):
-            _terminal(engine, RunState.FAILED, "final verification was not an unqualified PASS")
+            _terminal(
+                engine,
+                RunState.FAILED,
+                "final verification did not provide an unqualified PASS for the supplied criteria",
+            )
             return _outcome(engine, verification)
 
         enforce_fence(worktree_repo, base_commit, fence)
         changed = worktree_repo.change_inventory(base_commit)
-        final_commit = worktree_repo.current_commit()
-        if changed or final_commit == base_commit:
-            final_commit = worktree_repo.commit_snapshot(
-                f"ai({store.run_id}): complete orchestrated run", changed
-            )
+        if not changed:
+            _terminal(engine, RunState.FAILED, "the run produced no change to commit")
+            return _outcome(engine, verification)
+        final_commit = worktree_repo.commit_snapshot(
+            f"ai({store.run_id}): complete orchestrated run", changed
+        )
         worktree_repo.ensure_clean()
+        if final_commit == base_commit:
+            raise ContextContractError("final commit does not advance from the recorded base")
         if not worktree_repo.is_ancestor(base_commit, final_commit):
             raise ContextContractError("final commit does not descend from the recorded base")
         store.update_manifest(
@@ -543,6 +607,8 @@ def execute_run(
     except (
         RemediationExhausted,
         ScopeViolation,
+        EmptySnapshotError,
+        FindingIdentityAmbiguity,
         SchemaEscalation,
         AgentInvocationError,
         ContextContractError,
@@ -550,7 +616,7 @@ def execute_run(
     ) as exc:
         _terminal(engine, RunState.ESCALATED, str(exc))
         return _outcome(engine)
-    except (IllegalTransitionError, UnsupportedTierError) as exc:
+    except (IllegalTransitionError, UnsupportedTierError, TierDowngradeError) as exc:
         _terminal(engine, RunState.ESCALATED, str(exc))
         return _outcome(engine)
     except (OSError, subprocess.SubprocessError) as exc:
@@ -559,3 +625,27 @@ def execute_run(
     except Exception as exc:  # noqa: BLE001 - guarantee a durable terminal state
         _terminal(engine, RunState.FAILED, f"unexpected workflow failure: {exc}")
         return _outcome(engine)
+
+
+def _normalize_criteria(criteria: list[str]) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for criterion in criteria:
+        value = " ".join(criterion.split())
+        if not value:
+            raise ContextContractError(
+                "acceptance criteria must be non-empty after trimming whitespace"
+            )
+        key = value.casefold()
+        if key in seen:
+            raise ContextContractError(
+                f"acceptance criteria must be unique after normalization: {value!r}"
+            )
+        seen.add(key)
+        normalized.append(value)
+    if not normalized:
+        raise ContextContractError(
+            "a run requires at least one acceptance criterion; "
+            "there is nothing for final verification to judge"
+        )
+    return normalized

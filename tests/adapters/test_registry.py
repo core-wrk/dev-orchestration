@@ -11,7 +11,7 @@ from dev_orchestration.adapters.registry import (
     RoleRegistry,
     UnknownRoleError,
 )
-from dev_orchestration.config.models import RoleConfig
+from dev_orchestration.config.models import GlobalConfig, ProjectConfig, RoleConfig
 
 
 @pytest.fixture
@@ -119,3 +119,32 @@ def test_build_request_carries_reasoning_from_the_binding(registry):
 def test_build_request_reasoning_is_none_when_not_configured(registry):
     request = registry.build_request("plan_reviewer", prompt="review", cwd=Path("/w"))
     assert request.reasoning is None
+
+
+def test_project_roles_override_global_which_override_framework_defaults():
+    from dev_orchestration.adapters.registry import default_registry
+
+    project = ProjectConfig.model_validate(
+        {
+            "project": {"name": "demo", "class": "internal_utility"},
+            "roles": {"planner": {"adapter": "claude", "model": "opus"}},
+        }
+    )
+    global_config = GlobalConfig(
+        roles={
+            "planner": RoleConfig(adapter="codex", model="luna"),
+            "classifier": RoleConfig(adapter="claude", model="opus"),
+        }
+    )
+    registry = default_registry(project, global_config)
+    assert registry.binding_for("planner").adapter == "claude"
+    assert registry.binding_for("planner").model == "opus"
+    assert registry.binding_for("classifier").adapter == "claude"
+    assert registry.binding_for("plan_reconciler").adapter == "codex"
+
+
+def test_default_registry_without_configuration_uses_framework_defaults():
+    from dev_orchestration.adapters.registry import default_registry
+
+    registry = default_registry()
+    assert registry.roles == DEFAULT_ROLES

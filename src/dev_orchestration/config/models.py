@@ -94,6 +94,8 @@ class ProjectConfig(BaseModel):
     validation: dict[str, ValidationCommand] = Field(default_factory=dict)
     git: GitPolicy = Field(default_factory=GitPolicy)
     context: ContextPolicy = Field(default_factory=ContextPolicy)
+    roles: dict[str, "RoleConfig"] = Field(default_factory=dict)
+    protected: dict[str, object] = Field(default_factory=dict)
 
 
 class RoleConfig(BaseModel):

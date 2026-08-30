@@ -8,24 +8,30 @@ import yaml
 from dev_orchestration import doctor as doctor_module
 from dev_orchestration.adapters.registry import ReadOnlyRoleUnsupportedError, default_registry
 from dev_orchestration.artifacts.store import NoApprovedPlanError
-from dev_orchestration.config.models import DeniedCommandError, ProjectConfig
+from dev_orchestration.config.models import DeniedCommandError, GlobalConfig, ProjectConfig
+from dev_orchestration.config.resolver import ProtectedRuleViolation
 from dev_orchestration.context.assembler import ContextContractError
 from dev_orchestration.domain.enums import RunState, Tier
-from dev_orchestration.git.repo import DirtyWorktreeError, GitCommandError, discover_repo
+from dev_orchestration.git.repo import (
+    DirtyWorktreeError,
+    EmptySnapshotError,
+    GitCommandError,
+    discover_repo,
+)
 from dev_orchestration.init_repo import (
     FileExistsRefusal,
     UncommittedContractFileError,
     initialize_repo,
 )
 from dev_orchestration.roles.loader import MissingTemplateError
-from dev_orchestration.workflow.bootstrap import BootstrapIntegrityError, ProtectedRuleViolation
+from dev_orchestration.workflow.bootstrap import BootstrapIntegrityError
 from dev_orchestration.workflow.engine import IllegalTransitionError
 from dev_orchestration.workflow.invoke import AgentInvocationError, SchemaEscalation
 from dev_orchestration.workflow.reporting import describe_status, list_runs, read_events
 from dev_orchestration.workflow.runner import execute_run
 from dev_orchestration.workflow.scope_check import ScopeViolation
 from dev_orchestration.workflow.stages import RemediationExhausted
-from dev_orchestration.workflow.tiers import UnsupportedTierError
+from dev_orchestration.workflow.tiers import TierDowngradeError, UnsupportedTierError
 
 # Errors that represent a refusal or a bad input rather than a bug. The user
 # needs the message, not a traceback: every one of these already explains what
@@ -36,7 +42,9 @@ EXPECTED_ERRORS = (
     GitCommandError,
     DeniedCommandError,
     DirtyWorktreeError,
+    EmptySnapshotError,
     UnsupportedTierError,
+    TierDowngradeError,
     ProtectedRuleViolation,
     BootstrapIntegrityError,
     ScopeViolation,
@@ -109,6 +117,17 @@ def _project_config(repo) -> ProjectConfig:
     return ProjectConfig.model_validate(yaml.safe_load(path.read_text(encoding="utf-8")))
 
 
+GLOBAL_CONFIG_PATH = Path.home() / ".dev-orchestration" / "config.yaml"
+
+
+def _global_config(path: Path | None = None) -> GlobalConfig:
+    """Load machine-level configuration, or defaults when it is absent."""
+    target = path or GLOBAL_CONFIG_PATH
+    if not target.is_file():
+        return GlobalConfig()
+    return GlobalConfig.model_validate(yaml.safe_load(target.read_text(encoding="utf-8")) or {})
+
+
 @app.command()
 def run(
     request: str = typer.Argument(..., help="What you want done"),
@@ -116,8 +135,23 @@ def run(
         None, "--plan", help="Import an external plan"
     ),
     tier: str | None = typer.Option(None, "--tier", help="Override classification"),
+    criterion: list[str] | None = typer.Option(  # noqa: B008
+        None,
+        "--criterion",
+        help="An acceptance criterion final verification must judge; repeat for several",
+    ),
 ) -> None:
     """Execute one local run. It never pushes, merges, or deploys."""
+    criteria = list(criterion or [])
+    criteria_source = "explicit"
+    if not criteria:
+        criteria = [request]
+        criteria_source = "request_fallback"
+        typer.echo(
+            "No --criterion given; verifying against the request text itself. "
+            "Pass --criterion to state what done actually means.",
+            err=True,
+        )
     try:
         repo = discover_repo(Path.cwd())
         config = _project_config(repo)
@@ -127,14 +161,16 @@ def run(
                 override = Tier(tier)
             except ValueError as exc:
                 raise UnsupportedTierError(f"unknown or unsupported tier {tier!r}") from exc
-        registry = default_registry(config)
+        global_config = _global_config()
+        registry = default_registry(config, global_config)
         outcome = execute_run(
             repo,
             config,
             registry,
             request,
-            Path.home() / ".dev-orchestration" / "worktrees",
-            acceptance_criteria=[request],
+            Path(global_config.worktree_root).expanduser(),
+            acceptance_criteria=criteria,
+            acceptance_criteria_source=criteria_source,
             tier_override=override,
             external_plan=plan_file,
         )

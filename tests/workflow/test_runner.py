@@ -7,7 +7,8 @@ import pytest
 from dev_orchestration.adapters.base import AdapterStatus, AgentResult
 from dev_orchestration.adapters.registry import RoleRegistry
 from dev_orchestration.config.models import ProjectConfig, RoleConfig
-from dev_orchestration.domain.enums import RunState
+from dev_orchestration.context.assembler import ContextContractError
+from dev_orchestration.domain.enums import RunState, Tier
 from dev_orchestration.git.repo import GitRepo
 from dev_orchestration.workflow.runner import execute_run
 
@@ -51,6 +52,8 @@ class Scripted:
     def run(self, request):
         self.seen.append(request.role)
         self.requests.append(request)
+        if request.role == "implementation_worker":
+            (request.cwd / "src" / "app.py").write_text("x = 2\n")
         values = self.script[request.role]
         payload = values.pop(0) if len(values) > 1 else values[0]
         now = datetime.now(UTC)
@@ -87,10 +90,15 @@ def script(tier="standard", review=PASS, verifier=VERIFY, profiles=None):
     }
 
 
-class WritingWorker(Scripted):
+class NoOpWorker(Scripted):
+    """A worker that returns success without changing the worktree."""
+
     def run(self, request):
         if request.role == "implementation_worker":
-            (request.cwd / "src" / "app.py").write_text("x = 2\n")
+            self.seen.append(request.role)
+            self.requests.append(request)
+            now = datetime.now(UTC)
+            return AgentResult("fake", None, 0, self.script[request.role][0], now, now)
         return super().run(request)
 
 
@@ -147,7 +155,7 @@ def test_complete_local_persists_clean_final_commit(tmp_path):
     outcome = execute_run(
         git,
         CONFIG,
-        registry(WritingWorker(script())),
+        registry(Scripted(script())),
         "change the flag",
         tmp_path / "wt",
         CRITERIA,
@@ -329,3 +337,105 @@ def test_external_plan_is_imported_hashed_and_planner_is_skipped(tmp_path):
     manifest = json.loads((outcome.store_root / "manifest.json").read_text())
     assert manifest["plan_origin"] == "external"
     assert manifest["plan_sha256"]
+
+
+def test_run_that_changes_nothing_cannot_complete_local(tmp_path):
+    git = repo(tmp_path)
+    outcome = execute_run(
+        git, CONFIG, registry(NoOpWorker(script())), "add a flag", tmp_path / "wt", CRITERIA
+    )
+    assert outcome.final_state is RunState.FAILED
+    assert "no change" in outcome.reason
+    manifest = json.loads((outcome.store_root / "manifest.json").read_text())
+    assert manifest["git"]["final_commit"] is None
+
+
+def test_verifier_that_judges_no_criteria_cannot_complete_local(tmp_path):
+    git = repo(tmp_path)
+    empty = {"outcome": "PASS", "criteria": [], "verdicts": [], "unresolved_finding_ids": []}
+    outcome = execute_run(
+        git,
+        CONFIG,
+        registry(Scripted(script(verifier=empty))),
+        "do it",
+        tmp_path / "wt",
+        CRITERIA,
+    )
+    assert outcome.final_state is RunState.FAILED
+    assert "criteria" in outcome.reason
+
+
+def test_verifier_that_swaps_in_its_own_criteria_cannot_complete_local(tmp_path):
+    git = repo(tmp_path)
+    swapped = {
+        "outcome": "PASS",
+        "criteria": ["something easier"],
+        "verdicts": [{"criterion": "something easier", "verdict": "PASS", "evidence": "sure"}],
+        "unresolved_finding_ids": [],
+    }
+    outcome = execute_run(
+        git,
+        CONFIG,
+        registry(Scripted(script(verifier=swapped))),
+        "do it",
+        tmp_path / "wt",
+        CRITERIA,
+    )
+    assert outcome.final_state is RunState.FAILED
+
+
+def test_a_run_without_acceptance_criteria_is_refused(tmp_path):
+    git = repo(tmp_path)
+    with pytest.raises(ContextContractError):
+        execute_run(git, CONFIG, registry(Scripted(script())), "do it", tmp_path / "wt", [])
+
+
+def test_override_may_raise_the_tier(tmp_path):
+    git = repo(tmp_path)
+    outcome = execute_run(
+        git,
+        CONFIG,
+        registry(Scripted(script(tier="trivial"))),
+        "fix",
+        tmp_path / "wt",
+        CRITERIA,
+        tier_override=Tier.STANDARD,
+    )
+    manifest = json.loads((outcome.store_root / "manifest.json").read_text())
+    assert outcome.final_state is RunState.COMPLETE_LOCAL
+    assert manifest["tier"] == "standard"
+
+
+def test_override_may_not_lower_the_tier_below_the_classification(tmp_path):
+    git = repo(tmp_path)
+    outcome = execute_run(
+        git,
+        CONFIG,
+        registry(Scripted(script(tier="standard"))),
+        "rewrite auth",
+        tmp_path / "wt",
+        CRITERIA,
+        tier_override=Tier.TRIVIAL,
+    )
+    assert outcome.final_state is RunState.ESCALATED
+    assert "trivial" in outcome.reason and "standard" in outcome.reason
+
+
+def test_ignored_out_of_scope_write_escalates_the_run(tmp_path):
+    git = repo(tmp_path)
+    (git.root / ".gitignore").write_text(".ai/runs/\ndist/\n")
+    subprocess.run(["git", "-C", str(git.root), "add", ".gitignore"], check=True)
+    subprocess.run(["git", "-C", str(git.root), "commit", "-qm", "ignore dist"], check=True)
+
+    class Sneaky(Scripted):
+        def run(self, request):
+            if request.role == "implementation_worker":
+                (request.cwd / "dist").mkdir(exist_ok=True)
+                (request.cwd / "dist" / "payload.sh").write_text("#!/bin/sh\n")
+            return super().run(request)
+
+    outcome = execute_run(
+        git, CONFIG, registry(Sneaky(script())), "add a flag", tmp_path / "wt", CRITERIA
+    )
+    assert outcome.final_state is RunState.ESCALATED
+    assert "dist/payload.sh" in outcome.reason

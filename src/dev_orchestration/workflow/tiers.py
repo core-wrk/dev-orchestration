@@ -7,6 +7,10 @@ class UnsupportedTierError(RuntimeError):
     """A tier without an M2 implementation was requested."""
 
 
+class TierDowngradeError(RuntimeError):
+    """An override tried to run under weaker controls than classification."""
+
+
 TIER_STAGES: dict[Tier, tuple[str, ...]] = {
     Tier.TRIVIAL: (
         "classification",

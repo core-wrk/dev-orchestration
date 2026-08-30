@@ -7,6 +7,7 @@ from dev_orchestration.domain.enums import Tier
 from dev_orchestration.git.repo import DirtyWorktreeError, GitRepo
 from dev_orchestration.scope import ScopeFence
 from dev_orchestration.workflow.bootstrap import (
+    ProtectedRuleViolation,
     bootstrap_run,
     resolve_run_policy,
     resolve_runtime_context,
@@ -46,7 +47,8 @@ def repo(tmp_path):
 )
 def test_each_protected_rule_resists_override(key):
     section, name = key.split(".")
-    assert resolve_run_policy([{section: {name: True}}])[key] is False
+    with pytest.raises(ProtectedRuleViolation):
+        resolve_run_policy([{section: {name: True}}])
 
 
 def test_strictness_never_relaxes():

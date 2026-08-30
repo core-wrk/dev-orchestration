@@ -2,12 +2,13 @@ import hashlib
 import subprocess
 from datetime import UTC, datetime
 
+import pytest
 from typer.testing import CliRunner
 
 import dev_orchestration.cli as cli_module
 from dev_orchestration.adapters.base import AdapterStatus, AgentResult
 from dev_orchestration.adapters.registry import RoleRegistry
-from dev_orchestration.artifacts.store import RunStore
+from dev_orchestration.artifacts.store import PlanOverwriteError, RunStore
 from dev_orchestration.cli import app
 from dev_orchestration.config.models import RoleConfig
 from dev_orchestration.domain.enums import ProjectClass, RunState, Tier
@@ -17,12 +18,6 @@ from dev_orchestration.workflow.runner import execute_run as runner_execute_run
 
 PLAN = "# external plan\n"
 PASS = {"outcome": "PASS", "findings": []}
-VERIFY = {
-    "outcome": "PASS",
-    "criteria": ["the flag exists"],
-    "verdicts": [{"criterion": "the flag exists", "verdict": "PASS", "evidence": "seen"}],
-    "unresolved_finding_ids": [],
-}
 ROLES = (
     "classifier",
     "planner",
@@ -48,21 +43,41 @@ class ScriptedAdapter:
 
     def run(self, request):
         self.seen.append(request.role)
-        payload = {
-            "classifier": {
-                "tier": self.tier,
-                "rationale": "test",
-                "profiles": self.profiles,
-            },
-            "planner": PLAN,
-            "plan_reviewer": PASS,
-            "plan_reconciler": PLAN,
-            "implementation_worker": "done",
-            "implementation_reviewer": PASS,
-            "verifier": VERIFY,
-        }[request.role]
+        if request.role == "implementation_worker":
+            (request.cwd / "src" / "app.py").write_text("x = 2\n")
+        if request.role == "verifier":
+            criteria = _criteria_from(request)
+            payload = {
+                "outcome": "PASS",
+                "criteria": criteria,
+                "verdicts": [
+                    {"criterion": item, "verdict": "PASS", "evidence": "seen"} for item in criteria
+                ],
+                "unresolved_finding_ids": [],
+            }
+        else:
+            payload = {
+                "classifier": {
+                    "tier": self.tier,
+                    "rationale": "test",
+                    "profiles": self.profiles,
+                },
+                "planner": PLAN,
+                "plan_reviewer": PASS,
+                "plan_reconciler": PLAN,
+                "implementation_worker": "done",
+                "implementation_reviewer": PASS,
+            }[request.role]
         now = datetime.now(UTC)
         return AgentResult("fake", None, 0, payload, now, now)
+
+
+def _criteria_from(request):
+    """Read the acceptance criteria out of the verifier packet."""
+    for item in request.context.items:
+        if item.label == "acceptance_criteria":
+            return [line for line in item.content.splitlines() if line]
+    return []
 
 
 def registry(adapter):
@@ -198,14 +213,14 @@ def test_tier_override_is_effective_persisted_and_cannot_beat_minimum(tmp_path, 
     accepted_root.mkdir()
     repo(accepted_root)
     accepted_adapter = ScriptedAdapter(tier="standard")
-    monkeypatch.setattr(cli_module, "default_registry", lambda config: registry(accepted_adapter))
+    monkeypatch.setattr(cli_module, "default_registry", lambda *a, **k: registry(accepted_adapter))
     _use_local_worktree(monkeypatch, accepted_root)
     monkeypatch.chdir(accepted_root)
-    accepted = CliRunner().invoke(app, ["run", "fix", "--tier", "trivial"])
+    accepted = CliRunner().invoke(app, ["run", "fix", "--tier", "standard"])
     assert accepted.exit_code == 0, accepted.output
     accepted_manifest = _latest_manifest(accepted_root)
-    assert accepted_manifest.tier is Tier.TRIVIAL
-    assert accepted_manifest.tier_override is Tier.TRIVIAL
+    assert accepted_manifest.tier is Tier.STANDARD
+    assert accepted_manifest.tier_override is Tier.STANDARD
 
     minimum_root = tmp_path / "minimum"
     minimum_root.mkdir()
@@ -230,7 +245,7 @@ scope:
     subprocess.run(["git", "-C", str(minimum_root), "add", ".ai/project.yaml"], check=True)
     subprocess.run(["git", "-C", str(minimum_root), "commit", "-qm", "add profile"], check=True)
     minimum_adapter = ScriptedAdapter(tier="trivial", profiles=["auth"])
-    monkeypatch.setattr(cli_module, "default_registry", lambda config: registry(minimum_adapter))
+    monkeypatch.setattr(cli_module, "default_registry", lambda *a, **k: registry(minimum_adapter))
     _use_local_worktree(monkeypatch, minimum_root)
     monkeypatch.chdir(minimum_root)
     minimum = CliRunner().invoke(app, ["run", "fix", "--tier", "trivial"])
@@ -248,7 +263,7 @@ def test_external_plan_is_imported_hashed_reviewed_and_not_regenerated(tmp_path,
     source = tmp_path / "plan.md"
     source.write_text(PLAN)
     adapter = ScriptedAdapter(tier="standard")
-    monkeypatch.setattr(cli_module, "default_registry", lambda config: registry(adapter))
+    monkeypatch.setattr(cli_module, "default_registry", lambda *a, **k: registry(adapter))
     _use_local_worktree(monkeypatch, root)
     monkeypatch.chdir(root)
     result = CliRunner().invoke(app, ["run", "add a flag", "--plan", str(source)])
@@ -262,3 +277,64 @@ def test_external_plan_is_imported_hashed_reviewed_and_not_regenerated(tmp_path,
     assert (
         root / ".ai" / "runs" / manifest.run_id / "planning" / "approved-plan.md"
     ).read_text() == PLAN
+    run_store = RunStore(root, manifest.run_id)
+    approved = run_store.root / "planning" / "approved-plan.md"
+    with pytest.raises(PlanOverwriteError):
+        run_store.approve_plan(run_store.root / "planning" / "plan-v1.md")
+    assert approved.read_text() == PLAN
+
+
+def test_global_config_supplies_the_worktree_root_and_role_bindings(tmp_path, monkeypatch):
+    global_path = tmp_path / "config.yaml"
+    global_path.write_text(
+        "worktree_root: "
+        + str(tmp_path / "elsewhere")
+        + "\nroles:\n  planner:\n    adapter: claude\n    model: opus\n"
+    )
+    monkeypatch.setattr(cli_module, "GLOBAL_CONFIG_PATH", global_path)
+    loaded = cli_module._global_config()
+    assert loaded.worktree_root == str(tmp_path / "elsewhere")
+    assert loaded.roles["planner"].adapter == "claude"
+
+
+def test_missing_global_config_falls_back_to_defaults(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli_module, "GLOBAL_CONFIG_PATH", tmp_path / "absent.yaml")
+    assert cli_module._global_config().worktree_root == "~/.dev-orchestration/worktrees"
+
+
+def test_criteria_are_taken_from_the_command_line_when_supplied(tmp_path, monkeypatch):
+    root = tmp_path / "criteria"
+    root.mkdir()
+    repo(root)
+    monkeypatch.setattr(cli_module, "default_registry", lambda *a, **k: registry(ScriptedAdapter()))
+    _use_local_worktree(monkeypatch, root)
+    monkeypatch.chdir(root)
+    result = CliRunner().invoke(
+        app,
+        [
+            "run",
+            "add a flag",
+            "--criterion",
+            "the flag exists",
+            "--criterion",
+            "tests cover it",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert _latest_manifest(root).acceptance_criteria == ["the flag exists", "tests cover it"]
+    assert _latest_manifest(root).acceptance_criteria_source == "explicit"
+
+
+def test_criteria_fall_back_to_the_request_and_say_so(tmp_path, monkeypatch):
+    root = tmp_path / "fallback"
+    root.mkdir()
+    repo(root)
+    monkeypatch.setattr(cli_module, "default_registry", lambda *a, **k: registry(ScriptedAdapter()))
+    _use_local_worktree(monkeypatch, root)
+    monkeypatch.chdir(root)
+    result = CliRunner().invoke(app, ["run", "add a flag"])
+    assert result.exit_code == 0, result.output
+    manifest = _latest_manifest(root)
+    assert manifest.acceptance_criteria == ["add a flag"]
+    assert manifest.acceptance_criteria_source == "request_fallback"
+    assert "--criterion" in result.output

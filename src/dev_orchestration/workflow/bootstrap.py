@@ -7,17 +7,17 @@ from pathlib import Path
 
 from dev_orchestration.artifacts.store import RunStore, new_run_id, slugify
 from dev_orchestration.config.models import ProjectConfig
-from dev_orchestration.config.resolver import PROTECTED_DEFAULTS, resolve_policy
+from dev_orchestration.config.resolver import (
+    PROTECTED_DEFAULTS,
+    ProtectedRuleViolation,
+    resolve_policy,
+)
 from dev_orchestration.context.assembler import ContextContractError, read_reference
 from dev_orchestration.context.packet import ContextRef
 from dev_orchestration.domain.enums import RunState, Tier
 from dev_orchestration.domain.run import GitBlock, RunManifest
 from dev_orchestration.git.repo import GitRepo
 from dev_orchestration.git.worktree import create_worktree
-
-
-class ProtectedRuleViolation(RuntimeError):
-    """A protected rule resolved to something other than False."""
 
 
 class BootstrapIntegrityError(RuntimeError):
@@ -80,11 +80,17 @@ def resolve_runtime_context(
         except ContextContractError as exc:
             excluded.append(f"{path}: {exc}")
             return
-        included.append(path)
         if label == "invariants":
+            budget = project_config.context.persistent_budget_bytes
+            used = sum(len(item.content.encode("utf-8")) for item in invariants)
+            size = len(reference.content.encode("utf-8"))
+            if used + size > budget:
+                excluded.append(f"{path}: over the {budget}-byte persistent context budget")
+                return
             invariants.append(reference.model_copy(update={"label": label}))
         else:
             references.append(reference)
+        included.append(path)
 
     for path in project_config.context.persistent:
         load(path, "invariants")
