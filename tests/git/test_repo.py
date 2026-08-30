@@ -121,6 +121,26 @@ def test_changed_files_lists_paths_since_base(repo):
     assert repo.changed_files(base) == ["c.txt"]
 
 
+def test_change_inventory_covers_renames_and_worktree_states(repo):
+    base = repo.current_commit()
+    subprocess.run(
+        ["git", "-C", str(repo.root), "mv", "README.md", "renamed.md"],
+        check=True,
+        capture_output=True,
+    )
+    (repo.root / "renamed.md").write_text("changed\n")
+    (repo.root / "staged.txt").write_text("staged\n")
+    subprocess.run(["git", "-C", str(repo.root), "add", "staged.txt"], check=True)
+    (repo.root / "untracked.txt").write_text("untracked\n")
+    inventory = repo.change_inventory(base)
+    assert {
+        "README.md",
+        "renamed.md",
+        "staged.txt",
+        "untracked.txt",
+    }.issubset(inventory)
+
+
 def test_discover_repo_walks_up_from_a_subdirectory(repo):
     nested = repo.root / "deep" / "nested"
     nested.mkdir(parents=True)

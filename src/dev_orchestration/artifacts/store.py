@@ -4,6 +4,8 @@ Durable decision artifacts live here and are committed with the code they
 explain. Plan versions are immutable once written.
 """
 
+import hashlib
+import json
 import re
 from datetime import UTC, datetime
 from pathlib import Path
@@ -16,6 +18,10 @@ SUBDIRECTORIES = ("planning", "execution", "review", "verification", "approval")
 
 class PlanOverwriteError(RuntimeError):
     """An attempt was made to rewrite a reviewed plan version."""
+
+
+class NoApprovedPlanError(RuntimeError):
+    """Execution was attempted before an immutable plan was approved."""
 
 
 def slugify(text: str) -> str:
@@ -85,6 +91,81 @@ class RunStore:
         except FileExistsError as exc:
             raise PlanOverwriteError(f"{target} already exists; plans are immutable") from exc
         return target
+
+    def plan_versions(self) -> list[Path]:
+        versions = []
+        for path in (self.root / "planning").glob("plan-v*.md"):
+            match = re.fullmatch(r"plan-v(\d+)\.md", path.name)
+            if match:
+                versions.append((int(match.group(1)), path))
+        return [path for _, path in sorted(versions)]
+
+    def approve_plan(self, version_path: Path) -> Path:
+        """Atomically create the one approved contract; never replace it."""
+        version = version_path.resolve()
+        planning = (self.root / "planning").resolve()
+        try:
+            version.relative_to(planning)
+        except ValueError as exc:
+            raise PlanOverwriteError(f"plan {version_path} is outside this run") from exc
+        if version not in {path.resolve() for path in self.plan_versions()}:
+            raise PlanOverwriteError(f"plan {version_path} is not a stored plan version")
+        target = self.root / "planning" / "approved-plan.md"
+        try:
+            with target.open("x", encoding="utf-8") as handle:
+                handle.write(version.read_text(encoding="utf-8"))
+        except FileExistsError as exc:
+            raise PlanOverwriteError(
+                f"{target} already exists; an approved contract is immutable within a run"
+            ) from exc
+        digest = hashlib.sha256(version.read_bytes()).hexdigest()
+        self.update_manifest(approved_plan_version=version.name, plan_sha256=digest)
+        self.append_event({"event": "plan_approved", "version": version.name, "sha256": digest})
+        return target
+
+    def approved_plan(self) -> str:
+        target = self.root / "planning" / "approved-plan.md"
+        if not target.is_file():
+            raise NoApprovedPlanError(f"{target} does not exist; no plan has been approved")
+        return target.read_text(encoding="utf-8")
+
+    def import_external_plan(self, source: Path) -> tuple[Path, str]:
+        content = source.read_bytes()
+        digest = hashlib.sha256(content).hexdigest()
+        copied = self.write_plan_version(content.decode("utf-8"))
+        self.update_manifest(plan_origin="external", plan_sha256=digest)
+        self.append_event(
+            {
+                "event": "plan_imported",
+                "source": str(source.resolve()),
+                "sha256": digest,
+                "stored_as": copied.name,
+            }
+        )
+        return copied, digest
+
+    def write_text_artifact(self, relative: str, content: str, *, immutable: bool = False) -> Path:
+        target = self.root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        mode = "x" if immutable else "w"
+        with target.open(mode, encoding="utf-8") as handle:
+            handle.write(content)
+        return target
+
+    def write_json_artifact(self, relative: str, value: object, *, immutable: bool = False) -> Path:
+        return self.write_text_artifact(
+            relative, json.dumps(value, indent=2, default=str) + "\n", immutable=immutable
+        )
+
+    def write_versioned_json(self, prefix: str, value: object) -> Path:
+        directory = self.root / "review"
+        existing = []
+        for path in directory.glob(f"{prefix}-v*.json"):
+            match = re.fullmatch(rf"{re.escape(prefix)}-v(\d+)\.json", path.name)
+            if match:
+                existing.append(int(match.group(1)))
+        version = max(existing, default=0) + 1
+        return self.write_json_artifact(f"review/{prefix}-v{version}.json", value, immutable=True)
 
     def append_event(self, event: dict) -> None:
         append_event(self.root / "events.jsonl", event)

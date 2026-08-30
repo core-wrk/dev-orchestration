@@ -27,11 +27,23 @@ class RunManifest(BaseModel):
     workflow: str
     tier: Tier
     project_class: ProjectClass
+    available_profiles: list[str] = Field(default_factory=list)
     active_profiles: list[str] = Field(default_factory=list)
     plan_origin: str = "generated"
+    plan_sha256: str | None = None
+    approved_plan_version: str | None = None
+    request_text: str | None = None
+    acceptance_criteria: list[str] = Field(default_factory=list)
+    tier_override: Tier | None = None
+    minimum_tier: Tier | None = None
+    context_included: list[str] = Field(default_factory=list)
+    context_excluded: list[str] = Field(default_factory=list)
+    context_conflicts: list[str] = Field(default_factory=list)
+    config_layers: list[dict] = Field(default_factory=list)
     roles: dict[str, RoleBinding] = Field(default_factory=dict)
     git: GitBlock = Field(default_factory=GitBlock)
     resolved_config: dict = Field(default_factory=dict)
     status: RunState = RunState.CREATED
     created_at: datetime | None = None
     completed_at: datetime | None = None
+    terminal_reason: str | None = None

@@ -6,7 +6,7 @@ requires-python = ">=3.11"
 dependencies = ["typer>=0.12", "pydantic>=2.7", "pyyaml>=6.0"]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "ruff>=0.6"]
+dev = ["build>=1.0", "pytest>=8.0", "ruff>=0.6"]
 
 [project.scripts]
 dev-orch = "dev_orchestration.cli:app"

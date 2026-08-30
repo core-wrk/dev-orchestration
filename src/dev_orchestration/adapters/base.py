@@ -9,6 +9,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
+from dev_orchestration.context.packet import ContextPacket
+
 
 @dataclass(frozen=True)
 class AgentRequest:
@@ -20,6 +22,7 @@ class AgentRequest:
     allowed_tools: list[str] | None = None
     expected_schema: Path | None = None
     timeout_seconds: int | None = None
+    context: ContextPacket | None = None
 
 
 @dataclass(frozen=True)
@@ -41,6 +44,14 @@ class AdapterStatus:
     path: str | None = None
     detail: str = ""
     capabilities: dict[str, bool] = field(default_factory=dict)
+
+
+def compose_prompt(request: AgentRequest) -> str:
+    """Frame the task with its provenance-labelled context."""
+    if request.context is None:
+        return request.prompt
+    rendered = request.context.render()
+    return request.prompt if not rendered else f"{rendered}\n---\n\n{request.prompt}"
 
 
 @runtime_checkable

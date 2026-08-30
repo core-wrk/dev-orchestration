@@ -63,6 +63,13 @@ class ProjectMeta(BaseModel):
 
 class Profiles(BaseModel):
     available: list[str] = Field(default_factory=list)
+    definitions: dict[str, "ProfileConfig"] = Field(default_factory=dict)
+
+
+class ProfileConfig(BaseModel):
+    minimum_tier: Tier | None = None
+    controls: dict[str, object] = Field(default_factory=dict)
+    context_refs: list[str] = Field(default_factory=list)
 
 
 class GitPolicy(BaseModel):

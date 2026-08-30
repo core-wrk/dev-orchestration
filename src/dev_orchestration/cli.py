@@ -6,13 +6,26 @@ import typer
 import yaml
 
 from dev_orchestration import doctor as doctor_module
+from dev_orchestration.adapters.registry import ReadOnlyRoleUnsupportedError, default_registry
+from dev_orchestration.artifacts.store import NoApprovedPlanError
 from dev_orchestration.config.models import DeniedCommandError, ProjectConfig
-from dev_orchestration.git.repo import GitCommandError, discover_repo
+from dev_orchestration.context.assembler import ContextContractError
+from dev_orchestration.domain.enums import RunState, Tier
+from dev_orchestration.git.repo import DirtyWorktreeError, GitCommandError, discover_repo
 from dev_orchestration.init_repo import (
     FileExistsRefusal,
     UncommittedContractFileError,
     initialize_repo,
 )
+from dev_orchestration.roles.loader import MissingTemplateError
+from dev_orchestration.workflow.bootstrap import BootstrapIntegrityError, ProtectedRuleViolation
+from dev_orchestration.workflow.engine import IllegalTransitionError
+from dev_orchestration.workflow.invoke import AgentInvocationError, SchemaEscalation
+from dev_orchestration.workflow.reporting import describe_status, list_runs, read_events
+from dev_orchestration.workflow.runner import execute_run
+from dev_orchestration.workflow.scope_check import ScopeViolation
+from dev_orchestration.workflow.stages import RemediationExhausted
+from dev_orchestration.workflow.tiers import UnsupportedTierError
 
 # Errors that represent a refusal or a bad input rather than a bug. The user
 # needs the message, not a traceback: every one of these already explains what
@@ -22,6 +35,19 @@ EXPECTED_ERRORS = (
     FileExistsRefusal,
     GitCommandError,
     DeniedCommandError,
+    DirtyWorktreeError,
+    UnsupportedTierError,
+    ProtectedRuleViolation,
+    BootstrapIntegrityError,
+    ScopeViolation,
+    RemediationExhausted,
+    SchemaEscalation,
+    AgentInvocationError,
+    ContextContractError,
+    IllegalTransitionError,
+    NoApprovedPlanError,
+    MissingTemplateError,
+    ReadOnlyRoleUnsupportedError,
 )
 
 app = typer.Typer(
@@ -70,3 +96,91 @@ def init(
         raise typer.Exit(1) from exc
     for path in written:
         typer.echo(f"wrote {path.relative_to(repo.root)}")
+
+
+class NoSuchRunError(RuntimeError):
+    """The requested run id is not present in this repository."""
+
+
+def _project_config(repo) -> ProjectConfig:
+    path = repo.root / ".ai" / "project.yaml"
+    if not path.is_file():
+        raise GitCommandError(f"{path} does not exist; run `dev-orch init` first")
+    return ProjectConfig.model_validate(yaml.safe_load(path.read_text(encoding="utf-8")))
+
+
+@app.command()
+def run(
+    request: str = typer.Argument(..., help="What you want done"),
+    plan_file: Path | None = typer.Option(  # noqa: B008
+        None, "--plan", help="Import an external plan"
+    ),
+    tier: str | None = typer.Option(None, "--tier", help="Override classification"),
+) -> None:
+    """Execute one local run. It never pushes, merges, or deploys."""
+    try:
+        repo = discover_repo(Path.cwd())
+        config = _project_config(repo)
+        override = None
+        if tier is not None:
+            try:
+                override = Tier(tier)
+            except ValueError as exc:
+                raise UnsupportedTierError(f"unknown or unsupported tier {tier!r}") from exc
+        registry = default_registry(config)
+        outcome = execute_run(
+            repo,
+            config,
+            registry,
+            request,
+            Path.home() / ".dev-orchestration" / "worktrees",
+            acceptance_criteria=[request],
+            tier_override=override,
+            external_plan=plan_file,
+        )
+    except EXPECTED_ERRORS as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(f"{outcome.run_id}: {outcome.final_state}")
+    if outcome.reason:
+        typer.echo(outcome.reason, err=True)
+    if outcome.final_state is not RunState.COMPLETE_LOCAL:
+        raise typer.Exit(1)
+
+
+@app.command()
+def status(run_id: str | None = typer.Argument(None, help="Run id to inspect")) -> None:
+    """Show the current stage and the next action for a run."""
+    try:
+        repo = discover_repo(Path.cwd())
+        candidates = list_runs(repo.root)
+        selected = run_id or (candidates[0][0] if candidates else None)
+        if selected is None:
+            raise NoSuchRunError("no runs found in this repository")
+        store_root = repo.root / ".ai" / "runs" / selected
+        if not (store_root / "manifest.json").is_file():
+            raise NoSuchRunError(f"run {selected!r} does not exist")
+        from dev_orchestration.domain.run import RunManifest
+
+        manifest = RunManifest.model_validate_json(
+            (store_root / "manifest.json").read_text(encoding="utf-8")
+        )
+        typer.echo(describe_status(manifest, read_events(store_root)))
+    except EXPECTED_ERRORS + (NoSuchRunError,) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+
+
+@app.command()
+def runs() -> None:
+    """List local runs, newest first."""
+    try:
+        repo = discover_repo(Path.cwd())
+        listed = list_runs(repo.root)
+        if not listed:
+            raise NoSuchRunError("no runs found in this repository")
+        for run_id, state in listed:
+            typer.echo(f"{run_id}: {state}")
+    except EXPECTED_ERRORS + (NoSuchRunError,) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc

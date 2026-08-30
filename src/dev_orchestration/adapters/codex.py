@@ -13,7 +13,12 @@ import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
-from dev_orchestration.adapters.base import AdapterStatus, AgentRequest, AgentResult
+from dev_orchestration.adapters.base import (
+    AdapterStatus,
+    AgentRequest,
+    AgentResult,
+    compose_prompt,
+)
 
 CODEX_BUNDLE_PATH = Path("/Applications/ChatGPT.app/Contents/Resources/codex")
 
@@ -119,9 +124,11 @@ class CodexAdapter:
         ]
         if request.model_alias:
             cmd += ["-m", MODEL_ALIASES.get(request.model_alias, request.model_alias)]
+        if request.reasoning:
+            cmd += ["-c", f"model_reasoning_effort={request.reasoning}"]
         if request.expected_schema:
             cmd += ["--output-schema", str(request.expected_schema)]
-        cmd.append(request.prompt)
+        cmd.append(compose_prompt(request))
         return cmd
 
     def run(self, request: AgentRequest) -> AgentResult:

@@ -5,7 +5,12 @@ import shutil
 import subprocess
 from datetime import UTC, datetime
 
-from dev_orchestration.adapters.base import AdapterStatus, AgentRequest, AgentResult
+from dev_orchestration.adapters.base import (
+    AdapterStatus,
+    AgentRequest,
+    AgentResult,
+    compose_prompt,
+)
 
 READ_ONLY_TOOLS = ("Read", "Grep", "Glob")
 
@@ -63,7 +68,7 @@ class ClaudeAdapter:
             cmd += ["--model", request.model_alias]
         if request.allowed_tools:
             cmd += ["--allowedTools", ",".join(request.allowed_tools)]
-        cmd += ["-p", request.prompt]
+        cmd += ["-p", compose_prompt(request)]
         return cmd
 
     def run(self, request: AgentRequest) -> AgentResult:

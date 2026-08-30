@@ -1,0 +1,90 @@
+# M2 remediation baseline manifest
+
+This manifest records the dirty implementation state admitted to the local
+`fix/m2-remediation` branch before remediation work began.
+
+- Repository: `/Users/andrewodonnell/GitRepos/dev-orchestration`
+- Expected HEAD: `9d20cf882cea94d17ec8370dba2309accd32fb98`
+- Expected branch: `main`
+- Tracked diff SHA-256 (`git diff --binary HEAD`):
+  `0f8d2cf2a73ebfd2d96e5c1b1178645d4ee274855facb6acc2a5226e74f01ed8`
+- Expanded untracked file digest SHA-256, excluding only the companion review
+  path while reproducing its pre-review snapshot:
+  `452133db4cbe79825be27b26b098dcfea90b2113565889c3ee11462dcaa6e2c6`
+- Independent baseline validation: `.venv/bin/python -m pytest -q` — `310 passed`
+- Human approval: user explicitly requested execution of this remediation goal.
+
+The tracked paths below are staged only by this explicit manifest. The
+companion review is included as an explicitly allowed review artifact even
+though it was created after the historical digest.
+
+## Tracked modified paths and worktree digests
+
+```text
+db27cccee00f8c658cbeba02e2dd802abe6fd9129e6ab65a64b8f952310ba9f2  .gitignore
+01b180cb8f9fb6385f312f71c15152003d4e452403fdc60f9de07058c871e74c  pyproject.toml
+d5de026d32f7956a4600cbda8ebbfc2f268be56be480553f75d0ed339d771f33  src/dev_orchestration/adapters/base.py
+2933ac5f98658538e3b1ea0c4f90d8631574b774f20611655ea21e6f402f8fbb  src/dev_orchestration/adapters/claude.py
+27eee44f2a77cf91a74495f024165e06971487cda5c824d2407c645e355dd2e5  src/dev_orchestration/adapters/codex.py
+0f1a6cbd89dfb29fc4fde73b2df45232a2305b0e4096296076015332ec166f58  src/dev_orchestration/adapters/registry.py
+62334aeedbe721ec28488b5eebaa8c10e0a192e70c10ea9feae2d27e6629e435  src/dev_orchestration/artifacts/store.py
+8d2bf2cd2c8d6e30b2e1f30ee3ff17750069534449ca08ef1c7ce15fac84f6bc  src/dev_orchestration/cli.py
+822ece6edb4d70e5646df8b06ceddf06f6b45facd32a8440395bfce7241d2639  src/dev_orchestration/config/models.py
+482f3d1fcb41685e3a8da565e82531868f14fa8b6a2cc67006e00e1461181caa  src/dev_orchestration/domain/run.py
+5ec57039f9381101d3ee6ce433ce61eec430a24b1c1b41a4a108d7bc28ecbca2  src/dev_orchestration/git/repo.py
+c53bf9f81df90451523b3ae4758b8d3eefa279ea5609ba7275c5729ba6d4e8f2  tests/git/test_repo.py
+```
+
+## Explicitly allowed untracked paths and content digests
+
+The following list is generated from the verified pre-commit working tree.
+
+```text
+6fd44415a345e32981ee398e3817c3f8451f6f846c5690dc2de46e8e6446c339  docs/superpowers/plans/2026-08-29-m2-implementation-review.md
+a85d8acb6cafca5fd739e1475579ed1985ec797928df904bc5110ae47b6ed320  docs/superpowers/plans/2026-08-29-m2-remediation-adversarial-review-2026-08-29.md
+7ea3cdfaf287db0636b6d3f97b98363a91ad8bf494b47919d6722a38557024c2  docs/superpowers/plans/2026-08-29-m2-remediation.md
+d29ee41304c817ddc3e97d5050a63cbbef054418629f43393ed6873d0ee79f03  docs/superpowers/plans/2026-08-29-m2-the-loop-adversarial-review-2026-08-29.md
+2ab39190d1593c3c294a2f80e9d9a75f8870bcebf116e72e9ecd22ef157339c9  src/dev_orchestration/context/__init__.py
+55d0def3c9f5aaaac0c6f55d90384ecff4dbe784a580c65ad78d203b62de5201  src/dev_orchestration/context/assembler.py
+338d99293327ad10d3cd4c7fec5ff01ae29d2ad3ee55728a66a30a2071f7761b  src/dev_orchestration/context/packet.py
+80a403dd01e87f015f367d8f3f444eee80acf3387a5e9eca32727264c5a9c676  src/dev_orchestration/domain/findings.py
+eb186d3376e233a1927e4bab1c89835e864165ed9881fbdd4d2518c67c3aa55a  src/dev_orchestration/roles/__init__.py
+0c4803040b94de7425450c97e7e7a7c1018228b3a697e3ad71f6562d566235f8  src/dev_orchestration/roles/classifier.md
+7a7e478cd571d18c28a85accb4ffc67b1a33d516b478791cf8d846d4cf6d2d74  src/dev_orchestration/roles/implementation_reviewer.md
+36a495309c288609e46e5b67a946faa771464acf5def4b1da3eeb123c06abc25  src/dev_orchestration/roles/implementation_worker.md
+895c26dc5acb4dd2ebab79fe9bbf16661efb3f56cc6675e3235562220e6fb16f  src/dev_orchestration/roles/loader.py
+f08981e4f46bcc8f9491b8fd69fe94fb141d0181e2550468c189c0adf30cb0a8  src/dev_orchestration/roles/plan_reconciler.md
+28bce0733bf22b0ef0f0fe77bd1f0387fd0da2047b9a0ff1a9379bec4396b63a  src/dev_orchestration/roles/plan_reviewer.md
+bf746e5746f417fdcb77290f067678fb499c49edd808802f3d1c849cca7a79e4  src/dev_orchestration/roles/planner.md
+69c75ab331d62b265f0237f6e4bf7fd12cb7cf41bc5892063b9650fc26a51691  src/dev_orchestration/roles/verifier.md
+a38d5d686247333eb294e4382ac7683513695665a7100ea46fd2acf808332d10  src/dev_orchestration/schemas.py
+542d29db1947c372e600cb190e18aec254ffb15490e9c78419c0c0ffab29be1f  src/dev_orchestration/workflow/__init__.py
+7def4efd1f9ddf60acf84eefcab2f96f0b8f352a5a7d263d2d4ff0e92024fa29  src/dev_orchestration/workflow/bootstrap.py
+f03ccf3df713136493a85cb9e6bb770da39e89fbcfdc768e2d0d42f266ee9415  src/dev_orchestration/workflow/engine.py
+aadfd154610a50e7a3c4db25e51dec9398fd0c44682c395e8da167d5af166adc  src/dev_orchestration/workflow/invoke.py
+7686f641e461ebd9bf7eeb0e6adc363af1ae3981c21800531d329eb1b75ee48f  src/dev_orchestration/workflow/reporting.py
+24d0e2d5cf3f093cc29de3e0c46487d02f9e9038e1c00c3e271bbed230181b00  src/dev_orchestration/workflow/runner.py
+7db01ea790f2ccfb92e627d2cedfd26280d013e115e75ee0f0f4cd711fe6e178  src/dev_orchestration/workflow/scope_check.py
+cf163f42fbcea9709b0c4c03d029baa50b14a02196475f97564b498fa1d3758c  src/dev_orchestration/workflow/stages.py
+50804458ce2cf88648268df4ca1c678985183d47d7c8ce54848fa5a4711b95d8  src/dev_orchestration/workflow/tiers.py
+2b2620d8946f74b051d7eb3d35ffe8c42e8ece1c6018c946cf00d96903c9abd9  src/dev_orchestration/workflow/validation.py
+4e6197025af31c4b66c46d51ff8c17cbc9352e605116fa6dba2c4773c1f0a4bf  tests/adapters/test_context_rendering.py
+de47e9bf33f4270f09885d836fadb3638a0e34e4552d263d59dfdcca7977a04b  tests/artifacts/test_plan_artifacts.py
+58f08b98fb28f7cf2d040e63680c1f74f4f37cabb266f8e8d428ec7b16b4a8bf  tests/context/test_assembler.py
+3f8caf8f20b3cca888a52e29dcb5f499fad6c61429ef474b19b5744387fcba10  tests/context/test_packet.py
+a2327975e47ac82c72504e4e7508775e028a1d05ca615336018baa51cee1eebe  tests/domain/test_findings.py
+727296729d84e98cd2cb1ef9832fabb444f5cba148e41836023ed5649e98cb68  tests/test_cli_run.py
+3093374242aeff5321a1c5f9d9d2d1e42fb61b168ac1a86e887115e5a7aa2264  tests/test_schemas.py
+815ad3494080fbd2387d29d29044d2921f98dbb251cefad17816451f2ff25647  tests/workflow/test_bootstrap.py
+f9513e02b92e95531fb356d3423bf6fb4f9f1da481822fbb2ff662293afd9d00  tests/workflow/test_engine.py
+ef8391d3c9bc64525bc38369a664fe513223045bbf248a8a434b630bb2355171  tests/workflow/test_invoke.py
+37802b9f740713f32ecfea2ec01475310c2f695d0b9614d3ce6eccb90bc46c2f  tests/workflow/test_runner.py
+8e8c0312b61de1a31f2db2ec183eebf0e7554377ed25fc691a7c9ee06a762cc0  tests/workflow/test_scope_check.py
+578177d6ceea6862bcc7af4bc629014895901730f25383d61305f10a675d780f  tests/workflow/test_stages.py
+8de7bf103fdaaac3928b5871c919c68f6f0e5e1331b8209ca8f56f55d4389c0c  tests/workflow/test_tiers.py
+38acbf7e80a82fb61b482e8874fd12a35f3e33a92b71e54c2f08bd6a6ed8d92a  tests/workflow/test_validation.py
+```
+
+The baseline manifest and companion review are explicit additional review
+artifacts. The manifest is self-authenticating through its committed blob and
+is not included in the historical pre-manifest digest calculation.

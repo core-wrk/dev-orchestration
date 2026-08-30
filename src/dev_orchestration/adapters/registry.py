@@ -6,8 +6,9 @@ Nowhere else in the codebase should a model name appear.
 from pathlib import Path
 
 from dev_orchestration.adapters.base import AgentAdapter, AgentRequest
-from dev_orchestration.adapters.claude import READ_ONLY_TOOLS
-from dev_orchestration.config.models import RoleConfig
+from dev_orchestration.adapters.claude import READ_ONLY_TOOLS, ClaudeAdapter
+from dev_orchestration.adapters.codex import CodexAdapter, discover_codex
+from dev_orchestration.config.models import GlobalConfig, ProjectConfig, RoleConfig
 
 READ_ONLY_ROLES = frozenset({"plan_reviewer", "implementation_reviewer", "verifier"})
 
@@ -88,3 +89,22 @@ class RoleRegistry:
             allowed_tools=allowed,
             **kwargs,
         )
+
+
+def default_registry(
+    project_config: ProjectConfig | None = None,
+    global_config: GlobalConfig | None = None,
+) -> RoleRegistry:
+    """Build the configured provider-neutral registry for a local run."""
+    del project_config
+    global_config = global_config or GlobalConfig()
+    roles = dict(DEFAULT_ROLES)
+    roles.update(global_config.roles)
+    codex_override = None
+    if global_config.codex_binary:
+        codex_override = Path(global_config.codex_binary).expanduser()
+    adapters: dict[str, AgentAdapter] = {
+        "codex": CodexAdapter(binary=discover_codex(codex_override)),
+        "claude": ClaudeAdapter(),
+    }
+    return RoleRegistry(roles=roles, adapters=adapters)
