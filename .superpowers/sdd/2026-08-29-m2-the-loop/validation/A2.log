@@ -1,0 +1,7 @@
+commit: 6452ed5f632169580ee308a320b94f5310b288f9
+branch: fix/m2-remediation
+environment: Darwin 25.5.0 arm64; Python 3.14.6; dev-orchestration 0.1.0
+command: .venv/bin/python -m pytest -q tests/workflow/test_runner.py -k fail_or_unknown_verification_cannot_complete_local
+..                                                                       [100%]
+2 passed, 18 deselected in 1.02s
+exit_code: 0

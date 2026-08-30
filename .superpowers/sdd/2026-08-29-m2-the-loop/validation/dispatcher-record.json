@@ -1,0 +1,12 @@
+{
+  "role": "orchestrator_verifier",
+  "tested_code_sha": "6452ed5f632169580ee308a320b94f5310b288f9",
+  "branch": "fix/m2-remediation",
+  "clean_before_evidence": true,
+  "clean_after_evidence_generation": true,
+  "evidence_generated_after_builder_commits": true,
+  "builder_pass_claims_used_as_gate": false,
+  "wheel_output": "disposable /private/tmp directory",
+  "all_logs_share_tested_sha": true,
+  "evidence_commit_must_descend_from_tested_code": true
+}

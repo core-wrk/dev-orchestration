@@ -1,0 +1,61 @@
+commit: 6452ed5f632169580ee308a320b94f5310b288f9
+branch: fix/m2-remediation
+environment: Darwin 25.5.0 arm64; Python 3.14.6; dev-orchestration 0.1.0
+command: sh -c git diff-tree --no-commit-id --name-only -r eb33c75; test -z "$(git status --porcelain)"; test "$(git rev-parse --abbrev-ref HEAD)" = fix/m2-remediation
+.gitignore
+docs/superpowers/plans/2026-08-29-m2-baseline-manifest.md
+docs/superpowers/plans/2026-08-29-m2-implementation-review.md
+docs/superpowers/plans/2026-08-29-m2-remediation-adversarial-review-2026-08-29.md
+docs/superpowers/plans/2026-08-29-m2-remediation.md
+docs/superpowers/plans/2026-08-29-m2-the-loop-adversarial-review-2026-08-29.md
+pyproject.toml
+src/dev_orchestration/adapters/base.py
+src/dev_orchestration/adapters/claude.py
+src/dev_orchestration/adapters/codex.py
+src/dev_orchestration/adapters/registry.py
+src/dev_orchestration/artifacts/store.py
+src/dev_orchestration/cli.py
+src/dev_orchestration/config/models.py
+src/dev_orchestration/context/__init__.py
+src/dev_orchestration/context/assembler.py
+src/dev_orchestration/context/packet.py
+src/dev_orchestration/domain/findings.py
+src/dev_orchestration/domain/run.py
+src/dev_orchestration/git/repo.py
+src/dev_orchestration/roles/__init__.py
+src/dev_orchestration/roles/classifier.md
+src/dev_orchestration/roles/implementation_reviewer.md
+src/dev_orchestration/roles/implementation_worker.md
+src/dev_orchestration/roles/loader.py
+src/dev_orchestration/roles/plan_reconciler.md
+src/dev_orchestration/roles/plan_reviewer.md
+src/dev_orchestration/roles/planner.md
+src/dev_orchestration/roles/verifier.md
+src/dev_orchestration/schemas.py
+src/dev_orchestration/workflow/__init__.py
+src/dev_orchestration/workflow/bootstrap.py
+src/dev_orchestration/workflow/engine.py
+src/dev_orchestration/workflow/invoke.py
+src/dev_orchestration/workflow/reporting.py
+src/dev_orchestration/workflow/runner.py
+src/dev_orchestration/workflow/scope_check.py
+src/dev_orchestration/workflow/stages.py
+src/dev_orchestration/workflow/tiers.py
+src/dev_orchestration/workflow/validation.py
+tests/adapters/test_context_rendering.py
+tests/artifacts/test_plan_artifacts.py
+tests/context/test_assembler.py
+tests/context/test_packet.py
+tests/domain/test_findings.py
+tests/git/test_repo.py
+tests/test_cli_run.py
+tests/test_schemas.py
+tests/workflow/test_bootstrap.py
+tests/workflow/test_engine.py
+tests/workflow/test_invoke.py
+tests/workflow/test_runner.py
+tests/workflow/test_scope_check.py
+tests/workflow/test_stages.py
+tests/workflow/test_tiers.py
+tests/workflow/test_validation.py
+exit_code: 0

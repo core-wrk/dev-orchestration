@@ -1,0 +1,7 @@
+commit: 6452ed5f632169580ee308a320b94f5310b288f9
+branch: fix/m2-remediation
+environment: Darwin 25.5.0 arm64; Python 3.14.6; dev-orchestration 0.1.0
+command: .venv/bin/python -m pytest -q tests/config tests/adapters/test_registry.py tests/workflow/test_runner.py tests/test_cli_run.py -k protected or override or role or global_config or tier
+....................                                                     [100%]
+20 passed, 68 deselected in 2.09s
+exit_code: 0

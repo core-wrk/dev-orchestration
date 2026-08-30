@@ -1,0 +1,36 @@
+commit: 6452ed5f632169580ee308a320b94f5310b288f9
+branch: fix/m2-remediation
+environment: Darwin 25.5.0 arm64; Python 3.14.6; dev-orchestration 0.1.0
+command: /bin/sh -c set -e; wheel_dir=$(mktemp -d /private/tmp/dev-orch-evidence-wheel.XXXXXX); .venv/bin/dev-orch --help; .venv/bin/python -m build --wheel --outdir "$wheel_dir"; wheel=$(find "$wheel_dir" -name "*.whl" -print -quit); unzip -l "$wheel" | grep "dev_orchestration/roles/.*\.md$"; test -z "$(git status --porcelain)"; rm -rf "$wheel_dir"
+                                                                                
+ Usage: dev-orch [OPTIONS] COMMAND [ARGS]...                                    
+                                                                                
+ Local-first orchestration for AI-assisted development.                         
+                                                                                
+╭─ Options ────────────────────────────────────────────────────────────────────╮
+│ --help          Show this message and exit.                                  │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Commands ───────────────────────────────────────────────────────────────────╮
+│ doctor  Diagnose the local environment and repository contract.              │
+│ init    Write the repository contract into the current repository.           │
+│ run     Execute one local run. It never pushes, merges, or deploys.          │
+│ status  Show the current stage and the next action for a run.                │
+│ runs    List local runs, newest first.                                       │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+* Creating isolated environment: venv+pip...
+* Installing packages in isolated environment:
+  - hatchling
+* Getting build dependencies for wheel...
+* Installed build dependency versions:
+  - hatchling==1.32.0
+* Building wheel...
+Successfully built dev_orchestration-0.1.0-py3-none-any.whl
+      266  02-02-2020 00:00   dev_orchestration/roles/classifier.md
+      272  02-02-2020 00:00   dev_orchestration/roles/implementation_reviewer.md
+      243  02-02-2020 00:00   dev_orchestration/roles/implementation_worker.md
+      291  02-02-2020 00:00   dev_orchestration/roles/plan_reconciler.md
+      255  02-02-2020 00:00   dev_orchestration/roles/plan_reviewer.md
+      265  02-02-2020 00:00   dev_orchestration/roles/planner.md
+      286  02-02-2020 00:00   dev_orchestration/roles/verifier.md
+exit_code: 0

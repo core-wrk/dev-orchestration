@@ -1,0 +1,85 @@
+commit: 6452ed5f632169580ee308a320b94f5310b288f9
+branch: fix/m2-remediation
+environment: Darwin 25.5.0 arm64; Python 3.14.6; dev-orchestration 0.1.0
+command: /bin/sh -c set -e; wheel_dir=$(mktemp -d /private/tmp/dev-orch-evidence-wheel.XXXXXX); .venv/bin/dev-orch --help; .venv/bin/python -m build --wheel --outdir "$wheel_dir"; wheel=$(find "$wheel_dir" -name "*.whl" -print -quit); unzip -l "$wheel"; for role in classifier planner plan_reviewer plan_reconciler implementation_worker implementation_reviewer verifier; do unzip -l "$wheel" | grep -q "dev_orchestration/roles/$role.md"; done; test -z "$(git status --porcelain)"; rm -rf "$wheel_dir"
+                                                                                
+ Usage: dev-orch [OPTIONS] COMMAND [ARGS]...                                    
+                                                                                
+ Local-first orchestration for AI-assisted development.                         
+                                                                                
+╭─ Options ────────────────────────────────────────────────────────────────────╮
+│ --help          Show this message and exit.                                  │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Commands ───────────────────────────────────────────────────────────────────╮
+│ doctor  Diagnose the local environment and repository contract.              │
+│ init    Write the repository contract into the current repository.           │
+│ run     Execute one local run. It never pushes, merges, or deploys.          │
+│ status  Show the current stage and the next action for a run.                │
+│ runs    List local runs, newest first.                                       │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+* Creating isolated environment: venv+pip...
+* Installing packages in isolated environment:
+  - hatchling
+* Getting build dependencies for wheel...
+* Installed build dependency versions:
+  - hatchling==1.32.0
+* Building wheel...
+Successfully built dev_orchestration-0.1.0-py3-none-any.whl
+Archive:  /private/tmp/dev-orch-evidence-wheel.30OHS2/dev_orchestration-0.1.0-py3-none-any.whl
+  Length      Date    Time    Name
+---------  ---------- -----   ----
+       22  02-02-2020 00:00   dev_orchestration/__init__.py
+     8096  02-02-2020 00:00   dev_orchestration/cli.py
+     4605  02-02-2020 00:00   dev_orchestration/doctor.py
+     7040  02-02-2020 00:00   dev_orchestration/init_repo.py
+     1028  02-02-2020 00:00   dev_orchestration/schemas.py
+     3086  02-02-2020 00:00   dev_orchestration/scope.py
+        0  02-02-2020 00:00   dev_orchestration/adapters/__init__.py
+     3399  02-02-2020 00:00   dev_orchestration/adapters/base.py
+     3032  02-02-2020 00:00   dev_orchestration/adapters/claude.py
+     5517  02-02-2020 00:00   dev_orchestration/adapters/codex.py
+     4803  02-02-2020 00:00   dev_orchestration/adapters/registry.py
+        0  02-02-2020 00:00   dev_orchestration/artifacts/__init__.py
+      336  02-02-2020 00:00   dev_orchestration/artifacts/events.py
+     7706  02-02-2020 00:00   dev_orchestration/artifacts/store.py
+        0  02-02-2020 00:00   dev_orchestration/config/__init__.py
+     3662  02-02-2020 00:00   dev_orchestration/config/models.py
+     1686  02-02-2020 00:00   dev_orchestration/config/resolver.py
+       58  02-02-2020 00:00   dev_orchestration/context/__init__.py
+     7843  02-02-2020 00:00   dev_orchestration/context/assembler.py
+      869  02-02-2020 00:00   dev_orchestration/context/packet.py
+        0  02-02-2020 00:00   dev_orchestration/domain/__init__.py
+     1094  02-02-2020 00:00   dev_orchestration/domain/enums.py
+     3144  02-02-2020 00:00   dev_orchestration/domain/findings.py
+     1708  02-02-2020 00:00   dev_orchestration/domain/run.py
+        0  02-02-2020 00:00   dev_orchestration/git/__init__.py
+     4165  02-02-2020 00:00   dev_orchestration/git/guards.py
+    14488  02-02-2020 00:00   dev_orchestration/git/repo.py
+      591  02-02-2020 00:00   dev_orchestration/git/worktree.py
+       29  02-02-2020 00:00   dev_orchestration/roles/__init__.py
+      266  02-02-2020 00:00   dev_orchestration/roles/classifier.md
+      272  02-02-2020 00:00   dev_orchestration/roles/implementation_reviewer.md
+      243  02-02-2020 00:00   dev_orchestration/roles/implementation_worker.md
+      831  02-02-2020 00:00   dev_orchestration/roles/loader.py
+      291  02-02-2020 00:00   dev_orchestration/roles/plan_reconciler.md
+      255  02-02-2020 00:00   dev_orchestration/roles/plan_reviewer.md
+      265  02-02-2020 00:00   dev_orchestration/roles/planner.md
+      286  02-02-2020 00:00   dev_orchestration/roles/verifier.md
+       43  02-02-2020 00:00   dev_orchestration/workflow/__init__.py
+     8550  02-02-2020 00:00   dev_orchestration/workflow/bootstrap.py
+     2570  02-02-2020 00:00   dev_orchestration/workflow/engine.py
+     2246  02-02-2020 00:00   dev_orchestration/workflow/invoke.py
+     2786  02-02-2020 00:00   dev_orchestration/workflow/reporting.py
+    25075  02-02-2020 00:00   dev_orchestration/workflow/runner.py
+     1548  02-02-2020 00:00   dev_orchestration/workflow/scope_check.py
+    14652  02-02-2020 00:00   dev_orchestration/workflow/stages.py
+     1056  02-02-2020 00:00   dev_orchestration/workflow/tiers.py
+     2299  02-02-2020 00:00   dev_orchestration/workflow/validation.py
+      393  02-02-2020 00:00   dev_orchestration-0.1.0.dist-info/METADATA
+       87  02-02-2020 00:00   dev_orchestration-0.1.0.dist-info/WHEEL
+       55  02-02-2020 00:00   dev_orchestration-0.1.0.dist-info/entry_points.txt
+     4653  02-02-2020 00:00   dev_orchestration-0.1.0.dist-info/RECORD
+---------                     -------
+   156729                     51 files
+exit_code: 0

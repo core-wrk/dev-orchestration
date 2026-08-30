@@ -1,0 +1,7 @@
+commit: 6452ed5f632169580ee308a320b94f5310b288f9
+branch: fix/m2-remediation
+environment: Darwin 25.5.0 arm64; Python 3.14.6; dev-orchestration 0.1.0
+command: /bin/sh -c .venv/bin/ruff check . && .venv/bin/ruff format --check src tests
+All checks passed!
+79 files already formatted
+exit_code: 0

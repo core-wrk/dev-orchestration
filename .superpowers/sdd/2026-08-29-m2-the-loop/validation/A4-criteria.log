@@ -1,0 +1,7 @@
+commit: 6452ed5f632169580ee308a320b94f5310b288f9
+branch: fix/m2-remediation
+environment: Darwin 25.5.0 arm64; Python 3.14.6; dev-orchestration 0.1.0
+command: .venv/bin/python -m pytest -q tests/workflow/test_runner.py tests/test_cli_run.py -k criteria or criterion
+........                                                                 [100%]
+8 passed, 25 deselected in 2.10s
+exit_code: 0

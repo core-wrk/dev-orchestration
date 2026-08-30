@@ -1,0 +1,7 @@
+commit: 6452ed5f632169580ee308a320b94f5310b288f9
+branch: fix/m2-remediation
+environment: Darwin 25.5.0 arm64; Python 3.14.6; dev-orchestration 0.1.0
+command: .venv/bin/python -m pytest -q tests/workflow/test_stages.py -k finding
+....                                                                     [100%]
+4 passed, 5 deselected in 0.06s
+exit_code: 0
