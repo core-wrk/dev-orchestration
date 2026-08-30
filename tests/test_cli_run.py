@@ -222,6 +222,18 @@ def test_tier_override_is_effective_persisted_and_cannot_beat_minimum(tmp_path, 
     assert accepted_manifest.tier is Tier.STANDARD
     assert accepted_manifest.tier_override is Tier.STANDARD
 
+    rejected_root = tmp_path / "rejected"
+    rejected_root.mkdir()
+    repo(rejected_root)
+    rejected_adapter = ScriptedAdapter(tier="standard")
+    monkeypatch.setattr(cli_module, "default_registry", lambda *a, **k: registry(rejected_adapter))
+    _use_local_worktree(monkeypatch, rejected_root)
+    monkeypatch.chdir(rejected_root)
+    rejected = CliRunner().invoke(app, ["run", "rewrite auth", "--tier", "trivial"])
+    assert rejected.exit_code == 1
+    assert "Traceback" not in rejected.output
+    assert _latest_manifest(rejected_root).status is RunState.ESCALATED
+
     minimum_root = tmp_path / "minimum"
     minimum_root.mkdir()
     repo(minimum_root)

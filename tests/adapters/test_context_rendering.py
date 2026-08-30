@@ -1,8 +1,11 @@
 from pathlib import Path
 
-from dev_orchestration.adapters.base import AgentRequest
+import pytest
+
+from dev_orchestration.adapters.base import AgentRequest, compose_prompt
 from dev_orchestration.adapters.claude import ClaudeAdapter
 from dev_orchestration.adapters.codex import CodexAdapter
+from dev_orchestration.context.assembler import PROMPT_BUDGET_BYTES, PromptBudgetError
 from dev_orchestration.context.packet import ContextPacket, ContextRef
 
 PACKET = ContextPacket(
@@ -38,3 +41,14 @@ def test_codex_passes_output_schema():
         request(expected_schema=schema)
     )
     assert command[command.index("--output-schema") + 1] == str(schema)
+
+
+def test_final_prompt_budget_is_enforced_without_context_overhead_hiding_it():
+    with pytest.raises(PromptBudgetError):
+        compose_prompt(
+            AgentRequest(
+                role="planner",
+                prompt="x" * (PROMPT_BUDGET_BYTES + 1),
+                cwd=Path("/w"),
+            )
+        )

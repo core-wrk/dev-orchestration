@@ -9,6 +9,7 @@ from dev_orchestration.adapters.registry import RoleRegistry
 from dev_orchestration.config.models import ProjectConfig, RoleConfig
 from dev_orchestration.context.assembler import ContextContractError
 from dev_orchestration.domain.enums import RunState, Tier
+from dev_orchestration.domain.run import RunManifest
 from dev_orchestration.git.repo import GitRepo
 from dev_orchestration.workflow.runner import execute_run
 
@@ -302,6 +303,7 @@ def test_scope_violation_escalates_for_uncommitted_out_of_scope_file(tmp_path):
 
 def test_success_and_escalation_leave_complete_audit_artifacts(tmp_path):
     git = repo(tmp_path)
+    base = git.current_commit()
     success = execute_run(
         git, CONFIG, registry(Scripted(script(tier="trivial"))), "fix", tmp_path / "wt", CRITERIA
     )
@@ -315,7 +317,40 @@ def test_success_and_escalation_leave_complete_audit_artifacts(tmp_path):
         "execution/execution-summary.json",
     ):
         assert (success.store_root / relative).is_file(), relative
+    manifest = RunManifest.model_validate_json(
+        (success.store_root / "manifest.json").read_text(encoding="utf-8")
+    )
+    summary = json.loads((success.store_root / "execution" / "execution-summary.json").read_text())
+    verification = json.loads(
+        (success.store_root / "verification" / "final-verification.json").read_text()
+    )
+    assert manifest.git.base_commit == base == summary["base_commit"]
+    assert manifest.git.final_commit == summary["final_commit"] != base
+    assert manifest.acceptance_criteria == CRITERIA
+    assert [item["criterion"] for item in verification["verdicts"]] == CRITERIA
     assert any(event["event"] == "state_changed" for event in events(success))
+
+    escalated = execute_run(
+        git,
+        CONFIG,
+        registry(Scripted(script(review=dict(PASS, outcome="ESCALATE")))),
+        "escalate",
+        tmp_path / "wt",
+        CRITERIA,
+    )
+    assert escalated.final_state is RunState.ESCALATED
+    for relative in ("request.md", "classification.json", "context.json", "manifest.json"):
+        assert (escalated.store_root / relative).is_file(), relative
+    escalated_manifest = RunManifest.model_validate_json(
+        (escalated.store_root / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert escalated_manifest.terminal_reason
+    assert escalated_manifest.git.final_commit is None
+    assert escalated_manifest.completed_at is not None
+    assert [event["event"] for event in events(escalated)][-1] in {
+        "state_changed",
+        "run_terminal",
+    }
 
 
 def test_external_plan_is_imported_hashed_and_planner_is_skipped(tmp_path):
@@ -388,6 +423,13 @@ def test_a_run_without_acceptance_criteria_is_refused(tmp_path):
     git = repo(tmp_path)
     with pytest.raises(ContextContractError):
         execute_run(git, CONFIG, registry(Scripted(script())), "do it", tmp_path / "wt", [])
+
+
+@pytest.mark.parametrize("criteria", [["   "], ["done", " done "]])
+def test_blank_or_duplicate_acceptance_criteria_are_refused(tmp_path, criteria):
+    git = repo(tmp_path)
+    with pytest.raises(ContextContractError):
+        execute_run(git, CONFIG, registry(Scripted(script())), "do it", tmp_path / "wt", criteria)
 
 
 def test_override_may_raise_the_tier(tmp_path):

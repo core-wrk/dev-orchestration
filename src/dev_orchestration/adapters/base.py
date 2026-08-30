@@ -49,9 +49,7 @@ class AdapterStatus:
 
 def compose_prompt(request: AgentRequest) -> str:
     """Frame the task with its provenance-labelled context."""
-    if request.context is None:
-        return request.prompt
-    rendered = request.context.render()
+    rendered = request.context.render() if request.context is not None else ""
     prompt = request.prompt if not rendered else f"{rendered}\n---\n\n{request.prompt}"
     if len(prompt.encode("utf-8")) > PROMPT_BUDGET_BYTES:
         raise PromptBudgetError(
