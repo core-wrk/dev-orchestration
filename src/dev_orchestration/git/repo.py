@@ -1,6 +1,10 @@
 """Git operations. Every call uses an argument array; none reach a remote."""
 
+import hashlib
+import os
+import shutil
 import subprocess
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -15,6 +19,34 @@ class GitCommandError(RuntimeError):
 
 class DirtyWorktreeError(RuntimeError):
     """The base repository has uncommitted changes."""
+
+
+class EmptySnapshotError(RuntimeError):
+    """A run reached its final commit with no change to record."""
+
+
+@dataclass(frozen=True)
+class _IgnoredEntry:
+    kind: str
+    mode: int
+    digest: str | None = None
+    link_target: str | None = None
+    content: bytes | None = None
+
+    @property
+    def signature(self) -> tuple[str, int, str | None, str | None]:
+        return self.kind, self.mode, self.digest, self.link_target
+
+
+class IgnoredPathInventory(list[str]):
+    """A list-compatible ignored-path inventory with content snapshots."""
+
+    def __init__(self, paths: list[str], states: dict[str, _IgnoredEntry]) -> None:
+        super().__init__(paths)
+        self.states = states
+
+
+MAX_IGNORED_FILE_BYTES = 64 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -93,11 +125,17 @@ class GitRepo:
                 paths.append(path)
         return sorted(set(paths))
 
-    def change_inventory(self, base_ref: str) -> list[str]:
-        """Inventory committed, staged, unstaged, deleted, renamed and untracked paths."""
+    def change_inventory(
+        self,
+        base_ref: str,
+        ignored_before: list[str] | Mapping[str, _IgnoredEntry] | None = None,
+    ) -> list[str]:
+        """Inventory visible changes and, when supplied, ignored mutations."""
         committed_or_index = self.run_git("diff", "--name-status", "-z", base_ref, strip=False)
         paths = set(_parse_name_status_paths(committed_or_index))
         paths.update(self.status_paths())
+        if ignored_before is not None:
+            paths.update(self.ignored_delta(ignored_before))
         return sorted(paths)
 
     def change_diff(self, base_ref: str) -> str:
@@ -123,6 +161,90 @@ class GitRepo:
         )
         return proc.returncode == 0
 
+    def ignored_paths(self) -> IgnoredPathInventory:
+        """Inventory every currently ignored file and snapshot its contents.
+
+        Git's status output omits ignored files and its directory-oriented
+        ignored mode collapses whole trees. ``ls-files`` gives us one path per
+        file; the attached snapshot makes the result content-aware, so an
+        overwrite, deletion, mode change, symlink replacement, or type change
+        cannot hide behind a pre-existing ignored pathname.
+        """
+        output = self.run_git("ls-files", "-o", "-i", "--exclude-standard", "-z", strip=False)
+        paths = sorted({path for path in output.split("\0") if path})
+        return IgnoredPathInventory(paths, self._capture_ignored(paths))
+
+    def ignored_delta(
+        self,
+        before: list[str] | Mapping[str, _IgnoredEntry],
+    ) -> list[str]:
+        """Return ignored paths whose filesystem state changed since ``before``."""
+        before_states = _states_from_inventory(before)
+        current = self.ignored_paths()
+        paths = set(before_states) | set(current.states)
+        return sorted(
+            path
+            for path in paths
+            if _state_signature(before_states.get(path))
+            != _state_signature(current.states.get(path))
+        )
+
+    def restore_ignored_snapshot(
+        self,
+        before: list[str] | Mapping[str, _IgnoredEntry],
+    ) -> None:
+        """Restore a stage's ignored state inside this isolated worktree.
+
+        This is intentionally exact-path cleanup. It never operates on a
+        broad directory and is used only for the disposable run worktree, so
+        validation caches and rejected agent writes cannot become invisible
+        terminal residue.
+        """
+        before_states = _states_from_inventory(before)
+        current = self.ignored_paths()
+        for path in sorted(set(before_states) | set(current.states), key=_path_depth, reverse=True):
+            target = self.root / path
+            _ensure_relative_path(self.root, target)
+            wanted = before_states.get(path)
+            if wanted is None:
+                _remove_path(target)
+            else:
+                _remove_path(target)
+                _restore_entry(target, wanted)
+
+    def _capture_ignored(self, paths: list[str]) -> dict[str, _IgnoredEntry]:
+        states: dict[str, _IgnoredEntry] = {}
+        for path in paths:
+            target = self.root / path
+            try:
+                stat_result = target.lstat()
+            except FileNotFoundError:
+                continue
+            mode = stat_result.st_mode
+            permissions = mode & 0o7777
+            if os.path.islink(target):
+                link_target = os.readlink(target)
+                digest = hashlib.sha256(link_target.encode("utf-8")).hexdigest()
+                states[path] = _IgnoredEntry("symlink", permissions, digest, link_target)
+            elif os.path.isfile(target):
+                if stat_result.st_size > MAX_IGNORED_FILE_BYTES:
+                    raise GitCommandError(
+                        f"cannot safely inventory ignored file {path}: "
+                        f"{stat_result.st_size} bytes exceeds the {MAX_IGNORED_FILE_BYTES}-byte limit"
+                    )
+                try:
+                    content = target.read_bytes()
+                except OSError as exc:
+                    raise GitCommandError(f"cannot read ignored file {path}: {exc}") from exc
+                states[path] = _IgnoredEntry(
+                    "file", permissions, hashlib.sha256(content).hexdigest(), content=content
+                )
+            elif os.path.isdir(target):
+                states[path] = _IgnoredEntry("directory", permissions)
+            else:
+                raise GitCommandError(f"cannot safely inventory special ignored path {path}")
+        return states
+
     def is_ancestor(self, ancestor: str, commit: str | None = None) -> bool:
         target = commit or self.current_commit()
         proc = subprocess.run(
@@ -135,10 +257,34 @@ class GitRepo:
         return proc.returncode == 0
 
     def commit_snapshot(self, message: str, paths: list[str]) -> str:
-        """Stage the verified snapshot and create a local commit, even if empty."""
-        del paths
-        self.run_git("add", "-A")
-        self.run_git("commit", "-q", "--allow-empty", "-m", message)
+        """Commit exactly the reviewed change set. Never empty, never wider."""
+        paths = sorted({path.rstrip("/") for path in paths if path.rstrip("/")})
+        if not paths:
+            raise EmptySnapshotError(
+                f"{self.root} has no change to commit; a run must not record an empty commit"
+            )
+        self.run_git("add", "-A", "--", *paths)
+        existing_paths = [path for path in paths if os.path.lexists(self.root / path)]
+        if existing_paths:
+            self.run_git("add", "-f", "--", *existing_paths)
+        staged = {
+            path
+            for path in self.run_git("diff", "--cached", "--name-only", "-z", strip=False).split(
+                "\0"
+            )
+            if path
+        }
+        unexpected = sorted(staged - set(paths))
+        if unexpected:
+            raise GitCommandError(
+                "reviewed snapshot would commit paths outside its inventory: "
+                + ", ".join(unexpected)
+            )
+        if not staged:
+            raise EmptySnapshotError(
+                f"{self.root} has no staged change to commit; a run must not record an empty commit"
+            )
+        self.run_git("commit", "-q", "-m", message)
         return self.current_commit()
 
 
@@ -194,3 +340,52 @@ def _parse_porcelain_paths(output: str) -> list[str]:
             paths.append(parts[index])
             index += 1
     return [path for path in paths if path]
+
+
+def _states_from_inventory(
+    inventory: list[str] | Mapping[str, _IgnoredEntry],
+) -> dict[str, _IgnoredEntry]:
+    states = getattr(inventory, "states", None)
+    if states is not None:
+        return dict(states)
+    if isinstance(inventory, Mapping):
+        return dict(inventory)
+    return {}
+
+
+def _state_signature(entry: _IgnoredEntry | None) -> tuple | None:
+    return entry.signature if entry is not None else None
+
+
+def _path_depth(path: str) -> int:
+    return path.count("/")
+
+
+def _ensure_relative_path(root: Path, target: Path) -> None:
+    try:
+        target.parent.resolve().relative_to(root.resolve())
+    except ValueError as exc:
+        raise GitCommandError(f"ignored path escaped worktree root: {target}") from exc
+
+
+def _remove_path(target: Path) -> None:
+    try:
+        mode = target.lstat().st_mode
+    except FileNotFoundError:
+        return
+    if os.path.isdir(target) and not os.path.islink(target):
+        shutil.rmtree(target)
+    elif mode:
+        target.unlink()
+
+
+def _restore_entry(target: Path, entry: _IgnoredEntry) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if entry.kind == "file":
+        target.write_bytes(entry.content or b"")
+        target.chmod(entry.mode)
+    elif entry.kind == "symlink":
+        target.symlink_to(entry.link_target or "")
+    elif entry.kind == "directory":
+        target.mkdir(parents=True, exist_ok=True)
+        target.chmod(entry.mode)

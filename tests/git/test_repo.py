@@ -3,7 +3,12 @@ import subprocess
 import pytest
 
 from dev_orchestration.git.guards import ProhibitedOperationError
-from dev_orchestration.git.repo import DirtyWorktreeError, GitRepo, discover_repo
+from dev_orchestration.git.repo import (
+    DirtyWorktreeError,
+    EmptySnapshotError,
+    GitRepo,
+    discover_repo,
+)
 
 
 @pytest.fixture
@@ -139,6 +144,66 @@ def test_change_inventory_covers_renames_and_worktree_states(repo):
         "staged.txt",
         "untracked.txt",
     }.issubset(inventory)
+
+
+def test_ignored_paths_names_individual_files_inside_an_ignored_directory(repo):
+    (repo.root / ".gitignore").write_text("dist/\n")
+    (repo.root / "dist" / "sub").mkdir(parents=True)
+    (repo.root / "dist" / "payload.sh").write_text("x\n")
+    (repo.root / "dist" / "sub" / "deep.txt").write_text("y\n")
+    assert repo.ignored_paths() == ["dist/payload.sh", "dist/sub/deep.txt"]
+
+
+def test_ignored_paths_excludes_tracked_and_plain_untracked_files(repo):
+    (repo.root / ".gitignore").write_text("*.log\n")
+    (repo.root / "app.log").write_text("noise\n")
+    (repo.root / "visible.txt").write_text("seen\n")
+    assert repo.ignored_paths() == ["app.log"]
+
+
+def test_change_inventory_still_ignores_ignored_files_without_a_stage_snapshot(repo):
+    base = repo.current_commit()
+    (repo.root / ".gitignore").write_text("dist/\n")
+    (repo.root / "dist").mkdir()
+    (repo.root / "dist" / "payload.sh").write_text("x\n")
+    assert "dist/payload.sh" not in repo.change_inventory(base)
+
+
+def test_ignored_delta_detects_overwrite_delete_and_type_change(repo):
+    (repo.root / ".gitignore").write_text("dist/\n")
+    (repo.root / "dist").mkdir()
+    payload = repo.root / "dist" / "payload.sh"
+    payload.write_text("before\n")
+    before = repo.ignored_paths()
+    payload.write_text("after\n")
+    assert repo.ignored_delta(before) == ["dist/payload.sh"]
+    payload.unlink()
+    assert repo.ignored_delta(before) == ["dist/payload.sh"]
+    payload.mkdir()
+    (payload / "nested").write_text("new\n")
+    assert repo.ignored_delta(before) == ["dist/payload.sh", "dist/payload.sh/nested"]
+
+
+def test_commit_snapshot_refuses_an_empty_change_set(repo):
+    with pytest.raises(EmptySnapshotError):
+        repo.commit_snapshot("ai(run): nothing happened", [])
+
+
+def test_commit_snapshot_records_only_the_reviewed_paths(repo):
+    base = repo.current_commit()
+    (repo.root / "reviewed.txt").write_text("in the review\n")
+    (repo.root / "unreviewed.txt").write_text("not in the review\n")
+    sha = repo.commit_snapshot("ai(run): complete", ["reviewed.txt"])
+    committed = repo.run_git("diff", "--name-only", base, sha).splitlines()
+    assert committed == ["reviewed.txt"]
+    assert "unreviewed.txt" in repo.status_paths()
+
+
+def test_commit_snapshot_records_a_deletion(repo):
+    base = repo.current_commit()
+    (repo.root / "README.md").unlink()
+    sha = repo.commit_snapshot("ai(run): remove", ["README.md"])
+    assert repo.run_git("diff", "--name-status", base, sha) == "D\tREADME.md"
 
 
 def test_discover_repo_walks_up_from_a_subdirectory(repo):

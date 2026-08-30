@@ -7,7 +7,9 @@ from dev_orchestration.scope import ScopeFence
 from dev_orchestration.workflow.scope_check import (
     ScopeViolation,
     check_diff_against_fence,
+    check_ignored_writes,
     enforce_fence,
+    enforce_ignored_writes,
 )
 
 FENCE = ScopeFence(include=["src/"], exclude=["secrets/"])
@@ -53,3 +55,56 @@ def test_enforcement_names_every_offending_file(repo):
     with pytest.raises(ScopeViolation) as error:
         enforce_fence(repo, base, FENCE)
     assert "vendor/lib.py" in str(error.value)
+
+
+def test_ignored_file_overwrite_outside_the_fence_is_a_violation(repo):
+    (repo.root / ".gitignore").write_text("dist/\n")
+    (repo.root / "dist").mkdir()
+    payload = repo.root / "dist" / "payload.sh"
+    payload.write_text("before\n")
+    before = repo.ignored_paths()
+    payload.write_text("after\n")
+    assert check_ignored_writes(repo, before, FENCE) == ["dist/payload.sh"]
+
+
+def test_ignored_file_present_before_the_stage_is_not_attributed(repo):
+    (repo.root / ".gitignore").write_text("dist/\n")
+    (repo.root / "dist").mkdir()
+    (repo.root / "dist" / "cache.bin").write_text("pre-existing\n")
+    before = repo.ignored_paths()
+    assert check_ignored_writes(repo, before, FENCE) == []
+
+
+def test_ignored_file_delete_and_type_change_are_attributed(repo):
+    (repo.root / ".gitignore").write_text("dist/\n")
+    (repo.root / "dist").mkdir()
+    payload = repo.root / "dist" / "payload.sh"
+    payload.write_text("before\n")
+    before = repo.ignored_paths()
+    payload.unlink()
+    with pytest.raises(ScopeViolation):
+        enforce_ignored_writes(repo, before, FENCE)
+    payload.mkdir()
+    (payload / "child").write_text("after\n")
+    assert check_ignored_writes(repo, before, FENCE) == [
+        "dist/payload.sh",
+        "dist/payload.sh/child",
+    ]
+
+
+def test_ignored_file_written_inside_the_fence_is_allowed(repo):
+    (repo.root / ".gitignore").write_text("*.log\n")
+    before = repo.ignored_paths()
+    (repo.root / "src" / "build.log").write_text("in scope\n")
+    enforce_ignored_writes(repo, before, FENCE)
+
+
+def test_enforcement_explains_why_an_ignored_write_is_invisible(repo):
+    (repo.root / ".gitignore").write_text("dist/\n")
+    before = repo.ignored_paths()
+    (repo.root / "dist").mkdir()
+    (repo.root / "dist" / "payload.sh").write_text("x\n")
+    with pytest.raises(ScopeViolation) as error:
+        enforce_ignored_writes(repo, before, FENCE)
+    assert "dist/payload.sh" in str(error.value)
+    assert "ignored" in str(error.value).lower()

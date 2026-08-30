@@ -54,7 +54,9 @@ PROHIBITED_VERBS = {
 # Widening this set is a deliberate act. Add a verb only alongside the call
 # site that needs it, and only after checking it cannot reach a remote or
 # discard uncommitted work.
-ALLOWED_VERBS = frozenset({"add", "checkout", "commit", "diff", "rev-parse", "status", "worktree"})
+ALLOWED_VERBS = frozenset(
+    {"add", "checkout", "commit", "diff", "ls-files", "rev-parse", "status", "worktree"}
+)
 
 # `checkout` is allowed because the framework creates branches with it. The
 # same verb also discards uncommitted changes when given a pathspec or a
