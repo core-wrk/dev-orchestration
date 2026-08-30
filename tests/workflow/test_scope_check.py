@@ -57,7 +57,7 @@ def test_enforcement_names_every_offending_file(repo):
     assert "vendor/lib.py" in str(error.value)
 
 
-def test_ignored_file_overwrite_outside_the_fence_is_a_violation(repo):
+def test_ignored_file_modified_outside_the_fence_is_a_violation(repo):
     (repo.root / ".gitignore").write_text("dist/\n")
     (repo.root / "dist").mkdir()
     payload = repo.root / "dist" / "payload.sh"
@@ -75,7 +75,7 @@ def test_ignored_file_present_before_the_stage_is_not_attributed(repo):
     assert check_ignored_writes(repo, before, FENCE) == []
 
 
-def test_ignored_file_delete_and_type_change_are_attributed(repo):
+def test_ignored_file_deleted_and_type_change_are_attributed(repo):
     (repo.root / ".gitignore").write_text("dist/\n")
     (repo.root / "dist").mkdir()
     payload = repo.root / "dist" / "payload.sh"
@@ -92,7 +92,7 @@ def test_ignored_file_delete_and_type_change_are_attributed(repo):
     ]
 
 
-def test_ignored_file_written_inside_the_fence_is_allowed(repo):
+def test_ignored_in_scope_write_is_allowed(repo):
     (repo.root / ".gitignore").write_text("*.log\n")
     before = repo.ignored_paths()
     (repo.root / "src" / "build.log").write_text("in scope\n")
