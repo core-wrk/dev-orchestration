@@ -1,6 +1,7 @@
 {
   "role": "orchestrator_verifier",
   "tested_code_sha": "6452ed5f632169580ee308a320b94f5310b288f9",
+  "evidence_commit": "ee0b4b15421cc724f94841dce18a8ff9572d64a7",
   "branch": "fix/m2-remediation",
   "clean_before_evidence": true,
   "clean_after_evidence_generation": true,

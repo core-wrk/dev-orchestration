@@ -1,7 +1,7 @@
 # M2 acceptance evidence
 
 - Tested code commit: `6452ed5f632169580ee308a320b94f5310b288f9`
-- Evidence commit: the commit that adds this validation directory
+- Evidence commit: `ee0b4b15421cc724f94841dce18a8ff9572d64a7`
 - Branch: `fix/m2-remediation`
 - Environment: Darwin 25.5.0 arm64; Python 3.14.6; dev-orchestration 0.1.0
 - Working tree: clean at the tested code commit before evidence capture.
