@@ -68,6 +68,8 @@ class ClaudeAdapter:
             cmd += ["--model", request.model_alias]
         if request.allowed_tools:
             cmd += ["--allowedTools", ",".join(request.allowed_tools)]
+        if request.expected_schema:
+            cmd += ["--json-schema", request.expected_schema.read_text(encoding="utf-8")]
         cmd += ["-p", compose_prompt(request)]
         return cmd
 
@@ -81,10 +83,7 @@ class ClaudeAdapter:
             timeout=request.timeout_seconds or DEFAULT_TIMEOUT_SECONDS,
             check=False,
         )
-        try:
-            output: dict | str = json.loads(proc.stdout)
-        except json.JSONDecodeError:
-            output = proc.stdout
+        output = _decode_output(proc.stdout)
         return AgentResult(
             provider=self.name,
             model=request.model_alias,
@@ -93,3 +92,23 @@ class ClaudeAdapter:
             started_at=started,
             completed_at=datetime.now(UTC),
         )
+
+
+def _decode_output(stdout: str) -> dict | str:
+    """Normalize Claude's JSON result envelope to the provider payload."""
+    try:
+        output: dict | str = json.loads(stdout)
+    except json.JSONDecodeError:
+        return stdout
+    if not isinstance(output, dict) or "result" not in output:
+        return output
+    result = output["result"]
+    if isinstance(result, dict):
+        return result
+    if not isinstance(result, str):
+        return output
+    try:
+        decoded = json.loads(result)
+    except json.JSONDecodeError:
+        return result
+    return decoded if isinstance(decoded, dict) else result

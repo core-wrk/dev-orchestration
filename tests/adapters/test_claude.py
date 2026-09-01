@@ -45,6 +45,15 @@ def test_model_alias_is_passed_through():
     assert cmd[cmd.index("--model") + 1] == "opus"
 
 
+def test_expected_schema_is_passed_to_claude_as_json(tmp_path):
+    schema = tmp_path / "review.json"
+    schema.write_text('{"type":"object","required":["outcome"]}')
+    cmd = ClaudeAdapter().build_command(
+        AgentRequest(role="plan_reviewer", prompt="r", cwd=Path("/w"), expected_schema=schema)
+    )
+    assert cmd[cmd.index("--json-schema") + 1] == '{"type":"object","required":["outcome"]}'
+
+
 def test_prompt_is_a_separate_argv_element_not_interpolated():
     injected = 'review"; rm -rf /'
     cmd = ClaudeAdapter().build_command(
@@ -147,6 +156,26 @@ def test_run_maps_agent_result_fields_correctly(monkeypatch):
     assert result.started_at.tzinfo is not None
     assert result.completed_at.tzinfo is not None
     assert before <= result.started_at <= result.completed_at <= after
+
+
+def test_run_unwraps_claude_result_envelope(monkeypatch):
+    _capture_subprocess_run(
+        monkeypatch,
+        stdout='{"type":"result","result":"{\\"outcome\\":\\"PASS\\",\\"findings\\":[]}"}',
+    )
+    adapter = ClaudeAdapter()
+    result = adapter.run(AgentRequest(role="plan_reviewer", prompt="p", cwd=Path("/w")))
+    assert result.output == {"outcome": "PASS", "findings": []}
+
+
+def test_run_keeps_plain_claude_result_text(monkeypatch):
+    _capture_subprocess_run(
+        monkeypatch,
+        stdout='{"type":"result","result":"plain review text"}',
+    )
+    adapter = ClaudeAdapter()
+    result = adapter.run(AgentRequest(role="plan_reviewer", prompt="p", cwd=Path("/w")))
+    assert result.output == "plain review text"
 
 
 def test_run_falls_back_to_raw_stdout_when_nothing_parses(monkeypatch):
