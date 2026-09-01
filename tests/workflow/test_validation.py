@@ -5,7 +5,12 @@ from pydantic import ValidationError
 
 from dev_orchestration.config.models import ProjectConfig, ValidationCommand
 from dev_orchestration.domain.enums import Tier
-from dev_orchestration.workflow.validation import ValidationOutcome, all_passed, run_validations
+from dev_orchestration.workflow.validation import (
+    ValidationOutcome,
+    all_passed,
+    run_validations,
+    validation_environment,
+)
 
 
 def test_passing_and_failing_commands_record_exit_codes(tmp_path):
@@ -64,3 +69,29 @@ def test_outcome_is_immutable():
     )
     with pytest.raises(ValidationError):
         outcome.passed = False
+
+
+def test_validation_environment_temporarily_links_base_venv(tmp_path):
+    base = tmp_path / "base"
+    worktree = tmp_path / "worktree"
+    (base / ".venv" / "bin").mkdir(parents=True)
+    worktree.mkdir()
+
+    with validation_environment(base, worktree):
+        assert (worktree / ".venv").is_symlink()
+        assert (worktree / ".venv").resolve() == (base / ".venv").resolve()
+
+    assert not (worktree / ".venv").exists()
+
+
+def test_validation_environment_preserves_existing_worktree_venv(tmp_path):
+    base = tmp_path / "base"
+    worktree = tmp_path / "worktree"
+    (base / ".venv").mkdir(parents=True)
+    (worktree / ".venv").mkdir(parents=True)
+
+    with validation_environment(base, worktree):
+        assert (worktree / ".venv").is_dir()
+        assert not (worktree / ".venv").is_symlink()
+
+    assert (worktree / ".venv").is_dir()

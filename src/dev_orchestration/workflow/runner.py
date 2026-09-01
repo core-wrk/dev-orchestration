@@ -50,6 +50,7 @@ from dev_orchestration.workflow.validation import (
     ValidationOutcome,
     all_passed,
     run_validations,
+    validation_environment,
 )
 
 
@@ -194,11 +195,18 @@ def _run_worktree_stage(
     return result
 
 
-def _run_validation_stage(worktree_repo: GitRepo, base_commit: str, fence: ScopeFence, action):
+def _run_validation_stage(
+    worktree_repo: GitRepo,
+    base_commit: str,
+    fence: ScopeFence,
+    action,
+    validation_root: Path | None = None,
+):
     """Run validation while ensuring its ignored caches do not become residue."""
     ignored_before = worktree_repo.ignored_paths()
     try:
-        result = action()
+        with validation_environment(validation_root, worktree_repo.root):
+            result = action()
         enforce_fence(worktree_repo, base_commit, fence)
         return result
     finally:
@@ -427,6 +435,7 @@ def execute_run(
             base_commit,
             fence,
             lambda: run_validations(project_config.validation, effective_tier, worktree),
+            repo.root,
         )
         store.write_json_artifact(
             "execution/validation-v1.json", _validation_json(outcomes), immutable=True
@@ -501,6 +510,7 @@ def execute_run(
                 base_commit,
                 fence,
                 lambda: run_validations(project_config.validation, effective_tier, worktree),
+                repo.root,
             )
             store.write_json_artifact(
                 f"execution/validation-v{cycle + 1}.json",
