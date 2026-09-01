@@ -99,6 +99,24 @@ def test_ignored_in_scope_write_is_allowed(repo):
     enforce_ignored_writes(repo, before, FENCE)
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        ".pytest_cache/v/cache/nodeids",
+        "pipeline/__pycache__/module.cpython-311.pyc",
+        ".ruff_cache/0.0.0/cache.json",
+        ".coverage",
+    ],
+)
+def test_tool_caches_are_not_scope_violations(repo, path):
+    (repo.root / ".gitignore").write_text(".pytest_cache/\n__pycache__/\n.ruff_cache/\n.coverage\n")
+    before = repo.ignored_paths()
+    target = repo.root / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("tool cache\n")
+    enforce_ignored_writes(repo, before, FENCE)
+
+
 def test_enforcement_explains_why_an_ignored_write_is_invisible(repo):
     (repo.root / ".gitignore").write_text("dist/\n")
     before = repo.ignored_paths()
