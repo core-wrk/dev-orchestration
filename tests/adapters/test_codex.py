@@ -234,3 +234,11 @@ def test_run_uses_plain_agent_message_when_codex_has_no_structured_payload(monke
     adapter = CodexAdapter(binary=Path("/bin/codex"))
     result = adapter.run(AgentRequest(role="planner", prompt="p", cwd=Path("/w")))
     assert result.output == "# Plan\n\n1. Make the change."
+
+
+def test_last_json_object_ignores_non_message_item_events():
+    stdout = (
+        '{"type":"item.started","item":{"type":"command_execution"}}\n'
+        '{"type":"turn.completed","usage":{"output_tokens":1}}\n'
+    )
+    assert _last_json_object(stdout) is None

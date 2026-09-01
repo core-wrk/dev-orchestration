@@ -296,6 +296,7 @@ def review_implementation(
     validation_evidence: str,
     profile_constraints: list[ContextRef],
     store: RunStore,
+    worktree: Path | None = None,
 ) -> ReviewResult:
     packet = assemble(
         "implementation_review",
@@ -310,7 +311,13 @@ def review_implementation(
             *profile_constraints,
         ],
     )
-    request = _request(registry, "implementation_reviewer", store, packet, store.repo_root)
+    request = _request(
+        registry,
+        "implementation_reviewer",
+        store,
+        packet,
+        worktree or store.repo_root,
+    )
     raw = invoke_structured(
         registry.adapter_for("implementation_reviewer"),
         request,

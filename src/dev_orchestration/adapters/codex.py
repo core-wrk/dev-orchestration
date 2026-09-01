@@ -180,6 +180,7 @@ def _last_json_object(stdout: str) -> dict | None:
                 "turn.started",
                 "turn.completed",
                 "turn.failed",
+                "item.started",
                 "item.completed",
                 "error",
             }:

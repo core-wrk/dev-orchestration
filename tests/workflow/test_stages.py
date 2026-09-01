@@ -122,6 +122,22 @@ def test_implementation_review_uses_validation_evidence_and_stable_ids(store):
     assert Category.BUILDER_NARRATION not in adapter.requests[0].context.labels()
 
 
+def test_implementation_review_runs_in_the_supplied_worktree(store, tmp_path):
+    adapter = Scripted([{"outcome": "PASS", "findings": []}])
+    worktree = tmp_path / "worktree"
+    result = review_implementation(
+        registry(adapter, "implementation_reviewer"),
+        "# plan",
+        "diff",
+        "evidence",
+        [],
+        store,
+        worktree,
+    )
+    assert result.outcome is Outcome.PASS
+    assert adapter.requests[0].cwd == worktree
+
+
 def test_remediation_is_limited_to_two_cycles(store, tmp_path):
     adapter = Scripted(["fixed", "fixed"])
     blocking = [Finding(id="F001", severity=Severity.BLOCKING, summary="s", evidence_required="e")]

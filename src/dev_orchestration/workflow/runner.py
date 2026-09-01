@@ -458,6 +458,7 @@ def execute_run(
             _evidence(outcomes),
             runtime.profile_constraints,
             store,
+            worktree,
         )
         if worktree_repo.change_inventory(base_commit) != review_inventory:
             raise ContextContractError("read-only implementation review changed the worktree")
@@ -527,6 +528,7 @@ def execute_run(
                 _evidence(outcomes),
                 runtime.profile_constraints,
                 store,
+                worktree,
             )
             if worktree_repo.change_inventory(base_commit) != review_inventory:
                 raise ContextContractError("read-only implementation review changed the worktree")
