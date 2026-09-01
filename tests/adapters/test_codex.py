@@ -210,7 +210,27 @@ def test_run_falls_back_to_raw_stdout_when_nothing_parses(monkeypatch):
         ("not json\nstill not json\n", None),
         ('{"a": 1}\n[1, 2, 3]\n', {"a": 1}),
         ('{"a": 1}\n42\n', {"a": 1}),
+        (
+            (
+                '{"type":"item.completed","item":{"type":"agent_message",'
+                '"text":"{\\"tier\\":\\"trivial\\",\\"rationale\\":\\"r\\"}"}}\n'
+                '{"type":"turn.completed","usage":{"output_tokens":3}}\n'
+            ),
+            {"tier": "trivial", "rationale": "r"},
+        ),
     ],
 )
 def test_last_json_object_edge_cases(stdout, expected):
     assert _last_json_object(stdout) == expected
+
+
+def test_run_uses_plain_agent_message_when_codex_has_no_structured_payload(monkeypatch):
+    stdout = (
+        '{"type":"item.completed","item":{"type":"agent_message",'
+        '"text":"# Plan\\n\\n1. Make the change."}}\n'
+        '{"type":"turn.completed","usage":{"output_tokens":8}}\n'
+    )
+    _capture_subprocess_run(monkeypatch, stdout=stdout)
+    adapter = CodexAdapter(binary=Path("/bin/codex"))
+    result = adapter.run(AgentRequest(role="planner", prompt="p", cwd=Path("/w")))
+    assert result.output == "# Plan\n\n1. Make the change."

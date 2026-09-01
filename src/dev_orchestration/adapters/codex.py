@@ -145,19 +145,69 @@ class CodexAdapter:
             provider=self.name,
             model=MODEL_ALIASES.get(request.model_alias or "", request.model_alias),
             exit_code=proc.returncode,
-            output=_last_json_object(proc.stdout) or proc.stdout,
+            output=_last_json_object(proc.stdout)
+            or _last_agent_message(proc.stdout)
+            or proc.stdout,
             started_at=started,
             completed_at=datetime.now(UTC),
         )
 
 
 def _last_json_object(stdout: str) -> dict | None:
-    """codex exec --json emits JSONL; the final object carries the result."""
+    """Return the structured payload from a Codex JSONL agent message.
+
+    ``codex exec --json`` ends with a ``turn.completed`` usage event. The
+    assistant result is nested in the preceding ``item.completed`` event, so
+    selecting the last JSON object directly returns metadata instead of the
+    requested payload.
+    """
     for line in reversed(stdout.strip().splitlines()):
         try:
             parsed = json.loads(line)
         except json.JSONDecodeError:
             continue
         if isinstance(parsed, dict):
+            message = _agent_message_text(parsed)
+            if message is not None:
+                try:
+                    payload = json.loads(message)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(payload, dict):
+                    return payload
+            if parsed.get("type") in {
+                "thread.started",
+                "turn.started",
+                "turn.completed",
+                "turn.failed",
+                "item.completed",
+                "error",
+            }:
+                continue
             return parsed
+    return None
+
+
+def _agent_message_text(event: dict) -> str | None:
+    """Extract assistant text from a Codex ``item.completed`` event."""
+    if event.get("type") != "item.completed":
+        return None
+    item = event.get("item")
+    if not isinstance(item, dict) or item.get("type") != "agent_message":
+        return None
+    text = item.get("text")
+    return text if isinstance(text, str) else None
+
+
+def _last_agent_message(stdout: str) -> str | None:
+    """Return the last plain assistant message from Codex JSONL output."""
+    for line in reversed(stdout.strip().splitlines()):
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            message = _agent_message_text(parsed)
+            if message is not None:
+                return message
     return None
