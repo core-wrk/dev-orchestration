@@ -14,9 +14,28 @@ SCHEMA_MODELS: dict[str, type[BaseModel]] = {
 }
 
 
+def _require_all_object_properties(value: object) -> None:
+    """Adapt Pydantic's optional fields to provider structured-output rules.
+
+    OpenAI-compatible structured outputs require every property of every object
+    schema to appear in ``required``. Fields with defaults remain optional to
+    Pydantic at runtime; the provider receives their explicit default/null value.
+    """
+    if isinstance(value, dict):
+        properties = value.get("properties")
+        if isinstance(properties, dict):
+            value["required"] = list(properties)
+        for child in value.values():
+            _require_all_object_properties(child)
+    elif isinstance(value, list):
+        for child in value:
+            _require_all_object_properties(child)
+
+
 def schema_for(model: type[BaseModel]) -> dict:
     schema = model.model_json_schema()
     schema["additionalProperties"] = False
+    _require_all_object_properties(schema)
     return schema
 
 

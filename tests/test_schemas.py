@@ -23,6 +23,15 @@ def test_schema_forbids_extra_keys_recursively():
     assert schema["$defs"]["Finding"]["additionalProperties"] is False
 
 
+def test_schema_requires_every_provider_object_property():
+    for model in (Classification, ReviewResult, Verification):
+        schema = schema_for(model)
+        objects = [schema, *schema.get("$defs", {}).values()]
+        for object_schema in objects:
+            properties = object_schema.get("properties", {})
+            assert set(properties) <= set(object_schema.get("required", []))
+
+
 def test_schema_round_trips_a_real_payload():
     assert (
         Classification.model_validate(
