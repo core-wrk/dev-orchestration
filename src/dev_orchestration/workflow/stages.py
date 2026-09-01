@@ -389,6 +389,7 @@ def verify(
     validation_evidence: str,
     unresolved: list[str],
     store: RunStore,
+    worktree: Path | None = None,
 ) -> Verification:
     packet = assemble(
         "final_verification",
@@ -413,7 +414,7 @@ def verify(
             ),
         ],
     )
-    request = _request(registry, "verifier", store, packet, store.repo_root)
+    request = _request(registry, "verifier", store, packet, worktree or store.repo_root)
     result = invoke_structured(
         registry.adapter_for("verifier"), request, Verification, store.root / "schemas"
     )

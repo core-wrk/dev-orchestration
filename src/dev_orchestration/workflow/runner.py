@@ -555,6 +555,7 @@ def execute_run(
             _evidence(outcomes),
             [finding.id for finding in implementation_review.findings],
             store,
+            worktree,
         )
         if worktree_repo.change_inventory(base_commit) != review_inventory:
             raise ContextContractError("read-only verification changed the worktree")

@@ -181,6 +181,33 @@ def test_verification_passes_every_criterion_to_the_model(store):
     assert Category.ACCEPTANCE_CRITERIA in adapter.requests[0].context.labels()
 
 
+def test_verification_runs_in_the_supplied_worktree(store, tmp_path):
+    adapter = Scripted(
+        [
+            {
+                "outcome": "PASS",
+                "criteria": ["a"],
+                "verdicts": [{"criterion": "a", "verdict": "PASS", "evidence": "e"}],
+                "unresolved_finding_ids": [],
+            }
+        ]
+    )
+    worktree = tmp_path / "worktree"
+    result = verify(
+        registry(adapter, "verifier"),
+        "req",
+        "# plan",
+        ["a"],
+        "state",
+        "unit: exit 0",
+        [],
+        store,
+        worktree,
+    )
+    assert result.outcome is Outcome.PASS
+    assert adapter.requests[0].cwd == worktree
+
+
 def _blocking(summary, line=12):
     return {
         "outcome": "CHANGES_REQUIRED",
