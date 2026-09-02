@@ -1,0 +1,37 @@
+{
+  "outcome": "CHANGES_REQUIRED",
+  "findings": [
+    {
+      "id": "F001",
+      "severity": "blocking",
+      "summary": "The requested regression test already exists in tests/config/test_models.py, and the plan has no branch for that outcome \u2014 executing it produces a duplicate test while reporting new protection. `test_dangerous_commands_are_rejected` is parametrized with \"git push origin main\" (line 47), and `test_each_denied_token_is_enforced`, `test_each_denied_token_caught_as_substring`, and `test_denied_token_case_insensitive` are each parametrized over EXPECTED_DENIED_TOKENS which includes \"push\" (line 21). Git history shows this was deliberate hardening (87400f7 \"strengthen deny-list test coverage\", dc4d11a \"decouple parametrized tests from source using literal token list\"). Step 1 would discover this but steps 2-6 proceed unconditionally, and none of the four acceptance criteria can distinguish a duplicate from genuinely new coverage.",
+      "evidence_required": "Either (a) a statement of the specific behavior gap the new test closes that lines 41-93 of tests/config/test_models.py do not already cover, or (b) a decision to stop and report the pre-existing coverage instead of adding the test. If (a), add an explicit acceptance criterion that the new test fails for a reason no existing test already catches \u2014 e.g. delete the new test and show the target mutation still passes the suite.",
+      "file": "tests/config/test_models.py",
+      "line": 47
+    },
+    {
+      "id": "F002",
+      "severity": "important",
+      "summary": "The plan never names the token or the command string it will use, leaving \"prohibited remote-operation token\" unresolved. DENIED_COMMAND_TOKENS holds six tokens (deploy, wrangler, publish, push, merge, release) of which at least push, publish, and release plausibly read as remote operations, and nothing in the plan selects among them. A reviewer cannot judge whether the produced test adds coverage until after it is written.",
+      "evidence_required": "The exact token and the literal command string the test will register (e.g. token \"push\", command \"git push origin main\"), stated in the plan before implementation.",
+      "file": "src/dev_orchestration/config/models.py",
+      "line": 9
+    },
+    {
+      "id": "F003",
+      "severity": "important",
+      "summary": "Acceptance criterion \"the regression test would fail if that deny-list protection were removed or bypassed\" has no stated verification method, and the plan does not commit to the existing suite's independent-literal pattern that makes it true. The existing tests achieve mutation-sensitivity by asserting against a module-local EXPECTED_DENIED_TOKENS literal (lines 17-24) plus a pinning test; a new test written against the imported DENIED_COMMAND_TOKENS frozenset would pass vacuously if the token were deleted from the source, silently failing this criterion. Demonstrating the criterion also requires temporarily mutating production code, which sits in tension with the plan's no-production-change constraint and is not reconciled.",
+      "evidence_required": "A concrete verification procedure: temporarily remove \"push\" from DENIED_COMMAND_TOKENS (or neuter reject_denied_commands), show the new test fails, revert, and confirm the final diff touches only tests/. Plus an explicit commitment that the test asserts against an independent literal rather than the imported frozenset.",
+      "file": "tests/config/test_models.py",
+      "line": 17
+    },
+    {
+      "id": "F004",
+      "severity": "minor",
+      "summary": "The plan's gate list (step 4) and self-review (step 5) omit two controls the active agent_orchestration profile mandates: implementation_review_required and final_verification_required. A self-inspection of the diff is not the same gate as a mandated implementation review.",
+      "evidence_required": "Explicit steps in the plan for the implementation review and final verification gates, naming who or what performs each, or a statement that the orchestration layer enforces them outside the plan's scope.",
+      "file": null,
+      "line": null
+    }
+  ]
+}

@@ -1,0 +1,37 @@
+{
+  "outcome": "CHANGES_REQUIRED",
+  "findings": [
+    {
+      "id": "F012",
+      "severity": "important",
+      "summary": "The required `target == candidate` symlink-identity rule rejects any declared reference whose final component or in-repo ancestor is a symlink, including the common `AGENTS.md -> CLAUDE.md` pattern. This silently suppresses explicitly configured persistent context \u2014 the exact outcome the brief asks the change to eliminate \u2014 while providing no containment guarantee beyond the resolved-containment check (`target.relative_to(resolved_root)`), which already rejects every symlink whose target leaves the repository. The plan's own expected-outcome table codifies this as intended (\"Symlink beneath the repository to another repository file | Reject\"), so it is a deliberate choice that needs justification or narrowing rather than an oversight.",
+      "evidence_required": "Either (a) a concrete escape scenario that resolved-containment permits but identity rejects, justifying the stricter rule, or (b) an amended rule that permits a symlink whose fully resolved target is a regular file beneath `resolved_root` while still rejecting outside targets, plus a test asserting a declared in-repo symlink to an in-repo regular file loads. If the strict rule is kept deliberately, the plan must state that repositories symlinking AGENTS.md will lose declared context and how operators are told (excluded-entry wording).",
+      "file": "src/dev_orchestration/context/assembler.py",
+      "line": 190
+    },
+    {
+      "id": "F013",
+      "severity": "important",
+      "summary": "Step 2 enumerates the failures to convert into `ContextContractError` as \"resolution, missing-file, non-file, symlink-loop, and read failures\" and specifies \"guarded UTF-8 reading\" without naming decode errors. `UnicodeDecodeError` is a subclass of `ValueError`, not `OSError`, so an `except OSError` guard (the current shape at assembler.py:213) lets it escape `read_reference`, pass through bootstrap's `except ContextContractError` at bootstrap.py:80, and abort the whole run instead of recording the reference in `RuntimeContext.excluded`. Step 3 asserts unreadable declared references keep being reported in `excluded`, which this gap contradicts.",
+      "evidence_required": "An explicit statement of the exception set the new guard catches (must include `UnicodeDecodeError`/`ValueError` alongside `OSError`), and a planned test declaring a non-UTF-8 file as persistent context that asserts it lands in `RuntimeContext.excluded` rather than raising out of `resolve_runtime_context`.",
+      "file": "src/dev_orchestration/context/assembler.py",
+      "line": 211
+    },
+    {
+      "id": "F014",
+      "severity": "minor",
+      "summary": "Step 3 removes the `candidate.exists()` pre-check and delegates to `read_reference`, which changes the excluded-entry diagnostic for a missing declared reference from `\"<path>: missing\"` to `\"<path> is not a readable file\"`. The plan claims missing references keep being reported but never pins the wording, and both the existing assertion (tests/context/test_assembler.py:119) and the planned bootstrap assertions match only the `\"<path>:\"` prefix, so the loss of the distinct missing-vs-unreadable signal in `context.json` and `manifest.context_excluded` would pass every gate unnoticed.",
+      "evidence_required": "The intended excluded-entry text for a missing declared reference, plus either a non-symlink-following existence check (e.g. `os.path.lexists`) retained before validation or a dedicated missing-file branch inside `read_reference`, and a test asserting the exact message rather than the path prefix.",
+      "file": "src/dev_orchestration/workflow/bootstrap.py",
+      "line": 74
+    },
+    {
+      "id": "F015",
+      "severity": "minor",
+      "summary": "The active profile constraint set includes `workflow_changes_review_required: true`, and the change edits two workflow modules (`workflow/bootstrap.py`, `workflow/runner.py`), but the plan's review section names only plan review, implementation review, and final verification. The workflow-changes control is never mapped to a gate, so it could be treated as discharged by the generic implementation review without anyone deciding that.",
+      "evidence_required": "An explicit statement in the plan naming `workflow_changes_review_required` and the reviewer/gate that discharges it for the two workflow-module edits, or confirmation from repository authority that the implementation review discharges it.",
+      "file": null,
+      "line": null
+    }
+  ]
+}

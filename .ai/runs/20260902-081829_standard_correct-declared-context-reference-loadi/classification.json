@@ -1,0 +1,7 @@
+{
+  "tier": "substantial",
+  "rationale": "The request changes repository scope-fence and persistent-context path handling, including security-relevant rejection of paths resolving outside the repository, with focused source and test modifications.",
+  "profiles": [
+    "agent_orchestration"
+  ]
+}

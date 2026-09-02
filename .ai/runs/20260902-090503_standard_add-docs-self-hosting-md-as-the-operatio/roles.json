@@ -1,0 +1,51 @@
+{
+  "classifier": {
+    "adapter": "codex",
+    "model_alias": "luna",
+    "reasoning": "medium",
+    "resolved_binary": "/Users/andrewodonnell/.vscode/extensions/openai.chatgpt-26.5825.51511-darwin-arm64/bin/macos-aarch64/codex",
+    "resolved_version": null
+  },
+  "planner": {
+    "adapter": "codex",
+    "model_alias": "sol",
+    "reasoning": "high",
+    "resolved_binary": "/Users/andrewodonnell/.vscode/extensions/openai.chatgpt-26.5825.51511-darwin-arm64/bin/macos-aarch64/codex",
+    "resolved_version": null
+  },
+  "plan_reviewer": {
+    "adapter": "claude",
+    "model_alias": "opus",
+    "reasoning": null,
+    "resolved_binary": "claude",
+    "resolved_version": null
+  },
+  "plan_reconciler": {
+    "adapter": "codex",
+    "model_alias": "sol",
+    "reasoning": "high",
+    "resolved_binary": "/Users/andrewodonnell/.vscode/extensions/openai.chatgpt-26.5825.51511-darwin-arm64/bin/macos-aarch64/codex",
+    "resolved_version": null
+  },
+  "implementation_worker": {
+    "adapter": "codex",
+    "model_alias": "luna",
+    "reasoning": "high",
+    "resolved_binary": "/Users/andrewodonnell/.vscode/extensions/openai.chatgpt-26.5825.51511-darwin-arm64/bin/macos-aarch64/codex",
+    "resolved_version": null
+  },
+  "implementation_reviewer": {
+    "adapter": "claude",
+    "model_alias": "opus",
+    "reasoning": null,
+    "resolved_binary": "claude",
+    "resolved_version": null
+  },
+  "verifier": {
+    "adapter": "claude",
+    "model_alias": "opus",
+    "reasoning": null,
+    "resolved_binary": "claude",
+    "resolved_version": null
+  }
+}

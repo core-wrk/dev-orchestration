@@ -1,0 +1,53 @@
+{
+  "outcome": "CHANGES_REQUIRED",
+  "findings": [
+    {
+      "id": "F001",
+      "severity": "blocking",
+      "summary": "The plan mandates doctor state unconditionally that \"substantial execution is supported\", but when approval.substantial is true a substantial run halts at AWAITING_APPROVAL (runner.py:490) and cannot be resumed: the CLI exposes no approval command and no code path transitions into RunState.APPROVED. Under that configuration doctor would assert an execution capability the system does not have, recreating for substantial exactly the policy-implies-availability confusion the brief asks doctor to eliminate for high_risk.",
+      "evidence_required": "Either (a) revise the mandated wording so supportedness is stated relative to the effective approval setting -- e.g. substantial executes end-to-end only when approval.substantial is false, and pauses at a gate with no implemented resume when true -- and add a test covering approval.substantial: true; or (b) demonstrate an implemented, tested path that carries an AWAITING_APPROVAL run to completion, citing the command and the transition into RunState.APPROVED.",
+      "file": "src/dev_orchestration/doctor.py",
+      "line": 139
+    },
+    {
+      "id": "F002",
+      "severity": "important",
+      "summary": "The workflow-tier capability diagnostic reports a property of the installed code, not of project configuration, yet the plan appends it inside _repository_checks after config validation while explicitly preserving the early returns at doctor.py:109 and doctor.py:117. On a repo with a missing or invalid .ai/project.yaml the tier line disappears -- precisely the situation in which someone runs doctor to find out what the tool can do.",
+      "evidence_required": "State where the tier-capability check is emitted and justify it. If it stays config-gated, reconcile that with the brief's requirement that doctor report the implemented workflow tiers; otherwise move it into run_checks alongside the environment checks and add a test asserting it is present when .ai/project.yaml is absent and when it is malformed.",
+      "file": "src/dev_orchestration/doctor.py",
+      "line": 118
+    },
+    {
+      "id": "F003",
+      "severity": "important",
+      "summary": "Step 1 requires deriving tiers from the TIER_STAGES registry \"rather than duplicating tier definitions\", then in the next bullet requires hardcoding that high_risk is unsupported -- which is that duplication. If high_risk is later added to TIER_STAGES, doctor keeps reporting it unsupported, and a test asserting the literal string still passes. sorted(TIER_STAGES) also orders alphabetically (standard, substantial, trivial), losing the risk ordering the output implies.",
+      "evidence_required": "Specify that the unsupported set is computed as set(Tier) - set(TIER_STAGES.keys()) rather than written literally, fix the display order to the risk order (trivial, standard, substantial, high_risk), and add a test that asserts the reported supported/unsupported split equals the registry-derived sets rather than a fixed string.",
+      "file": "src/dev_orchestration/workflow/tiers.py",
+      "line": 14
+    },
+    {
+      "id": "F004",
+      "severity": "important",
+      "summary": "The plan calls the new lines \"informational\" but doctor has no informational rendering: render() emits only \"\u2713\" or \"!\" from Check.ok, and the module contract at doctor.py:1 is \"Every failure names its next action.\" A high_risk-unsupported check with ok=False prints \"!\" on a fully healthy repo and can name no action; with ok=True it renders a checkmark against a capability that does not exist. The plan does not decide this, so it changes user-visible pass/fail semantics by accident.",
+      "evidence_required": "State the ok value for each new Check and the exact detail text, reconcile the choice with the \"every failure names its next action\" contract in the module docstring (or amend that docstring within the declared scope), and add a render-level test asserting the marker each new line produces.",
+      "file": "src/dev_orchestration/doctor.py",
+      "line": 27
+    },
+    {
+      "id": "F005",
+      "severity": "minor",
+      "summary": "No check names or detail strings are specified for the new diagnostics, yet step 2 requires tests that configured approval values \"appear correctly in doctor output\". The existing suite looks checks up by exact name via _by_name and asserts exact detail equality (test_doctor.py:185, 189, 193), so the tests cannot be written to the plan as stated and two implementers would produce incompatible output.",
+      "evidence_required": "Name each new Check explicitly and give the exact detail format string, including how boolean approval values are rendered, so the tests can assert on stable text.",
+      "file": "tests/test_doctor.py",
+      "line": 82
+    },
+    {
+      "id": "F006",
+      "severity": "minor",
+      "summary": "The acceptance criterion \"Missing or invalid project configuration still returns the existing diagnostics without raising\" has no matching test in step 2. The existing tests at test_doctor.py:99 and test_doctor.py:223 confirm no exception but assert nothing about the presence or absence of the new lines, so the interaction between the new diagnostics and the config early returns (see F2) stays unverified.",
+      "evidence_required": "Add a test for the missing-config and malformed-config paths that asserts the expected presence or absence of each new check by name, matching whatever placement decision resolves F2.",
+      "file": "tests/test_doctor.py",
+      "line": 223
+    }
+  ]
+}

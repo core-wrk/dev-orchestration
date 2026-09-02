@@ -1,0 +1,45 @@
+{
+  "outcome": "CHANGES_REQUIRED",
+  "findings": [
+    {
+      "id": "F009",
+      "severity": "blocking",
+      "summary": "Step 1's expected baseline ('clean working tree') is factually false \u2014 8 files are already modified, including both files the plan touches \u2014 so the plan's own stop condition fires immediately and delivers no artifact.",
+      "evidence_required": "`git diff --stat` currently reports .ai/project.yaml, src/dev_orchestration/config/models.py, src/dev_orchestration/domain/run.py, src/dev_orchestration/workflow/runner.py, src/dev_orchestration/workflow/tiers.py, tests/config/test_models.py, tests/workflow/test_runner.py, tests/workflow/test_tiers.py (181 insertions, 5 deletions). Revise step 1 to record the actual pre-existing delta as the baseline and define the task's contribution as the delta-over-baseline, or obtain an explicit decision to commit/stash the in-flight ApprovalPolicy work first. The plan must state which, since 'stop and escalate' as written yields zero delivered work.",
+      "file": null,
+      "line": null
+    },
+    {
+      "id": "F010",
+      "severity": "blocking",
+      "summary": "Steps 7 and 8 gate on absolute working-tree cleanliness ('sole unstaged delta is tests/config/test_models.py', 'no production or orchestration files changed'), which is unsatisfiable given seven unrelated files are already dirty \u2014 both gates fail regardless of execution quality, and the pre-existing ApprovalPolicy edit to config/models.py will be misread as a scope violation by this task.",
+      "evidence_required": "Restate both gates as baseline-relative: capture the baseline diff (e.g. `git diff > baseline.patch`) in step 1, then require that the final diff minus the baseline diff touches only tests/config/test_models.py. Explicitly instruct the reviewer and verifier that the ApprovalPolicy changes in src/dev_orchestration/config/models.py and tests/config/test_models.py:6,150-166 are pre-existing and not attributable to this task.",
+      "file": "tests/config/test_models.py",
+      "line": 150
+    },
+    {
+      "id": "F011",
+      "severity": "important",
+      "summary": "Step 4's mutation targets the wrong module binding: rebinding DENIED_COMMAND_TOKENS on the imported test module has no effect on denied_tokens(), which resolves the name from its own module globals at call time \u2014 the mutation would leave the test passing and produce vacuous 'mutation kills the test' evidence.",
+      "evidence_required": "Step 4 must name the exact target: rebind `dev_orchestration.config.models.DENIED_COMMAND_TOKENS` (see models.py:26, where the loop reads the models-module global), not `tests.config.test_models.DENIED_COMMAND_TOKENS`. It must also state that the frozenset is replaced wholesale (frozensets cannot be mutated in place) and record which specific assertion in the new test fails \u2014 the `denied_tokens(command) == {\"push\"}` equality, the `pytest.raises(ValidationError)`, or both.",
+      "file": "src/dev_orchestration/config/models.py",
+      "line": 26
+    },
+    {
+      "id": "F012",
+      "severity": "important",
+      "summary": "The two strongest assertions in step 3 \u2014 that the ValidationError's wrapped cause is a DeniedCommandError instance, and that the cause 'attributes rejection to push' \u2014 are asserted without evidence that Pydantic v2 exposes them, and DeniedCommandError carries no structured token attribute.",
+      "evidence_required": "Run a probe against the installed Pydantic showing whether `ValidationError.errors()[0][\"ctx\"][\"error\"]` returns an object satisfying `isinstance(..., DeniedCommandError)`, and paste the output into the plan. DeniedCommandError (models.py:12-13) subclasses ValueError with no attributes, so 'attributes rejection to push' can only be message-substring matching on the f-string at models.py:44-48 \u2014 the plan must say so explicitly and acknowledge that assertion is coupled to the message wording. If the cause is not retrievable as a DeniedCommandError, step 10 converts this into stop-and-report and the task again delivers nothing, so this must be settled before execution, not during it.",
+      "file": "src/dev_orchestration/config/models.py",
+      "line": 44
+    },
+    {
+      "id": "F013",
+      "severity": "minor",
+      "summary": "Step 3 deletes an existing passing parametrized case, which the brief ('add a focused regression test') did not request and which makes the diff non-additive.",
+      "evidence_required": "Either confirmation from the requester that de-duplication is in scope, or a stated decision to keep tests/config/test_models.py:48 and accept benign overlap with the new dedicated test. Net coverage is preserved either way \u2014 the new test is strictly stronger than the parametrized case \u2014 so this is a scope-discipline question, not a coverage one.",
+      "file": "tests/config/test_models.py",
+      "line": 48
+    }
+  ]
+}

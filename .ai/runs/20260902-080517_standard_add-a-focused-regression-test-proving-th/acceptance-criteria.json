@@ -1,0 +1,3 @@
+[
+  "A new focused regression test proves the protected validation-command deny-list rejects a prohibited remote-operation token, with no production-code changes."
+]

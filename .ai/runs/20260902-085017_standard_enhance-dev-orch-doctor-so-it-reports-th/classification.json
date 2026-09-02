@@ -1,0 +1,7 @@
+{
+  "tier": "standard",
+  "rationale": "Scoped diagnostic and test changes within the declared source/test boundaries; no external systems, production data, deployment, or security-sensitive behavior is involved.",
+  "profiles": [
+    "agent_orchestration"
+  ]
+}

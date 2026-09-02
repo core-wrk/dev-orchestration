@@ -1,0 +1,26 @@
+[
+  {
+    "name": "lint",
+    "command": ".venv/bin/ruff check --no-cache src tests",
+    "exit_code": 0,
+    "passed": true,
+    "stdout_tail": "All checks passed!\n",
+    "stderr_tail": ""
+  },
+  {
+    "name": "format",
+    "command": ".venv/bin/ruff format --check --no-cache src tests",
+    "exit_code": 0,
+    "passed": true,
+    "stdout_tail": "79 files already formatted\n",
+    "stderr_tail": ""
+  },
+  {
+    "name": "test",
+    "command": ".venv/bin/python -m pytest -p no:cacheprovider",
+    "exit_code": 0,
+    "passed": true,
+    "stdout_tail": "============================= test session starts ==============================\nplatform darwin -- Python 3.14.6, pytest-9.1.1, pluggy-1.6.0\nrootdir: /Users/andrewodonnell/.dev-orchestration/worktrees/dev-orchestration/20260902-090503_standard_add-docs-self-hosting-md-as-the-operatio\nconfigfile: pyproject.toml\ntestpaths: tests\ncollected 371 items\n\ntests/adapters/test_base.py ........                                     [  2%]\ntests/adapters/test_claude.py ...................                        [  7%]\ntests/adapters/test_codex.py ........................                    [ 13%]\ntests/adapters/test_context_rendering.py .....                           [ 15%]\ntests/adapters/test_registry.py ..............                           [ 18%]\ntests/artifacts/test_plan_artifacts.py ...                               [ 19%]\ntests/artifacts/test_store.py ...........                                [ 22%]\ntests/config/test_models.py ....................................         [ 32%]\ntests/config/test_resolver.py .......                                    [ 34%]\ntests/context/test_assembler.py .........                                [ 36%]\ntests/context/test_packet.py .....                                       [ 38%]\ntests/domain/test_findings.py ..........                                 [ 40%]\ntests/domain/test_run.py ..                                              [ 41%]\ntests/git/test_guards.py .............                                   [ 44%]\ntests/git/test_repo.py .................................                 [ 53%]\ntests/git/test_worktree.py ...                                           [ 54%]\ntests/test_cli.py .....                                                  [ 55%]\ntests/test_cli_run.py .............                                      [ 59%]\ntests/test_doctor.py ......................                              [ 65%]\ntests/test_init_repo.py ................                                 [ 69%]\ntests/test_packaging.py ......                                           [ 71%]\ntests/test_schemas.py ........                                           [ 73%]\ntests/test_scope.py ....................                                 [ 78%]\ntests/workflow/test_bootstrap.py ........                                [ 80%]\ntests/workflow/test_engine.py .....                                      [ 82%]\ntests/workflow/test_invoke.py .....                                      [ 83%]\ntests/workflow/test_runner.py ......................                     [ 89%]\ntests/workflow/test_scope_check.py ..............                        [ 93%]\ntests/workflow/test_stages.py ...........                                [ 96%]\ntests/workflow/test_tiers.py ......                                      [ 97%]\ntests/workflow/test_validation.py ........                               [100%]\n\n============================= 371 passed in 15.91s =============================\n",
+    "stderr_tail": ""
+  }
+]

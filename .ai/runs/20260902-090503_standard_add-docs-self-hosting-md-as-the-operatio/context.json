@@ -1,0 +1,30 @@
+{
+  "included": [],
+  "excluded": [
+    "AGENTS.md: AGENTS.md is outside the scope fence and must not enter a prompt",
+    ".ai/context.md: .ai/context.md is outside the scope fence and must not enter a prompt"
+  ],
+  "conflicts": [],
+  "available_profiles": [
+    "agent_orchestration"
+  ],
+  "active_profiles": [
+    "agent_orchestration"
+  ],
+  "scope_fence": {
+    "include": [
+      "src/",
+      "tests/",
+      "docs/",
+      "README.md",
+      "pyproject.toml"
+    ],
+    "exclude": [
+      ".ai/",
+      ".git/",
+      ".venv/",
+      ".worktrees/",
+      ".superpowers/"
+    ]
+  }
+}

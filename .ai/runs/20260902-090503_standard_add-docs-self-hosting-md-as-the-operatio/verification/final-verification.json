@@ -1,0 +1,30 @@
+{
+  "outcome": "PASS",
+  "criteria": [
+    "docs/SELF-HOSTING.md exists and documents the bootstrap exception, self-hosting classification/profile, guarded substantial workflow, local-only safety boundary, and validation/evidence handoff.",
+    "The guide records the unresolved context-authority conflict as a follow-up without silently resolving or rewriting canonical specification.",
+    "Only docs/SELF-HOSTING.md changes, and the complete configured validation suite passes."
+  ],
+  "verdicts": [
+    {
+      "criterion": "docs/SELF-HOSTING.md exists and documents the bootstrap exception, self-hosting classification/profile, guarded substantial workflow, local-only safety boundary, and validation/evidence handoff.",
+      "verdict": "PASS",
+      "evidence": "File exists as the sole untracked addition. Bootstrap exception: lines 26-50 give `dev-orch init --config <prepared-project.yaml>`, all three generated files (AGENTS.md, .ai/project.yaml, .ai/context.md), write-once context.md semantics (matches src/dev_orchestration/cli.py:95 'written once and never regenerated, even with --force'), pre-run timing, commit-before-run requirement, and an explicit statement that it is not an in-run scope-fence or protected-path exemption. Classification/profile: lines 52-70 record `internal_operating_system` and `agent_orchestration`, matching .ai/project.yaml (project.class, profiles.available), and separate per-run `--tier substantial` selection from project configuration, including no-downgrade behavior (matches workflow/runner.py:222). Substantial workflow: lines 143-163 distinguish machine-enforced plan review, implementation review, and final verification from the declared-but-unenforced workflow-change review, and describe AWAITING_APPROVAL halting with no resume command. Local-only boundary: lines 176-190 permit local commits on ai/-prefixed branches only and prohibit push, force-push, merge/remote-branch deletion, deploy/publish, and production-data mutation, matching .ai/project.yaml git.autonomous_push=false and the protected block. Validation/evidence handoff: lines 192-221 reproduce the three configured gate commands verbatim from .ai/project.yaml and enumerate the required handoff contents including run-artifact locations, which match artifacts/store.py:16 SUBDIRECTORIES."
+    },
+    {
+      "criterion": "The guide records the unresolved context-authority conflict as a follow-up without silently resolving or rewriting canonical specification.",
+      "verdict": "PASS",
+      "evidence": "Lines 72-96 present the declared persistent-context policy and the runtime manifest/assembler evidence as competing claims, state that the guide 'does not choose a canonical claim or imply that the gap is fixed', and require a separately approved change to canonical documentation, specification, configuration, or implementation. Follow-up item 1 (lines 227-229) repeats it as tracked open work, and lines 237-239 disclaim authorization to change canonical specs or protected paths. Fail-closed is scoped narrowly to conflicting values of the same profile control (lines 94-96), consistent with .ai/project.yaml context.conflict_policy: fail_closed. git status shows no canonical specification, .ai/ file, or source file was modified."
+    },
+    {
+      "criterion": "Only docs/SELF-HOSTING.md changes, and the complete configured validation suite passes.",
+      "verdict": "PASS",
+      "evidence": "`git status --porcelain` returns exactly one line: `?? docs/SELF-HOSTING.md`. No tracked modifications, no staged changes, no run artifacts or configuration touched. `git diff --check` produced no output. Supplied validation evidence: lint `.venv/bin/ruff check --no-cache src tests` exit 0 ('All checks passed!'); format `.venv/bin/ruff format --check --no-cache src tests` exit 0 ('79 files already formatted'); test `.venv/bin/python -m pytest -p no:cacheprovider` exit 0 ('371 passed in 15.91s'). All three commands match .ai/project.yaml validation entries required_for substantial."
+    }
+  ],
+  "unresolved_finding_ids": [
+    "F014",
+    "F015",
+    "F016"
+  ]
+}

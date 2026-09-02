@@ -1,0 +1,7 @@
+{
+  "tier": "substantial",
+  "rationale": "Documentation-only change, but it defines operational bootstrap, approval, safety boundaries, validation, and evidence-handoff behavior for an internal orchestration system.",
+  "profiles": [
+    "agent_orchestration"
+  ]
+}

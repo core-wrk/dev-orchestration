@@ -1,0 +1,9 @@
+{
+  "provider": "codex",
+  "model": "gpt-5.6-luna",
+  "exit_code": 0,
+  "output": "Created [docs/SELF-HOSTING.md](/Users/andrewodonnell/.dev-orchestration/worktrees/dev-orchestration/20260902-090503_standard_add-docs-self-hosting-md-as-the-operatio/docs/SELF-HOSTING.md).\n\n- Covers bootstrap, configuration, context gaps, workflow controls, escalation, local-only boundaries, validation, evidence, and follow-ups.\n- Final worktree status contains only the new documentation file.\n- No source, tests, configuration, protected paths, or run artifacts were changed.\n- Validation/review deferred to the designated roles.",
+  "started_at": "2026-09-02T09:15:38.711320+00:00",
+  "completed_at": "2026-09-02T09:18:12.120804+00:00",
+  "usage": null
+}

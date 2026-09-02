@@ -1,0 +1,53 @@
+{
+  "outcome": "CHANGES_REQUIRED",
+  "findings": [
+    {
+      "id": "F008",
+      "severity": "important",
+      "summary": "Step 8 isolates workflow-change review as the one declared-but-unenforced control, but none of the four agent_orchestration controls is read by the runtime: `plan_review_required`, `implementation_review_required`, `final_verification_required` and `workflow_changes_review_required` appear nowhere in `src/`. The three corresponding stages execute because `TIER_STAGES[Tier.SUBSTANTIAL]` lists them, independent of profile configuration; only `human_approval` and `minimum_tier` are consumed at runtime. As written, the plan lets the guide imply that the other three profile controls drive enforcement (and that clearing them would drop the stages), which is false and sits on precisely the declared-versus-enforced axis the brief asks the guide to keep straight.",
+      "evidence_required": "Grep `src/` for all four control names (expect no matches); confirm `workflow/tiers.py:32-42` is the sole source of the substantial stage path; confirm `workflow/bootstrap.py:118-138` only serializes controls into `profile_constraints`; confirm `workflow/runner.py:102-108` reads only `human_approval`. Then require the guide to state that profile controls are surfaced to agents and, apart from `human_approval` and `minimum_tier`, have no runtime effect.",
+      "file": "src/dev_orchestration/workflow/bootstrap.py",
+      "line": 118
+    },
+    {
+      "id": "F009",
+      "severity": "important",
+      "summary": "Step 7 enumerates `manifest.json`, `events.jsonl`, `planning/`, `review/` and `verification/` but omits `approval/` and `execution/` (and `schemas/`). `approval/human-approval.md` is the artifact an operator needs in exactly the AWAITING_APPROVAL halt that step 8 describes, and `execution/validation-v*.json` is the machine-generated record step 11 asks the handoff to cite. The plan also never states that `.ai/runs/` is gitignored, so an operator following it will cite handoff evidence that is untracked, local-only, and invisible in the change set a reviewer inspects.",
+      "evidence_required": "Confirm the artifact subdirectories in `artifacts/store.py:16` (`planning`, `execution`, `review`, `verification`, `approval`); confirm `runner.py:472-482` writes `approval/human-approval.md` and `runner.py:518-520` writes `execution/validation-v1.json`; confirm `.gitignore:9` ignores `.ai/runs/` and `git ls-files .ai` lists only `context.md` and `project.yaml`.",
+      "file": "src/dev_orchestration/artifacts/store.py",
+      "line": 16
+    },
+    {
+      "id": "F010",
+      "severity": "minor",
+      "summary": "Step 9 correctly says high-risk work cannot be executed, but describes no observable behavior, and the two paths differ: `--tier high_risk` raises `UnsupportedTierError` before bootstrap, so the CLI exits 1 with no run record, whereas a classifier-assigned high-risk tier creates a durable run that terminates in `ESCALATED` with artifacts on disk. An operator cannot recognize either outcome from the guide as planned, even though the parallel approval halt is described precisely.",
+      "evidence_required": "Confirm `runner.py:288-289` calls `stages_for(tier_override)` before `bootstrap_run`, that `tiers.py:46-52` raises for `Tier.HIGH_RISK`, and that `runner.py:710-712` maps `UnsupportedTierError` to a terminal `ESCALATED` state for the classification path.",
+      "file": "src/dev_orchestration/workflow/runner.py",
+      "line": 288
+    },
+    {
+      "id": "F011",
+      "severity": "minor",
+      "summary": "Step 4 describes the effective tier as classification plus an optional raise-only `--tier` override, omitting the third mechanism: an active profile's `minimum_tier` also raises the effective tier. `agent_orchestration` sets it to null today, so the omission is invisible for the current configuration but wrong for any operator changing profile definitions.",
+      "evidence_required": "Confirm `bootstrap.py:114-117` computes the highest profile `minimum_tier` and `runner.py:226-227` raises the requested tier to it, and that `.ai/project.yaml:10` currently sets `minimum_tier: null`.",
+      "file": "src/dev_orchestration/workflow/bootstrap.py",
+      "line": 114
+    },
+    {
+      "id": "F012",
+      "severity": "minor",
+      "summary": "Step 12 instructs capturing gate outcomes \"without altering source or tests to address unrelated failures\", implying a failing gate can be recorded and the handoff completed. Inside a self-hosted run that outcome does not exist: any failing configured gate drives the run to a terminal FAILED state before implementation review or final verification. The plan should say what an operator does when a gate fails rather than implying the run proceeds to handoff.",
+      "evidence_required": "Confirm `runner.py:534-536` terminates the run as FAILED when `all_passed(outcomes)` is false, and `runner.py:606-608` does the same after remediation.",
+      "file": "src/dev_orchestration/workflow/runner.py",
+      "line": 534
+    },
+    {
+      "id": "F013",
+      "severity": "minor",
+      "summary": "The plan names a \"prerequisites and preflight checks\" section but never states the hard precondition that the base repository must be clean \u2014 `bootstrap_run` calls `repo.ensure_clean()` and a dirty worktree aborts the run \u2014 and step 7 refers to \"the framework-managed worktree location\" without naming `GlobalConfig.worktree_root` (default `~/.dev-orchestration/worktrees`), the `<worktree_root>/<project>/<run_id>` layout, or the optional machine config at `~/.dev-orchestration/config.yaml`.",
+      "evidence_required": "Confirm `bootstrap.py:165` calls `repo.ensure_clean()` and `git/repo.py:85-93` raises `DirtyWorktreeError`; confirm `doctor.py:92-105` reports the same check; confirm `config/models.py:117` default worktree root, `bootstrap.py:182` worktree path layout, and `cli.py:120` global config path.",
+      "file": "src/dev_orchestration/git/repo.py",
+      "line": 85
+    }
+  ]
+}

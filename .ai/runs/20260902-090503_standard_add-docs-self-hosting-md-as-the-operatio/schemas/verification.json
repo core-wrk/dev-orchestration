@@ -1,0 +1,78 @@
+{
+  "$defs": {
+    "AcceptanceVerdict": {
+      "additionalProperties": false,
+      "properties": {
+        "criterion": {
+          "title": "Criterion",
+          "type": "string"
+        },
+        "verdict": {
+          "enum": [
+            "PASS",
+            "FAIL",
+            "UNKNOWN"
+          ],
+          "title": "Verdict",
+          "type": "string"
+        },
+        "evidence": {
+          "title": "Evidence",
+          "type": "string"
+        }
+      },
+      "required": [
+        "criterion",
+        "verdict",
+        "evidence"
+      ],
+      "title": "AcceptanceVerdict",
+      "type": "object"
+    },
+    "Outcome": {
+      "enum": [
+        "PASS",
+        "CHANGES_REQUIRED",
+        "BLOCKED",
+        "ESCALATE"
+      ],
+      "title": "Outcome",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "outcome": {
+      "$ref": "#/$defs/Outcome"
+    },
+    "criteria": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Criteria",
+      "type": "array"
+    },
+    "verdicts": {
+      "items": {
+        "$ref": "#/$defs/AcceptanceVerdict"
+      },
+      "title": "Verdicts",
+      "type": "array"
+    },
+    "unresolved_finding_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Unresolved Finding Ids",
+      "type": "array"
+    }
+  },
+  "required": [
+    "outcome",
+    "criteria",
+    "verdicts",
+    "unresolved_finding_ids"
+  ],
+  "title": "Verification",
+  "type": "object"
+}

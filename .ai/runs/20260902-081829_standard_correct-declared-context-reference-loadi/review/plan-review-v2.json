@@ -1,0 +1,45 @@
+{
+  "outcome": "CHANGES_REQUIRED",
+  "findings": [
+    {
+      "id": "F007",
+      "severity": "blocking",
+      "summary": "Step 1 makes implementation conditional on an \"independent review/approval record\" that is neither identified by path nor writable within the plan's own change allowlist, and step 9 separately forbids editing persistent run data \u2014 so the mandatory gate cannot be satisfied.",
+      "evidence_required": "Resolve the contradiction explicitly: either (a) name the exact artifact path that must be read (e.g. the current run's approval/reconciliation artifact under .ai/runs/<run_id>/) and state that step 1 is a read-only precondition check whose disclosure lands in the final handoff text rather than in any file, or (b) drop the recording requirement and keep only the step-8 handoff disclosure. Confirm with the plan owner which reading is intended before execution begins.",
+      "file": null,
+      "line": null
+    },
+    {
+      "id": "F008",
+      "severity": "important",
+      "summary": "The symlink-containment predicate is under-specified: \"require the resolved target to equal the normalized lexical candidate\" does not state that the candidate is built from the *resolved* repository root, and the literal reading rejects every legitimate read on darwin.",
+      "evidence_required": "Pin the comparison in the plan to an unambiguous form \u2014 resolved_root = repo_root.resolve(); candidate = Path(os.path.normpath(resolved_root / rel_path)); require target == candidate \u2014 and demonstrate it by running the new assembler tests on this machine, where pytest's tmp_path lives under /var/folders/... (a symlink to /private/var). Under the naive form (repo_root / rel_path without resolving the root) every case in the step-2 table that should pass will instead be rejected.",
+      "file": "src/dev_orchestration/context/assembler.py",
+      "line": 190
+    },
+    {
+      "id": "F009",
+      "severity": "important",
+      "summary": "No step verifies the brief's actual acceptance condition against the repository's own configuration; step 6 only mirrors the policy in a hand-written fixture, which can drift from .ai/project.yaml and would still pass if the real config were mis-declared.",
+      "evidence_required": "Add a verification action in step 7 or 8 that loads the repository's real .ai/project.yaml and calls resolve_runtime_context(repo_root, config, []) (or runs doctor), and record output showing both AGENTS.md and .ai/context.md present in RuntimeContext.included and absent from RuntimeContext.excluded. This is read-only and needs no change outside the allowlist.",
+      "file": "tests/workflow/test_bootstrap.py",
+      "line": 79
+    },
+    {
+      "id": "F010",
+      "severity": "important",
+      "summary": "Step 1 frames the change as retiring a security-policy enforcement point and characterizes the documentation divergence generically, but the governing persistent contract already mandates the new behavior \u2014 which both narrows the divergence and undercuts the escalation the plan builds on top of it.",
+      "evidence_required": "Cite AGENTS.md:49-50 (\"The fence governs modification, not reference \u2014 repository code may legitimately read excluded paths\") and design section 6's own closing paragraph (docs/.../2026-08-25-dev-orchestration-v1-design.md:194-196), both of which already state the target behavior; then enumerate the exact stale artifacts for the deferred documentation work: design section 6 enforcement point 1 (line 189), docs/superpowers/plans/2026-08-29-m2-the-loop.md:885 item 4, and docs/superpowers/plans/2026-08-29-m2-remediation.md:1586. Re-characterize the change as a spec-conformance fix with three stale lines, not a policy retirement, and re-assess whether the hard stop in step 1 is still warranted.",
+      "file": "docs/superpowers/specs/2026-08-25-dev-orchestration-v1-design.md",
+      "line": 189
+    },
+    {
+      "id": "F011",
+      "severity": "minor",
+      "summary": "The plan requires no in-code rationale for deliberately removing the fence checks, yet forbids documentation edits \u2014 leaving a future reader following the M2 TDD mutation checklist (which lists \"read_reference drops the fence.allows check\" as a mutation that must fail a test) with no signal that the removal was intentional.",
+      "evidence_required": "Require an updated docstring or comment on read_reference in the diff recording that the fence governs modification only, that this function trusts its caller to pass explicitly configured paths, and that containment is now enforced lexically plus by symlink-identity \u2014 matching the existing convention in src/dev_orchestration/scope.py:1-6 and :45-53.",
+      "file": "src/dev_orchestration/context/assembler.py",
+      "line": 190
+    }
+  ]
+}

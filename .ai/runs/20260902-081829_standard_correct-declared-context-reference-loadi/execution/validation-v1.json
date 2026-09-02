@@ -1,0 +1,26 @@
+[
+  {
+    "name": "lint",
+    "command": ".venv/bin/ruff check --no-cache src tests",
+    "exit_code": 0,
+    "passed": true,
+    "stdout_tail": "All checks passed!\n",
+    "stderr_tail": ""
+  },
+  {
+    "name": "format",
+    "command": ".venv/bin/ruff format --check --no-cache src tests",
+    "exit_code": 0,
+    "passed": true,
+    "stdout_tail": "79 files already formatted\n",
+    "stderr_tail": ""
+  },
+  {
+    "name": "test",
+    "command": ".venv/bin/python -m pytest -p no:cacheprovider",
+    "exit_code": 1,
+    "passed": false,
+    "stdout_tail": "\": []},\n            }\n        )\n>       runtime = resolve_runtime_context(root, config, [\"auth\"])\n                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE       TypeError: resolve_runtime_context() missing 1 required positional argument: 'fence'\n\ntests/workflow/test_bootstrap.py:98: TypeError\n____________ test_declared_context_loads_outside_modification_scope ____________\n\ntmp_path = PosixPath('/private/var/folders/kk/9_5d5nx12qd_fnwzcc3zxdrw0000gn/T/pytest-of-andrewodonnell/pytest-33/test_declared_context_loads_ou0')\n\n    def test_declared_context_loads_outside_modification_scope(tmp_path):\n        root = tmp_path / \"repo\"\n        root.mkdir()\n        (root / \".ai\").mkdir()\n        (root / \"src\").mkdir()\n        (root / \"AGENTS.md\").write_text(\"never push\\n\")\n        (root / \".ai\" / \"context.md\").write_text(\"self-hosting boundary\\n\")\n        (root / \"profile.md\").write_text(\"profile-specific reference\\n\")\n        config = ProjectConfig.model_validate(\n            {\n                \"project\": {\"name\": \"x\", \"class\": \"internal_utility\"},\n                \"profiles\": {\n                    \"available\": [\"agent_orchestration\"],\n                    \"definitions\": {\n                        \"agent_orchestration\": {\n                            \"minimum_tier\": \"standard\",\n                            \"controls\": {\"implementation_review_required\": True},\n                            \"context_refs\": [\"profile.md\"],\n                        }\n                    },\n                },\n                \"scope\": {\"include\": [\"src/\", \"tests/\"], \"exclude\": [\".ai/\"]},\n                \"context\": {\n                    \"persistent\": [\"AGENTS.md\", \".ai/context.md\", \"missing.md\"],\n                    \"persistent_budget_bytes\": 8192,\n                    \"conflict_policy\": \"fail_closed\",\n                },\n            }\n        )\n    \n>       runtime = resolve_runtime_context(root, config, [\"agent_orchestration\"])\n                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE       TypeError: resolve_runtime_context() missing 1 required positional argument: 'fence'\n\ntests/workflow/test_bootstrap.py:134: TypeError\n=========================== short test summary info ============================\nFAILED tests/context/test_assembler.py::test_read_reference_ignores_modification_scope_for_declared_files\nFAILED tests/context/test_assembler.py::test_read_reference_reads_an_ordinary_repository_file\nFAILED tests/context/test_assembler.py::test_read_reference_rejects_absolute_paths_before_resolution[/src/app.py]\nFAILED tests/context/test_assembler.py::test_read_reference_rejects_absolute_paths_before_resolution[/etc/passwd]\nFAILED tests/context/test_assembler.py::test_read_reference_rejects_parent_components_before_resolution[../outside.txt]\nFAILED tests/context/test_assembler.py::test_read_reference_rejects_parent_components_before_resolution[src/../.ai/context.md]\nFAILED tests/context/test_assembler.py::test_reference_outside_repository_symlink_is_rejected\nFAILED tests/context/test_assembler.py::test_reference_in_repository_final_component_symlink_is_rejected\nFAILED tests/context/test_assembler.py::test_reference_in_repository_ancestor_directory_symlink_is_rejected\nFAILED tests/context/test_assembler.py::test_repository_root_symlink_is_resolved_before_reference_validation\nFAILED tests/context/test_assembler.py::test_read_reference_reports_missing_file_and_directory\nFAILED tests/context/test_assembler.py::test_read_reference_converts_read_failures_to_contract_errors\nFAILED tests/context/test_assembler.py::test_runtime_packet_records_inclusions_exclusions_conflicts_and_budget\nFAILED tests/context/test_assembler.py::test_runtime_context_preserves_persistent_budget_reporting\nFAILED tests/workflow/test_bootstrap.py::test_runtime_profile_minimum_and_context_are_joined\nFAILED tests/workflow/test_bootstrap.py::test_declared_context_loads_outside_modification_scope\n======================= 16 failed, 366 passed in 15.57s ========================\n",
+    "stderr_tail": ""
+  }
+]

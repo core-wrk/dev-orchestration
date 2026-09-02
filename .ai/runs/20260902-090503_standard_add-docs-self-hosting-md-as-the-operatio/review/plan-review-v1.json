@@ -1,0 +1,61 @@
+{
+  "outcome": "CHANGES_REQUIRED",
+  "findings": [
+    {
+      "id": "F001",
+      "severity": "blocking",
+      "summary": "Plan item 3 documents persistent AGENTS.md and .ai/context.md context loading as live behavior, but the implementation excludes both from every prompt \u2014 and asserting it silently resolves the context-authority conflict that item 7 is required to leave open.",
+      "evidence_required": "This run's .ai/runs/20260902-090503_standard_.../manifest.json shows context_included: [] and context_excluded entries 'AGENTS.md: AGENTS.md is outside the scope fence and must not enter a prompt' and the same for .ai/context.md, produced by src/dev_orchestration/context/assembler.py:194. Reconcile by either (a) describing the declared-vs-observed gap explicitly and neutrally as part of the same unresolved follow-up, or (b) removing the claim that persistent context is carried. Do not state as fact that AGENTS.md/.ai/context.md reach agent prompts without a manifest showing them under context_included.",
+      "file": ".ai/runs/20260902-090503_standard_add-docs-self-hosting-md-as-the-operatio/planning/plan-v1.md",
+      "line": 16
+    },
+    {
+      "id": "F002",
+      "severity": "important",
+      "summary": "Plan item 4 states workflow-change review is a mandatory stage; no such stage exists and the profile control that declares it is never consumed at runtime.",
+      "evidence_required": "src/dev_orchestration/workflow/tiers.py TIER_STAGES for SUBSTANTIAL lists classification, planning, plan_review, reconciliation, human_approval, execution, validation, implementation_review, final_verification \u2014 no workflow_changes_review. grep of src/dev_orchestration shows workflow_changes_review_required only aggregated into profile_constraints (bootstrap.py:118-136); the sole control read at runtime is human_approval (runner.py:106). Either cite a code path that enforces it, or state in the guide that it is a declared profile control surfaced to agents rather than a machine-enforced stage.",
+      "file": ".ai/runs/20260902-090503_standard_add-docs-self-hosting-md-as-the-operatio/planning/plan-v1.md",
+      "line": 21
+    },
+    {
+      "id": "F003",
+      "severity": "important",
+      "summary": "Plan item 4 says high-risk actions require explicit approval, implying an executable approval path; the high_risk tier is unimplemented and no approval/resume command exists.",
+      "evidence_required": "src/dev_orchestration/workflow/tiers.py stages_for raises UnsupportedTierError for Tier.HIGH_RISK; tests/test_cli_run.py:174 asserts `run --tier high_risk` exits 1; src/dev_orchestration/cli.py exposes only doctor/init/run/status/runs, so a run gated by _approval_required (runner.py:92-107) halts in AWAITING_APPROVAL with no resume. The guide must state that high-risk work cannot be executed by this framework and must be escalated out-of-band, and that approval_required today only halts a run.",
+      "file": ".ai/runs/20260902-090503_standard_add-docs-self-hosting-md-as-the-operatio/planning/plan-v1.md",
+      "line": 23
+    },
+    {
+      "id": "F004",
+      "severity": "important",
+      "summary": "Plan item 3 lists 'Run tier: substantial' as part of the self-hosted project configuration; tier is a per-run classification or --tier override with no key in .ai/project.yaml.",
+      "evidence_required": "Full text of .ai/project.yaml contains no tier field; this run's manifest.json records tier via config layer `{\"run\": {\"tier_override\": \"substantial\"}}` and the run id itself is 20260902-090503_standard_.... Restate as: tier is assigned per run by the classifier and may be raised with `dev-orch run --tier`, never lowered (runner.py:223 TierDowngradeError).",
+      "file": ".ai/runs/20260902-090503_standard_add-docs-self-hosting-md-as-the-operatio/planning/plan-v1.md",
+      "line": 15
+    },
+    {
+      "id": "F005",
+      "severity": "important",
+      "summary": "Plan item 2 describes the bootstrap exception as a permission to create files but omits the mechanism, the third file it writes, and the commit-before-run requirement \u2014 leaving it readable as an in-run licence to write excluded paths.",
+      "evidence_required": "src/dev_orchestration/init_repo.py:161-196 and src/dev_orchestration/cli.py:79-108 show `dev-orch init --config <prepared project.yaml>` writes AGENTS.md, .ai/project.yaml, and .ai/context.md (written once, never regenerated even with --force). .ai/context.md 'Self-hosting boundary' states bootstrap files were created before the first self-hosted run and must be committed before a run begins. The guide must give the command, the three files, the write-once semantics of .ai/context.md, and that this happens outside any orchestrated run.",
+      "file": ".ai/runs/20260902-090503_standard_add-docs-self-hosting-md-as-the-operatio/planning/plan-v1.md",
+      "line": 7
+    },
+    {
+      "id": "F006",
+      "severity": "minor",
+      "summary": "Plan item 3 describes fail-closed behavior 'when context sources conflict'; the configured conflict_policy only fires on conflicting profile control values, not on conflicting context sources.",
+      "evidence_required": "src/dev_orchestration/workflow/bootstrap.py:118-144 \u2014 the only producer of `conflicts` is a mismatch between the same control key across active profiles, and fail_closed raises ContextContractError('conflicting active profile constraints: ...'). No context-source conflict detection exists. Reword to describe what the policy actually guards.",
+      "file": ".ai/runs/20260902-090503_standard_add-docs-self-hosting-md-as-the-operatio/planning/plan-v1.md",
+      "line": 17
+    },
+    {
+      "id": "F007",
+      "severity": "minor",
+      "summary": "The plan promises an operational guide but never covers how a self-hosted run is invoked or where its evidence lands, so the evidence-handoff section describes prose the framework already produces as artifacts.",
+      "evidence_required": "src/dev_orchestration/cli.py run/status/runs/doctor commands; manifest.json git.worktree showing runs execute in an isolated worktree under ~/.dev-orchestration/worktrees; .ai/runs/<run_id>/ containing manifest.json, events.jsonl, planning/, review/, verification/. Add the invocation (including that --criterion is required for meaningful verification, per the run command's stderr warning) and point handoff evidence at the framework-owned artifact store, which is excluded from agent modification scope.",
+      "file": ".ai/runs/20260902-090503_standard_add-docs-self-hosting-md-as-the-operatio/planning/plan-v1.md",
+      "line": 38
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "outcome": "CHANGES_REQUIRED",
+  "findings": [
+    {
+      "id": "F014",
+      "severity": "important",
+      "summary": "The guide states that `substantial` is selected only by the classifier or `--tier` and is \"not a project setting in `.ai/project.yaml`\", but `_effective_tier` also raises the tier to the active profile's declared `minimum_tier`, which is a `.ai/project.yaml` setting.",
+      "evidence_required": "Reconcile against `src/dev_orchestration/workflow/runner.py:213-228` (`_effective_tier(classification_tier, override, minimum)` raises `requested` to `minimum` when `minimum` outranks it) and `src/dev_orchestration/workflow/bootstrap.py:114-117` (`minimum_tier` is read from `project_config.profiles.definitions[...].minimum_tier` and returned on `RuntimeContext`). Either amend the \"Declared project configuration\" list to include `minimum_tier: null` for `agent_orchestration`, and describe tier resolution as classification -> override (raise-only) -> profile minimum floor; or supply evidence that profile `minimum_tier` cannot influence the effective tier.",
+      "file": "docs/SELF-HOSTING.md",
+      "line": 66
+    },
+    {
+      "id": "F015",
+      "severity": "minor",
+      "summary": "Planning, reconciliation, and validation are described as stages that \"may also appear\" in a substantial run, but all three are unconditional entries in the substantial tier's stage path; only remediation is conditional.",
+      "evidence_required": "Compare against `src/dev_orchestration/workflow/tiers.py:32-42`, where `TIER_STAGES[Tier.SUBSTANTIAL]` is the fixed tuple `(classification, planning, plan_review, reconciliation, human_approval, execution, validation, implementation_review, final_verification)`; `remediation` appears only in `STAGE_CONTRACTS` (`src/dev_orchestration/context/assembler.py:81`) and not in any tier path. Restate planning, reconciliation, and validation as always-run stages and keep the conditional framing for remediation only.",
+      "file": "docs/SELF-HOSTING.md",
+      "line": 152
+    },
+    {
+      "id": "F016",
+      "severity": "minor",
+      "summary": "The guide asserts that substantial work does not require approval \"by default\" without recording the `approval:` block that produces that default, even though the \"Declared project configuration\" section is where every other governing setting is enumerated.",
+      "evidence_required": "Check `.ai/project.yaml` (`approval.substantial: false`, `approval.high_risk: true`) against `src/dev_orchestration/workflow/runner.py:92-108` (`_approval_required` returns `project_config.approval.high_risk` for high risk, consults `project_config.approval.substantial` for substantial, then falls through to a profile `human_approval` control). Add the `approval:` values to the declared-configuration list so the documented `AWAITING_APPROVAL` behavior is traceable to a named setting rather than an unattributed default.",
+      "file": "docs/SELF-HOSTING.md",
+      "line": 159
+    }
+  ]
+}

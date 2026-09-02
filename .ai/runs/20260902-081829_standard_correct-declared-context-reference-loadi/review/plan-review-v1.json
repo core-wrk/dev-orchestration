@@ -1,0 +1,53 @@
+{
+  "outcome": "CHANGES_REQUIRED",
+  "findings": [
+    {
+      "id": "F001",
+      "severity": "blocking",
+      "summary": "Step 1 says the change will \"continue\" rejecting absolute paths and traversal, but those rejections live only in `ScopeFence.allows` (`scope.py:45-56`, `_escapes_the_repository`), not in the resolution code that remains. After removing the fence, `read_reference` keeps only `target.relative_to(root)`, which rejects paths that escape the repository but accepts an absolute path that lands inside the repo (`repo_root / \"/abs/in/repo\"` discards `repo_root` and still resolves under root) and accepts in-repo traversal such as `src/../.ai/context.md`. The plan therefore promises a property its described edit does not deliver, and step 3's test \"verify traversal, absolute paths ... remain rejected\" would fail against the plan's own implementation.",
+      "evidence_required": "Plan text naming the explicit replacement check added to `read_reference` (e.g. reuse of `_escapes_the_repository` or an equivalent reject-if-absolute / reject-if-`..`-in-parts guard applied before resolution), plus a stated expected outcome for each of: absolute path inside the repo, absolute path outside, `../` escaping, and `src/../<excluded>` staying inside.",
+      "file": "src/dev_orchestration/context/assembler.py",
+      "line": 190
+    },
+    {
+      "id": "F002",
+      "severity": "blocking",
+      "summary": "The plan is framed entirely around paths \"excluded from modification scope\", but the repository's own failure for `AGENTS.md` is not exclusion \u2014 `.ai/project.yaml` `scope.include` is `[src/, tests/, docs/, README.md, pyproject.toml]`, so `AGENTS.md` fails the *include* test, while `.ai/context.md` fails the *exclude* test. An implementer who reads step 1 narrowly (\"permit declared references even when excluded\") and only bypasses the exclude list will still silently drop `AGENTS.md`, i.e. half the brief's named deliverable, and the plan's step 5 acceptance wording would not catch it.",
+      "evidence_required": "Plan text stating that read authorization no longer consults include *or* exclude for declared references, plus a test fixture whose `scope.include` does not cover the persistent path (mirroring the real `.ai/project.yaml`) asserting `AGENTS.md` loads as an invariant.",
+      "file": "src/dev_orchestration/workflow/bootstrap.py",
+      "line": 95
+    },
+    {
+      "id": "F003",
+      "severity": "important",
+      "summary": "Removing the fence also removes the post-resolution check at `assembler.py:206-210`, which is what stops a declared reference from being redirected via symlink. Declared reference paths live under agent-writable trees (`docs/`, `src/` are in `include`), so a run can replace a declared reference with a symlink to `.git/config` or `.ai/runs/<prior run>` and have that content read into the next run's prompt. This stays inside the repository, so neither the plan's remaining containment check nor its step 5 criterion (\"no reference resolving outside the repository\") detects it. The plan proposes no replacement guard and does not record the trade-off.",
+      "evidence_required": "Either a decision recorded in the plan that in-repo symlink redirection of declared references is acceptable (with a test pinning the new behaviour), or a specified mitigation \u2014 e.g. a read deny-list for `.git/`, or requiring the resolved path to equal `repo_root / rel_path`.",
+      "file": "src/dev_orchestration/context/assembler.py",
+      "line": 206
+    },
+    {
+      "id": "F004",
+      "severity": "important",
+      "summary": "The plan deletes a control the spec of record declares. `docs/superpowers/specs/2026-08-25-dev-orchestration-v1-design.md:190` lists \"Context assembly \u2014 excluded paths are never read, and never reach an agent prompt\" as enforcement point 1 of three independent enforcement places, and `docs/.../2026-08-29-m2-the-loop.md:860` codes it as such. The brief forbids changes outside `src/` and `tests/`, so the plan leaves the spec asserting a false invariant with no escalation, while AGENTS.md requires escalation on changes crossing a security boundary and the active profile sets `workflow_changes_review_required: true`.",
+      "evidence_required": "Explicit acknowledgement in the plan that enforcement point 1 is being retired, plus either an approved scope extension to amend \u00a76 of the design spec or a recorded decision (run artifact / escalation) accepting the documentation divergence under the current scope restriction.",
+      "file": "docs/superpowers/specs/2026-08-25-dev-orchestration-v1-design.md",
+      "line": 190
+    },
+    {
+      "id": "F005",
+      "severity": "important",
+      "summary": "Step 3's \"preserve coverage\" list omits the two existing assertions that encode the opposite invariant and must be retired: `test_read_reference_refuses_a_path_outside_the_fence` (tests/context/test_assembler.py:46-52) and the second assertion of `test_reference_symlinks_cannot_escape_root_or_fence` (line 73-74, symlink to an excluded in-repo file). The plan reads as purely additive, so an executor following it will hit unexplained failures and may \"fix\" them by weakening the escape assertions in the same test.",
+      "evidence_required": "Plan text enumerating each existing assertion being deleted or rewritten, with the replacement assertion for each, and confirmation that the outside-the-repo symlink assertion (line 71-72) is retained unchanged.",
+      "file": "tests/context/test_assembler.py",
+      "line": 46
+    },
+    {
+      "id": "F006",
+      "severity": "minor",
+      "summary": "The plan does not state whether the `fence` parameter is removed from the signatures or retained and ignored, and does not account for the mechanical ripple: `runner.py:322`, `tests/context/test_assembler.py:50/58/72/74/102/133`, `tests/workflow/test_bootstrap.py:99`. It also leaves `from dev_orchestration.scope import ScopeFence` unused at `assembler.py:7`, which `ruff check` will fail as F401 \u2014 one of the plan's own step 4 gates.",
+      "evidence_required": "Plan text stating the final signatures of `read_reference` and `resolve_runtime_context`, the list of call sites updated, and removal of the now-unused `ScopeFence` import from `assembler.py`.",
+      "file": "src/dev_orchestration/context/assembler.py",
+      "line": 7
+    }
+  ]
+}

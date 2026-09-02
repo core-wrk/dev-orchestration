@@ -1,0 +1,1 @@
+Enhance dev-orch doctor so it reports the configured human-approval policy and the implemented workflow tiers, explicitly distinguishing supported substantial execution from unsupported high-risk execution. Add focused tests for the new diagnostics while preserving existing doctor checks and output. Make no changes outside the declared source and test scope.

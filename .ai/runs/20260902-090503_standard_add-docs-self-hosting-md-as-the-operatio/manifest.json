@@ -1,0 +1,287 @@
+{
+  "schema_version": "1.0",
+  "run_id": "20260902-090503_standard_add-docs-self-hosting-md-as-the-operatio",
+  "repository": "/Users/andrewodonnell/GitRepos/dev-orchestration",
+  "workflow": "standard",
+  "tier": "substantial",
+  "project_class": "internal_operating_system",
+  "available_profiles": [
+    "agent_orchestration"
+  ],
+  "active_profiles": [
+    "agent_orchestration"
+  ],
+  "plan_origin": "generated",
+  "plan_sha256": "4ba0ff28440138d3e1bb1745b64ff3c7f4127e6458c3e8119affea61c0984232",
+  "approved_plan_version": "plan-v2.md",
+  "request_text": "Add docs/SELF-HOSTING.md as the operational self-hosting guide for dev-orchestration. Document the bootstrap exception for creating AGENTS.md and .ai/project.yaml, the internal_operating_system classification and agent_orchestration profile, the guarded substantial workflow and approval behavior, the local-only no-push/no-merge/no-deploy boundary, and the required validation/evidence handoff. Record the unresolved context-authority documentation conflict as a follow-up without choosing an authority. Change only this documentation file; do not modify source, tests, configuration, or canonical specification files.",
+  "acceptance_criteria": [
+    "docs/SELF-HOSTING.md exists and documents the bootstrap exception, self-hosting classification/profile, guarded substantial workflow, local-only safety boundary, and validation/evidence handoff.",
+    "The guide records the unresolved context-authority conflict as a follow-up without silently resolving or rewriting canonical specification.",
+    "Only docs/SELF-HOSTING.md changes, and the complete configured validation suite passes."
+  ],
+  "acceptance_criteria_source": "explicit",
+  "tier_override": "substantial",
+  "approval_required": false,
+  "minimum_tier": null,
+  "context_included": [],
+  "context_excluded": [
+    "AGENTS.md: AGENTS.md is outside the scope fence and must not enter a prompt",
+    ".ai/context.md: .ai/context.md is outside the scope fence and must not enter a prompt"
+  ],
+  "context_conflicts": [],
+  "config_layers": [
+    {
+      "schema_version": "1.0",
+      "project": {
+        "name": "dev-orchestration",
+        "project_class": "internal_operating_system"
+      },
+      "profiles": {
+        "available": [
+          "agent_orchestration"
+        ],
+        "definitions": {
+          "agent_orchestration": {
+            "minimum_tier": null,
+            "controls": {
+              "plan_review_required": true,
+              "implementation_review_required": true,
+              "final_verification_required": true,
+              "workflow_changes_review_required": true
+            },
+            "context_refs": []
+          }
+        }
+      },
+      "scope": {
+        "include": [
+          "src/",
+          "tests/",
+          "docs/",
+          "README.md",
+          "pyproject.toml"
+        ],
+        "exclude": [
+          ".ai/",
+          ".git/",
+          ".venv/",
+          ".worktrees/",
+          ".superpowers/"
+        ]
+      },
+      "validation": {
+        "lint": {
+          "command": ".venv/bin/ruff check --no-cache src tests",
+          "required_for": [
+            "standard",
+            "substantial",
+            "high_risk"
+          ],
+          "timeout_seconds": 1800
+        },
+        "format": {
+          "command": ".venv/bin/ruff format --check --no-cache src tests",
+          "required_for": [
+            "standard",
+            "substantial",
+            "high_risk"
+          ],
+          "timeout_seconds": 1800
+        },
+        "test": {
+          "command": ".venv/bin/python -m pytest -p no:cacheprovider",
+          "required_for": [
+            "standard",
+            "substantial",
+            "high_risk"
+          ],
+          "timeout_seconds": 1800
+        }
+      },
+      "git": {
+        "branch_prefix": "ai/",
+        "autonomous_local_commits": true,
+        "autonomous_push": false
+      },
+      "context": {
+        "persistent": [
+          "AGENTS.md",
+          ".ai/context.md"
+        ],
+        "on_demand": {
+          "specifications": "docs/superpowers/specs",
+          "plans": "docs/superpowers/plans"
+        },
+        "include_prior_artifacts": "relevant_only",
+        "conflict_policy": "fail_closed",
+        "persistent_budget_bytes": 8192
+      },
+      "approval": {
+        "substantial": false,
+        "high_risk": true
+      },
+      "roles": {},
+      "protected": {
+        "autonomous_push": false,
+        "autonomous_merge": false,
+        "autonomous_deploy": false,
+        "autonomous_production_data_mutation": false
+      }
+    },
+    {
+      "profiles": {
+        "agent_orchestration": {
+          "minimum_tier": null,
+          "controls": {
+            "plan_review_required": true,
+            "implementation_review_required": true,
+            "final_verification_required": true,
+            "workflow_changes_review_required": true
+          },
+          "context_refs": []
+        }
+      }
+    },
+    {
+      "run": {
+        "tier_override": "substantial"
+      }
+    }
+  ],
+  "roles": {
+    "classifier": {
+      "adapter": "codex",
+      "model_alias": "luna",
+      "reasoning": "medium",
+      "resolved_binary": "/Users/andrewodonnell/.vscode/extensions/openai.chatgpt-26.5825.51511-darwin-arm64/bin/macos-aarch64/codex",
+      "resolved_version": null
+    },
+    "planner": {
+      "adapter": "codex",
+      "model_alias": "sol",
+      "reasoning": "high",
+      "resolved_binary": "/Users/andrewodonnell/.vscode/extensions/openai.chatgpt-26.5825.51511-darwin-arm64/bin/macos-aarch64/codex",
+      "resolved_version": null
+    },
+    "plan_reviewer": {
+      "adapter": "claude",
+      "model_alias": "opus",
+      "reasoning": null,
+      "resolved_binary": "claude",
+      "resolved_version": null
+    },
+    "plan_reconciler": {
+      "adapter": "codex",
+      "model_alias": "sol",
+      "reasoning": "high",
+      "resolved_binary": "/Users/andrewodonnell/.vscode/extensions/openai.chatgpt-26.5825.51511-darwin-arm64/bin/macos-aarch64/codex",
+      "resolved_version": null
+    },
+    "implementation_worker": {
+      "adapter": "codex",
+      "model_alias": "luna",
+      "reasoning": "high",
+      "resolved_binary": "/Users/andrewodonnell/.vscode/extensions/openai.chatgpt-26.5825.51511-darwin-arm64/bin/macos-aarch64/codex",
+      "resolved_version": null
+    },
+    "implementation_reviewer": {
+      "adapter": "claude",
+      "model_alias": "opus",
+      "reasoning": null,
+      "resolved_binary": "claude",
+      "resolved_version": null
+    },
+    "verifier": {
+      "adapter": "claude",
+      "model_alias": "opus",
+      "reasoning": null,
+      "resolved_binary": "claude",
+      "resolved_version": null
+    }
+  },
+  "git": {
+    "base_commit": "4343bf75c075bb3968a67d270e94d47e8d9a855d",
+    "branch": "ai/20260902-090503_standard_add-docs-self-hosting-md-as-the-operatio-add-docs-self-hosting-md-as-the-operatio",
+    "worktree": "/Users/andrewodonnell/.dev-orchestration/worktrees/dev-orchestration/20260902-090503_standard_add-docs-self-hosting-md-as-the-operatio",
+    "final_commit": "fb04bd8f9cbc6efc0b71a791f58d89dbff5a2c25"
+  },
+  "resolved_config": {
+    "schema_version": "1.0",
+    "project.name": "dev-orchestration",
+    "project.project_class": "internal_operating_system",
+    "profiles.available": [
+      "agent_orchestration"
+    ],
+    "profiles.definitions.agent_orchestration.minimum_tier": null,
+    "profiles.definitions.agent_orchestration.controls.plan_review_required": true,
+    "profiles.definitions.agent_orchestration.controls.implementation_review_required": true,
+    "profiles.definitions.agent_orchestration.controls.final_verification_required": true,
+    "profiles.definitions.agent_orchestration.controls.workflow_changes_review_required": true,
+    "profiles.definitions.agent_orchestration.context_refs": [],
+    "scope.include": [
+      "src/",
+      "tests/",
+      "docs/",
+      "README.md",
+      "pyproject.toml"
+    ],
+    "scope.exclude": [
+      ".ai/",
+      ".git/",
+      ".venv/",
+      ".worktrees/",
+      ".superpowers/"
+    ],
+    "validation.lint.command": ".venv/bin/ruff check --no-cache src tests",
+    "validation.lint.required_for": [
+      "standard",
+      "substantial",
+      "high_risk"
+    ],
+    "validation.lint.timeout_seconds": 1800,
+    "validation.format.command": ".venv/bin/ruff format --check --no-cache src tests",
+    "validation.format.required_for": [
+      "standard",
+      "substantial",
+      "high_risk"
+    ],
+    "validation.format.timeout_seconds": 1800,
+    "validation.test.command": ".venv/bin/python -m pytest -p no:cacheprovider",
+    "validation.test.required_for": [
+      "standard",
+      "substantial",
+      "high_risk"
+    ],
+    "validation.test.timeout_seconds": 1800,
+    "git.branch_prefix": "ai/",
+    "git.autonomous_local_commits": true,
+    "git.autonomous_push": false,
+    "context.persistent": [
+      "AGENTS.md",
+      ".ai/context.md"
+    ],
+    "context.on_demand.specifications": "docs/superpowers/specs",
+    "context.on_demand.plans": "docs/superpowers/plans",
+    "context.include_prior_artifacts": "relevant_only",
+    "context.conflict_policy": "fail_closed",
+    "context.persistent_budget_bytes": 8192,
+    "approval.substantial": false,
+    "approval.high_risk": true,
+    "protected.autonomous_push": false,
+    "protected.autonomous_merge": false,
+    "protected.autonomous_deploy": false,
+    "protected.autonomous_production_data_mutation": false,
+    "profiles.agent_orchestration.minimum_tier": null,
+    "profiles.agent_orchestration.controls.plan_review_required": true,
+    "profiles.agent_orchestration.controls.implementation_review_required": true,
+    "profiles.agent_orchestration.controls.final_verification_required": true,
+    "profiles.agent_orchestration.controls.workflow_changes_review_required": true,
+    "profiles.agent_orchestration.context_refs": [],
+    "run.tier_override": "substantial"
+  },
+  "status": "COMPLETE_LOCAL",
+  "created_at": "2026-09-02T09:05:03.287840Z",
+  "completed_at": "2026-09-02T09:23:31.962109Z",
+  "terminal_reason": null
+}

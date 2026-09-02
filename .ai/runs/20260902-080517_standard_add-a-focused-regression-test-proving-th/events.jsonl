@@ -1,0 +1,18 @@
+{"ts": "2026-09-02T08:05:17.828671+00:00", "event": "run_bootstrapped", "run_id": "20260902-080517_standard_add-a-focused-regression-test-proving-th", "branch": "ai/20260902-080517_standard_add-a-focused-regression-test-proving-th-add-a-focused-regression-test-proving-th"}
+{"ts": "2026-09-02T08:05:25.866530+00:00", "event": "classified", "tier": "trivial", "rationale": "A narrowly scoped regression test addition with no production-code changes or external side effects.", "profiles": ["agent_orchestration"]}
+{"ts": "2026-09-02T08:05:25.867783+00:00", "event": "state_changed", "from": "CREATED", "to": "CLASSIFIED"}
+{"ts": "2026-09-02T08:05:25.869501+00:00", "event": "tier_resolved", "classified": "trivial", "effective": "standard", "override": "standard", "minimum": null}
+{"ts": "2026-09-02T08:05:48.536087+00:00", "event": "plan_written", "version": "plan-v1.md"}
+{"ts": "2026-09-02T08:05:48.537338+00:00", "event": "state_changed", "from": "CLASSIFIED", "to": "PLANNED"}
+{"ts": "2026-09-02T08:07:10.782944+00:00", "event": "plan_reviewed", "outcome": "CHANGES_REQUIRED", "finding_ids": ["F001", "F002", "F003", "F004"]}
+{"ts": "2026-09-02T08:07:10.784084+00:00", "event": "state_changed", "from": "PLANNED", "to": "PLAN_REVIEWED"}
+{"ts": "2026-09-02T08:07:10.784422+00:00", "event": "state_changed", "from": "PLAN_REVIEWED", "to": "PLANNED"}
+{"ts": "2026-09-02T08:08:55.054936+00:00", "event": "plan_reconciled", "version": "plan-v2.md", "finding_ids": ["F001", "F002", "F003", "F004"], "dispositions": [{"finding_id": "F001", "disposition": "submitted_for_independent_re_review"}, {"finding_id": "F002", "disposition": "submitted_for_independent_re_review"}, {"finding_id": "F003", "disposition": "submitted_for_independent_re_review"}, {"finding_id": "F004", "disposition": "submitted_for_independent_re_review"}]}
+{"ts": "2026-09-02T08:10:29.526715+00:00", "event": "plan_reviewed", "outcome": "CHANGES_REQUIRED", "finding_ids": ["F005", "F006", "F007", "F008"]}
+{"ts": "2026-09-02T08:10:29.527479+00:00", "event": "state_changed", "from": "PLANNED", "to": "PLAN_REVIEWED"}
+{"ts": "2026-09-02T08:10:29.527895+00:00", "event": "state_changed", "from": "PLAN_REVIEWED", "to": "PLANNED"}
+{"ts": "2026-09-02T08:14:17.198896+00:00", "event": "plan_reconciled", "version": "plan-v3.md", "finding_ids": ["F005", "F006", "F007", "F008"], "dispositions": [{"finding_id": "F005", "disposition": "submitted_for_independent_re_review"}, {"finding_id": "F006", "disposition": "submitted_for_independent_re_review"}, {"finding_id": "F007", "disposition": "submitted_for_independent_re_review"}, {"finding_id": "F008", "disposition": "submitted_for_independent_re_review"}]}
+{"ts": "2026-09-02T08:16:27.411521+00:00", "event": "plan_reviewed", "outcome": "CHANGES_REQUIRED", "finding_ids": ["F009", "F010", "F011", "F012", "F013"]}
+{"ts": "2026-09-02T08:16:27.412259+00:00", "event": "state_changed", "from": "PLANNED", "to": "PLAN_REVIEWED"}
+{"ts": "2026-09-02T08:16:27.412526+00:00", "event": "run_terminal", "state": "ESCALATED", "detail": "plan findings ['F009', 'F010', 'F011', 'F012', 'F013'] survived 2 reconciliation cycles"}
+{"ts": "2026-09-02T08:16:27.412866+00:00", "event": "state_changed", "from": "PLAN_REVIEWED", "to": "ESCALATED"}

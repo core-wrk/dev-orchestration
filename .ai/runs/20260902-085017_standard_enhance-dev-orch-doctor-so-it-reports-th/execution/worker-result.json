@@ -1,0 +1,9 @@
+{
+  "provider": "codex",
+  "model": "gpt-5.6-luna",
+  "exit_code": 0,
+  "output": "Implemented the approved doctor diagnostics.\n\n- Added registry capability reporting derived from `TIER_STAGES`.\n- Added validated human approval policy reporting.\n- Added coverage for missing/malformed configs, derivation, separation, and rendering.\n- Final scope: only `src/dev_orchestration/doctor.py` and `tests/test_doctor.py` changed.\n- `git diff --check` passed. Prescribed validation runs remain for the validation role.",
+  "started_at": "2026-09-02T09:01:44.151433+00:00",
+  "completed_at": "2026-09-02T09:04:07.241281+00:00",
+  "usage": null
+}

@@ -1,0 +1,7 @@
+{
+  "tier": "trivial",
+  "rationale": "A narrowly scoped regression test addition with no production-code changes or external side effects.",
+  "profiles": [
+    "agent_orchestration"
+  ]
+}

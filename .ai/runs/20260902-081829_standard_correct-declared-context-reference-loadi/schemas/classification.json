@@ -1,0 +1,38 @@
+{
+  "$defs": {
+    "Tier": {
+      "enum": [
+        "trivial",
+        "standard",
+        "substantial",
+        "high_risk"
+      ],
+      "title": "Tier",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "tier": {
+      "$ref": "#/$defs/Tier"
+    },
+    "rationale": {
+      "title": "Rationale",
+      "type": "string"
+    },
+    "profiles": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Profiles",
+      "type": "array"
+    }
+  },
+  "required": [
+    "tier",
+    "rationale",
+    "profiles"
+  ],
+  "title": "Classification",
+  "type": "object"
+}

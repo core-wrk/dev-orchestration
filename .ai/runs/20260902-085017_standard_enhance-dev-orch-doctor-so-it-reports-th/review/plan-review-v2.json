@@ -1,0 +1,37 @@
+{
+  "outcome": "CHANGES_REQUIRED",
+  "findings": [
+    {
+      "id": "F007",
+      "severity": "important",
+      "summary": "The `human approval policy` check reports only `approval.substantial` and `approval.high_risk`, but the effective substantial gate also fires when an active profile declares `controls.human_approval in {True, \"required\"}` (runner.py:100-108). A user reading `approval.substantial=false` will conclude a substantial run executes end-to-end, and the tier line's hedge (\"its effective human-approval gate\") names a factor doctor never surfaces, so the two new lines together cannot answer the question they pose.",
+      "evidence_required": "Either (a) extend the policy detail to name profile-derived approval sources \u2014 e.g. append the active/declared profiles whose `controls.human_approval` is truthy, read from `config.profiles.definitions` \u2014 or (b) explicitly scope the detail as config-declared only (wording that says profiles may independently require approval), and add a test with a profile definition setting `human_approval: true` asserting the diagnostic does not imply an ungated substantial run.",
+      "file": "src/dev_orchestration/workflow/runner.py",
+      "line": 100
+    },
+    {
+      "id": "F008",
+      "severity": "minor",
+      "summary": "No test covers a project.yaml with no `approval:` block at all \u2014 the shape of the existing `VALID_PROJECT_YAML` fixture and of the live `.ai/project.yaml` before it was populated. The planned tests only use explicit values, so nothing pins that the check still appears and renders the `ApprovalPolicy` defaults.",
+      "evidence_required": "A test using a config without an `approval:` key asserting `human approval policy` is present with detail exactly `approval.substantial=false; approval.high_risk=true` (the model defaults at config/models.py:92-93).",
+      "file": "tests/test_doctor.py",
+      "line": 55
+    },
+    {
+      "id": "F009",
+      "severity": "minor",
+      "summary": "The plan requires a test that monkeypatches the doctor module's registry view, but never states that the supported/unsupported split must be computed inside `run_checks` at call time. A module-level precomputation from `TIER_STAGES` at import satisfies every other instruction and makes the prescribed monkeypatch test unable to observe the change.",
+      "evidence_required": "Plan text stating the sets are derived inside the check function on each `run_checks` call (no import-time constant), so `monkeypatch.setattr(doctor_module, \"TIER_STAGES\", ...)` is observable.",
+      "file": "src/dev_orchestration/doctor.py",
+      "line": 41
+    },
+    {
+      "id": "F010",
+      "severity": "minor",
+      "summary": "`render()` emits only `\u2713`/`!`, so the tier check renders as a passing line whose limitation text sits at the tail of a ~330-character detail. The docstring amendment documents the semantics but does not make the limitation legible to someone scanning doctor output for `!` markers.",
+      "evidence_required": "Either a rationale for keeping the current ordering, or a detail string that leads with the unsupported/gated facts before the `registry-supported=` enumeration, with the render-level test asserting that ordering.",
+      "file": "src/dev_orchestration/doctor.py",
+      "line": 30
+    }
+  ]
+}

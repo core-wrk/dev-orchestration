@@ -1,0 +1,5 @@
+[
+  "Declared persistent context files outside the modification include patterns are loaded into run context when explicitly configured.",
+  "A declared path that resolves outside the repository is rejected, and the existing modification fence behavior remains enforced.",
+  "Focused tests and the complete configured validation suite pass."
+]

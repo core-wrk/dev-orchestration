@@ -1,0 +1,21 @@
+{
+  "plan_version": "plan-v3.md",
+  "dispositions": [
+    {
+      "finding_id": "F005",
+      "disposition": "submitted_for_independent_re_review"
+    },
+    {
+      "finding_id": "F006",
+      "disposition": "submitted_for_independent_re_review"
+    },
+    {
+      "finding_id": "F007",
+      "disposition": "submitted_for_independent_re_review"
+    },
+    {
+      "finding_id": "F008",
+      "disposition": "submitted_for_independent_re_review"
+    }
+  ]
+}
