@@ -36,6 +36,7 @@ class RunManifest(BaseModel):
     acceptance_criteria: list[str] = Field(default_factory=list)
     acceptance_criteria_source: str = "explicit"
     tier_override: Tier | None = None
+    approval_required: bool = False
     minimum_tier: Tier | None = None
     context_included: list[str] = Field(default_factory=list)
     context_excluded: list[str] = Field(default_factory=list)

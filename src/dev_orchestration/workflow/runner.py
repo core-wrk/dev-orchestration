@@ -89,6 +89,54 @@ def _validation_json(outcomes: list[ValidationOutcome]) -> list[dict]:
     return [outcome.model_dump(mode="json") for outcome in outcomes]
 
 
+def _approval_required(
+    project_config: ProjectConfig,
+    tier: Tier,
+    active_profiles: list[str],
+) -> bool:
+    """Resolve the human gate without allowing a provider to bypass it."""
+    if tier is Tier.HIGH_RISK:
+        return project_config.approval.high_risk
+    if tier is not Tier.SUBSTANTIAL or project_config.approval.substantial:
+        return tier is Tier.SUBSTANTIAL and project_config.approval.substantial
+    for profile_name in active_profiles:
+        profile = project_config.profiles.definitions.get(profile_name)
+        if profile is None:
+            profile = project_config.profiles.definitions.get(profile_name.replace("-", "_"))
+        if profile and profile.controls.get("human_approval") in {True, "required"}:
+            return True
+    return False
+
+
+def _approval_summary(
+    request_text: str,
+    project_config: ProjectConfig,
+    tier: Tier,
+    active_profiles: list[str],
+    approved_plan: str,
+) -> str:
+    protected = {
+        "autonomous_push": False,
+        "autonomous_merge": False,
+        "autonomous_deploy": False,
+        "autonomous_production_data_mutation": False,
+    }
+    return (
+        "# Human approval required\n\n"
+        "Execution is paused until a human explicitly approves this run.\n\n"
+        f"## Request\n{request_text}\n\n"
+        f"## Tier\n{tier}\n\n"
+        f"## Active profiles\n{', '.join(active_profiles) or '(none)'}\n\n"
+        f"## Scope\ninclude: {json.dumps(project_config.scope.include)}\n"
+        f"exclude: {json.dumps(project_config.scope.exclude)}\n\n"
+        f"## Protected constraints\n{json.dumps(protected, sort_keys=True)}\n\n"
+        "## Approved plan\n"
+        f"{approved_plan}\n\n"
+        "## Decision\n"
+        "Record an explicit human approval before execution may begin.\n"
+    )
+
+
 def _record_roles(store, registry: RoleRegistry) -> None:
     roles = {}
     for role, binding in registry.roles.items():
@@ -147,14 +195,18 @@ def _terminal(
         engine.transition(state)
 
 
-def _outcome(engine: Engine, verification: Verification | None = None) -> RunOutcome:
+def _outcome(
+    engine: Engine,
+    verification: Verification | None = None,
+    reason: str | None = None,
+) -> RunOutcome:
     manifest = engine.store.read_manifest()
     return RunOutcome(
         run_id=manifest.run_id,
         final_state=manifest.status,
         store_root=engine.store.root,
         verification=verification,
-        reason=manifest.terminal_reason or "",
+        reason=reason if reason is not None else manifest.terminal_reason or "",
     )
 
 
@@ -311,8 +363,8 @@ def execute_run(
         effective_tier = _effective_tier(classification.tier, tier_override, runtime.minimum_tier)
         store.update_manifest(tier=effective_tier)
         stages_for(effective_tier)
-        if external_plan is not None and effective_tier is not Tier.STANDARD:
-            raise ContextContractError("an external plan requires the standard tier")
+        if external_plan is not None and effective_tier not in {Tier.STANDARD, Tier.SUBSTANTIAL}:
+            raise ContextContractError("an external plan requires the standard or substantial tier")
         if effective_tier is not classification.tier:
             store.append_event(
                 {
@@ -342,7 +394,7 @@ def execute_run(
             ),
         )
         approved: str
-        if effective_tier is Tier.STANDARD:
+        if effective_tier in {Tier.STANDARD, Tier.SUBSTANTIAL}:
             if external_plan is not None:
                 version, digest = store.import_external_plan(external_plan)
                 store.append_event(
@@ -411,6 +463,32 @@ def execute_run(
                 plan_origin="task_contract", approved_plan_version="task-contract"
             )
             store.append_event({"event": "task_contract_written"})
+
+        approval_required = _approval_required(
+            project_config, effective_tier, classification.profiles
+        )
+        store.update_manifest(approval_required=approval_required)
+        if approval_required:
+            store.write_text_artifact(
+                "approval/human-approval.md",
+                _approval_summary(
+                    request_text,
+                    project_config,
+                    effective_tier,
+                    classification.profiles,
+                    approved,
+                ),
+                immutable=True,
+            )
+            store.append_event(
+                {
+                    "event": "approval_required",
+                    "tier": str(effective_tier),
+                    "artifact": "approval/human-approval.md",
+                }
+            )
+            engine.transition(RunState.AWAITING_APPROVAL)
+            return _outcome(engine, reason="human approval required before execution")
 
         engine.transition(RunState.EXECUTING)
         _run_worktree_stage(

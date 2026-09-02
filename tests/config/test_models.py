@@ -3,6 +3,7 @@ from pydantic import ValidationError
 
 from dev_orchestration.config.models import (
     DENIED_COMMAND_TOKENS,
+    ApprovalPolicy,
     ContextPolicy,
     ProjectConfig,
     Scope,
@@ -144,6 +145,24 @@ def test_project_config_gains_context_policy_by_default():
     )
     assert isinstance(config.context, ContextPolicy)
     assert config.context.conflict_policy == "fail_closed"
+
+
+def test_approval_policy_defaults_to_gate_high_risk_only():
+    config = ProjectConfig.model_validate(
+        {"project": {"name": "dev-orchestration", "class": "internal_operating_system"}}
+    )
+    assert config.approval == ApprovalPolicy(substantial=False, high_risk=True)
+
+
+def test_approval_policy_round_trips_through_config_dump():
+    config = ProjectConfig.model_validate(
+        {
+            "project": {"name": "dev-orchestration", "class": "internal_operating_system"},
+            "approval": {"substantial": True, "high_risk": False},
+        }
+    )
+    restored = ProjectConfig.model_validate(config.model_dump(mode="json"))
+    assert restored.approval == config.approval
 
 
 def test_context_policy_round_trips_through_config_dump():

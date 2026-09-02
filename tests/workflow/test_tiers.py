@@ -15,8 +15,15 @@ def test_standard_plans_and_reviews_before_execution():
     assert stages.index("planning") < stages.index("plan_review") < stages.index("execution")
 
 
+def test_substantial_plans_reviews_and_can_pause_for_approval():
+    stages = stages_for(Tier.SUBSTANTIAL)
+    assert stages.index("planning") < stages.index("plan_review")
+    assert stages.index("plan_review") < stages.index("human_approval")
+    assert stages.index("human_approval") < stages.index("execution")
+
+
 def test_both_tiers_validate_and_verify():
-    for tier in (Tier.TRIVIAL, Tier.STANDARD):
+    for tier in (Tier.TRIVIAL, Tier.STANDARD, Tier.SUBSTANTIAL):
         stages = stages_for(tier)
         assert "validation" in stages and "final_verification" in stages
 

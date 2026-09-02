@@ -86,6 +86,13 @@ class ContextPolicy(BaseModel):
     persistent_budget_bytes: int = 8192
 
 
+class ApprovalPolicy(BaseModel):
+    """Human approval gates for tiers that may change consequential systems."""
+
+    substantial: bool = False
+    high_risk: bool = True
+
+
 class ProjectConfig(BaseModel):
     schema_version: str = "1.0"
     project: ProjectMeta
@@ -94,6 +101,7 @@ class ProjectConfig(BaseModel):
     validation: dict[str, ValidationCommand] = Field(default_factory=dict)
     git: GitPolicy = Field(default_factory=GitPolicy)
     context: ContextPolicy = Field(default_factory=ContextPolicy)
+    approval: ApprovalPolicy = Field(default_factory=ApprovalPolicy)
     roles: dict[str, "RoleConfig"] = Field(default_factory=dict)
     protected: dict[str, object] = Field(default_factory=dict)
 

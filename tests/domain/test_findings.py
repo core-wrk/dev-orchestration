@@ -81,6 +81,6 @@ def test_verification_accepts_matching_verdicts():
     assert result.unresolved_finding_ids == []
 
 
-def test_classification_rejects_a_tier_outside_m2_scope():
+def test_classification_rejects_a_tier_without_an_implemented_path():
     with pytest.raises(ValidationError):
-        Classification(tier="substantial", rationale="r", profiles=[])
+        Classification(tier="high_risk", rationale="r", profiles=[])

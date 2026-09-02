@@ -63,6 +63,9 @@ context:
   include_prior_artifacts: relevant_only
   conflict_policy: fail_closed
   persistent_budget_bytes: 8192
+approval:
+  substantial: false
+  high_risk: true
 roles: {}
 protected:
   autonomous_push: false

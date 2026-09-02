@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field, model_validator
 from dev_orchestration.domain.enums import Outcome, Tier
 
 _FINDING_ID = re.compile(r"^F(\d{3,})$")
-M2_TIERS = frozenset({Tier.TRIVIAL, Tier.STANDARD})
+IMPLEMENTED_TIERS = frozenset({Tier.TRIVIAL, Tier.STANDARD, Tier.SUBSTANTIAL})
 
 
 class Severity(StrEnum):
@@ -59,10 +59,10 @@ class Classification(BaseModel):
 
     @model_validator(mode="after")
     def tier_is_implemented(self) -> Self:
-        if self.tier not in M2_TIERS:
+        if self.tier not in IMPLEMENTED_TIERS:
             raise ValueError(
-                f"tier {self.tier!r} has no implemented path in M2; "
-                f"implemented tiers are {sorted(M2_TIERS)}"
+                f"tier {self.tier!r} has no implemented path; "
+                f"implemented tiers are {sorted(IMPLEMENTED_TIERS)}"
             )
         return self
 

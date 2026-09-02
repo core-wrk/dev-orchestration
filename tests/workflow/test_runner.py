@@ -150,6 +150,55 @@ def test_standard_run_reaches_complete_local_and_persists_final_commit(tmp_path)
     assert GitRepo(tmp_path / "wt" / "demo" / outcome.run_id).is_ancestor(base)
 
 
+def test_substantial_run_reaches_complete_local_when_approval_is_not_required(tmp_path):
+    git = repo(tmp_path)
+    config = ProjectConfig.model_validate(
+        CONFIG.model_dump(mode="json")
+        | {"validation": {"unit": {"command": "true", "required_for": ["substantial"]}}}
+    )
+    adapter = Scripted(script(tier="substantial"))
+    outcome = execute_run(
+        git, config, registry(adapter), "change the flag substantially", tmp_path / "wt", CRITERIA
+    )
+    assert outcome.final_state is RunState.COMPLETE_LOCAL
+    manifest = RunManifest.model_validate_json(
+        (outcome.store_root / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest.tier is Tier.SUBSTANTIAL
+    assert not manifest.approval_required
+    assert adapter.seen == [
+        "classifier",
+        "planner",
+        "plan_reviewer",
+        "implementation_worker",
+        "implementation_reviewer",
+        "verifier",
+    ]
+
+
+def test_substantial_run_pauses_before_worker_when_approval_is_required(tmp_path):
+    git = repo(tmp_path)
+    config = ProjectConfig.model_validate(
+        CONFIG.model_dump(mode="json") | {"approval": {"substantial": True}}
+    )
+    adapter = Scripted(script(tier="substantial"))
+    outcome = execute_run(
+        git, config, registry(adapter), "change the flag with approval", tmp_path / "wt", CRITERIA
+    )
+    assert outcome.final_state is RunState.AWAITING_APPROVAL
+    assert outcome.reason == "human approval required before execution"
+    assert adapter.seen == ["classifier", "planner", "plan_reviewer"]
+    manifest = RunManifest.model_validate_json(
+        (outcome.store_root / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest.approval_required
+    assert manifest.git.final_commit is None
+    summary = outcome.store_root / "approval" / "human-approval.md"
+    assert summary.is_file()
+    assert "change the flag with approval" in summary.read_text(encoding="utf-8")
+    assert any(event["event"] == "approval_required" for event in events(outcome))
+
+
 def test_complete_local_persists_clean_final_commit(tmp_path):
     git = repo(tmp_path)
     base = git.current_commit()
