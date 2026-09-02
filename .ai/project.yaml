@@ -1,0 +1,71 @@
+schema_version: '1.0'
+project:
+  name: dev-orchestration
+  class: internal_operating_system
+profiles:
+  available:
+  - agent_orchestration
+  definitions:
+    agent_orchestration:
+      minimum_tier: null
+      controls:
+        plan_review_required: true
+        implementation_review_required: true
+        final_verification_required: true
+        workflow_changes_review_required: true
+      context_refs: []
+scope:
+  include:
+  - src/
+  - tests/
+  - docs/
+  - README.md
+  - pyproject.toml
+  exclude:
+  - .ai/
+  - .git/
+  - .venv/
+  - .worktrees/
+  - .superpowers/
+validation:
+  lint:
+    command: .venv/bin/ruff check --no-cache src tests
+    required_for:
+    - standard
+    - substantial
+    - high_risk
+    timeout_seconds: 1800
+  format:
+    command: .venv/bin/ruff format --check --no-cache src tests
+    required_for:
+    - standard
+    - substantial
+    - high_risk
+    timeout_seconds: 1800
+  test:
+    command: .venv/bin/python -m pytest -p no:cacheprovider
+    required_for:
+    - standard
+    - substantial
+    - high_risk
+    timeout_seconds: 1800
+git:
+  branch_prefix: ai/
+  autonomous_local_commits: true
+  autonomous_push: false
+context:
+  persistent:
+  - AGENTS.md
+  - .ai/context.md
+  on_demand:
+    specifications: docs/superpowers/specs
+    plans: docs/superpowers/plans
+  include_prior_artifacts: relevant_only
+  conflict_policy: fail_closed
+  persistent_budget_bytes: 8192
+roles: {}
+protected:
+  autonomous_push: false
+  autonomous_merge: false
+  autonomous_deploy: false
+  autonomous_production_data_mutation: false
