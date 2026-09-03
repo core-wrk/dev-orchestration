@@ -183,17 +183,23 @@ with code.
 ## 6. The scope fence
 
 `.ai/project.yaml` gains a `scope` block declaring `include` and `exclude` path globs.
-Enforcement happens in three independent places, because a rule agents are merely *told*
-about is a rule they drift on:
+The fence is enforced independently of what agents are merely *told* about it:
 
-1. **Context assembly** — excluded paths are never read, and never reach an agent prompt.
-2. **Post-execution diff check** — the run's diff is compared against the fence. Any file
+1. **Post-execution diff check** — the run's diff is compared against the fence. Any file
    touched outside `include` fails the run, regardless of what the agent reported.
-3. **`doctor`** — prints the active fence, so it is never a silent policy.
+2. **`doctor`** — prints the active fence, so it is never a silent policy.
 
 The fence governs what agents may **modify**. It does not govern what repository code may
 **reference**: `pipeline/runtime/prompts.py` legitimately reads three excluded trees as
 template roots, and that continues to work.
+
+Prompt-source selection is a separate context-assembly control. The orchestrator supplies
+a repository file only when the resolved `context` configuration or an active profile
+explicitly selects it; a selected file must resolve to a regular file within the repository
+root and pass the role contract and budget. A modification-scope match never makes a file
+prompt-eligible by itself, and a declared context source is not rejected merely because it
+is excluded from modification. This concerns context the orchestrator supplies, not an
+independent provider action inside the worktree.
 
 ---
 

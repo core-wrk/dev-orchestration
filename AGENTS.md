@@ -46,8 +46,11 @@ Never modifiable:
 - `.worktrees/`
 - `.superpowers/`
 
-The fence governs modification, not reference — repository code may legitimately
-read excluded paths.
+The fence governs modification, not prompt-source eligibility — repository code
+may legitimately read excluded paths. The orchestrator supplies prompt context
+only from explicitly declared sources in `.ai/project.yaml`; a scope match does
+not authorize a prompt read, and a declared source remains eligible when it is
+excluded from modification.
 
 ## Facts that cannot be inferred
 
