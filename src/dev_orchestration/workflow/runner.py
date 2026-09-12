@@ -7,7 +7,7 @@ from pathlib import Path
 from pydantic import BaseModel
 
 from dev_orchestration.adapters.registry import ReadOnlyRoleUnsupportedError, RoleRegistry
-from dev_orchestration.config.models import ProjectConfig
+from dev_orchestration.config.models import ProjectConfig, ValidationCommand
 from dev_orchestration.config.resolver import PROTECTED_DEFAULTS
 from dev_orchestration.context.assembler import Category, ContextContractError
 from dev_orchestration.context.packet import ContextRef
@@ -208,6 +208,19 @@ def _outcome(
         verification=verification,
         reason=reason if reason is not None else manifest.terminal_reason or "",
     )
+
+
+def _implementation_review_required(tier: Tier, validation: dict[str, ValidationCommand]) -> bool:
+    """Whether this run must pass an independent implementation review.
+
+    A tier path omits the review on the premise that deterministic validation covers
+    the same ground more cheaply. Where no validation command actually runs at this
+    tier that premise is false and the review is the only check standing between the
+    worker and a completed run, so it is kept regardless of the stage path.
+    """
+    if "implementation_review" in stages_for(tier):
+        return True
+    return not any(tier in spec.required_for for spec in validation.values())
 
 
 def _effective_tier(
@@ -552,7 +565,7 @@ def execute_run(
         diff = worktree_repo.change_diff(base_commit)
         review_inventory = worktree_repo.change_inventory(base_commit)
         implementation_review = None
-        if "implementation_review" in stages_for(effective_tier):
+        if _implementation_review_required(effective_tier, project_config.validation):
             engine.transition(RunState.IMPLEMENTATION_REVIEW)
             implementation_review = review_implementation(
                 registry,

@@ -595,3 +595,30 @@ def test_ignored_out_of_scope_write_escalates_the_run(tmp_path):
     )
     assert outcome.final_state is RunState.ESCALATED
     assert "dist/payload.sh" in outcome.reason
+
+
+UNVALIDATED_TRIVIAL_CONFIG = ProjectConfig.model_validate(
+    {
+        "project": {"name": "demo", "class": "internal_utility"},
+        "scope": {"include": ["src/"], "exclude": []},
+        "context": {"persistent": []},
+        "validation": {"unit": {"command": "true", "required_for": ["standard"]}},
+    }
+)
+
+
+def test_trivial_keeps_review_when_no_validation_runs_at_that_tier(tmp_path):
+    """Dropping review assumes validation covers it; without validation it must stay."""
+    git = repo(tmp_path)
+    outcome = execute_run(
+        git,
+        UNVALIDATED_TRIVIAL_CONFIG,
+        registry(Scripted(script(tier="trivial"))),
+        "fix",
+        tmp_path / "wt",
+        CRITERIA,
+    )
+    assert outcome.final_state is RunState.COMPLETE_LOCAL
+    names = [event["event"] for event in events(outcome)]
+    assert "implementation_reviewed" in names
+    assert "implementation_review_skipped" not in names

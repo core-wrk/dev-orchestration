@@ -7,6 +7,7 @@ import pytest
 
 import dev_orchestration.doctor as doctor_module
 from dev_orchestration.adapters.base import AdapterStatus, FakeAdapter
+from dev_orchestration.config.models import ProjectConfig
 from dev_orchestration.doctor import Check, render, run_checks
 
 
@@ -340,3 +341,37 @@ def test_git_available_check_fails_and_names_install_when_git_is_absent(monkeypa
 def test_git_version_reports_install_git_when_git_is_absent(monkeypatch):
     monkeypatch.setattr(doctor_module.shutil, "which", lambda name: None)
     assert doctor_module._git_version() == "install git"
+
+
+def test_proportionality_flags_trivial_without_validation_and_inert_controls():
+    config = ProjectConfig.model_validate(
+        {
+            "project": {"name": "demo", "class": "internal_utility"},
+            "validation": {"unit": {"command": "true", "required_for": ["standard"]}},
+            "profiles": {
+                "available": ["p"],
+                "definitions": {
+                    "p": {"controls": {"human_approval": True, "plan_review_required": True}}
+                },
+            },
+        }
+    )
+    checks = {check.name: check for check in doctor_module._proportionality_checks(config)}
+    assert checks["validation covers trivial"].ok is False
+    assert checks["profile controls enforced"].ok is False
+    assert "plan_review_required" in checks["profile controls enforced"].detail
+    assert "human_approval" not in checks["profile controls enforced"].detail
+
+
+def test_proportionality_passes_when_trivial_is_validated_and_controls_are_live():
+    config = ProjectConfig.model_validate(
+        {
+            "project": {"name": "demo", "class": "internal_utility"},
+            "validation": {"unit": {"command": "true", "required_for": ["trivial", "standard"]}},
+            "profiles": {
+                "available": ["p"],
+                "definitions": {"p": {"controls": {"human_approval": True}}},
+            },
+        }
+    )
+    assert all(check.ok for check in doctor_module._proportionality_checks(config))
