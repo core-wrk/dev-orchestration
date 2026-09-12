@@ -512,6 +512,71 @@ def test_override_may_not_lower_the_tier_below_the_classification(tmp_path):
     assert "trivial" in outcome.reason and "standard" in outcome.reason
 
 
+def test_downgrade_is_allowed_when_a_reason_is_recorded(tmp_path):
+    git = repo(tmp_path)
+    outcome = execute_run(
+        git,
+        CONFIG,
+        registry(Scripted(script(tier="standard"))),
+        "document the auth boundary",
+        tmp_path / "wt",
+        CRITERIA,
+        tier_override=Tier.TRIVIAL,
+        downgrade_reason="documentation only; classifier judged the subject, not the change",
+    )
+    manifest = json.loads((outcome.store_root / "manifest.json").read_text())
+    assert outcome.final_state is RunState.COMPLETE_LOCAL
+    assert manifest["tier"] == "trivial"
+    assert "documentation only" in manifest["downgrade_reason"]
+    resolved = [event for event in events(outcome) if event["event"] == "tier_resolved"]
+    assert resolved and resolved[0]["downgraded"] is True
+    assert "documentation only" in resolved[0]["downgrade_reason"]
+
+
+def test_blank_downgrade_reason_does_not_authorize_a_downgrade(tmp_path):
+    git = repo(tmp_path)
+    outcome = execute_run(
+        git,
+        CONFIG,
+        registry(Scripted(script(tier="standard"))),
+        "rewrite auth",
+        tmp_path / "wt",
+        CRITERIA,
+        tier_override=Tier.TRIVIAL,
+        downgrade_reason="   ",
+    )
+    assert outcome.final_state is RunState.ESCALATED
+
+
+def test_a_reason_does_not_change_an_upgrade(tmp_path):
+    git = repo(tmp_path)
+    outcome = execute_run(
+        git,
+        CONFIG,
+        registry(Scripted(script(tier="trivial"))),
+        "fix",
+        tmp_path / "wt",
+        CRITERIA,
+        tier_override=Tier.STANDARD,
+        downgrade_reason="ignored on an upgrade",
+    )
+    manifest = json.loads((outcome.store_root / "manifest.json").read_text())
+    assert outcome.final_state is RunState.COMPLETE_LOCAL
+    assert manifest["tier"] == "standard"
+
+
+def test_trivial_run_skips_implementation_review(tmp_path):
+    git = repo(tmp_path)
+    outcome = execute_run(
+        git, CONFIG, registry(Scripted(script(tier="trivial"))), "fix", tmp_path / "wt", CRITERIA
+    )
+    assert outcome.final_state is RunState.COMPLETE_LOCAL
+    names = [event["event"] for event in events(outcome)]
+    assert "implementation_review_skipped" in names
+    assert "implementation_reviewed" not in names
+    assert "verified" in names
+
+
 def test_ignored_out_of_scope_write_escalates_the_run(tmp_path):
     git = repo(tmp_path)
     (git.root / ".gitignore").write_text(".ai/runs/\ndist/\n")

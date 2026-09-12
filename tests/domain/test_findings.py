@@ -84,3 +84,16 @@ def test_verification_accepts_matching_verdicts():
 def test_classification_rejects_a_tier_without_an_implemented_path():
     with pytest.raises(ValidationError):
         Classification(tier="high_risk", rationale="r", profiles=[])
+
+
+def test_finding_below_blocking_may_omit_required_evidence():
+    minor = Finding(id="F001", severity=Severity.MINOR, summary="s")
+    important = Finding(id="F002", severity=Severity.IMPORTANT, summary="s")
+    assert minor.evidence_required is None and important.evidence_required is None
+
+
+def test_blocking_finding_must_state_required_evidence():
+    with pytest.raises(ValidationError):
+        Finding(id="F001", severity=Severity.BLOCKING, summary="s")
+    with pytest.raises(ValidationError):
+        Finding(id="F001", severity=Severity.BLOCKING, summary="s", evidence_required="   ")
