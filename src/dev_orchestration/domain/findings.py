@@ -29,9 +29,22 @@ class Finding(BaseModel):
     id: str
     severity: Severity
     summary: str
-    evidence_required: str
+    # Optional below BLOCKING. A mandatory field on every finding compels reviewers to
+    # manufacture an evidence demand for issues that do not warrant one, which is how
+    # evidence theater gets encoded in the schema rather than merely in the prompt.
+    evidence_required: str | None = None
     file: str | None = None
     line: int | None = None
+
+    @model_validator(mode="after")
+    def blocking_findings_state_required_evidence(self) -> Self:
+        if self.severity is Severity.BLOCKING and not (
+            self.evidence_required and self.evidence_required.strip()
+        ):
+            raise ValueError(
+                f"blocking finding {self.id} must state the evidence required to resolve it"
+            )
+        return self
 
 
 class ReviewResult(BaseModel):

@@ -31,6 +31,7 @@ validation:
   lint:
     command: .venv/bin/ruff check --no-cache src tests
     required_for:
+    - trivial
     - standard
     - substantial
     - high_risk
@@ -38,6 +39,7 @@ validation:
   format:
     command: .venv/bin/ruff format --check --no-cache src tests
     required_for:
+    - trivial
     - standard
     - substantial
     - high_risk
@@ -45,6 +47,7 @@ validation:
   test:
     command: .venv/bin/python -m pytest -p no:cacheprovider
     required_for:
+    - trivial
     - standard
     - substantial
     - high_risk

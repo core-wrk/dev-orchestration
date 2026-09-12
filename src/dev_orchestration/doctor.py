@@ -13,6 +13,7 @@ from dev_orchestration.adapters.base import AgentAdapter
 from dev_orchestration.adapters.claude import ClaudeAdapter
 from dev_orchestration.adapters.codex import CodexAdapter, discover_codex
 from dev_orchestration.config.models import ProjectConfig
+from dev_orchestration.domain.enums import Tier
 from dev_orchestration.git.repo import DirtyWorktreeError, GitCommandError, discover_repo
 from dev_orchestration.scope import ScopeFence
 
@@ -136,4 +137,54 @@ def _repository_checks(cwd: Path) -> list[Check]:
     )
     for name, command in config.validation.items():
         checks.append(Check(f"validation:{name}", True, command.command))
+    checks.extend(_proportionality_checks(config))
+    return checks
+
+
+# Controls the runner actually reads. Anything else in a profile's `controls` map is
+# carried into prompts as text but enforces nothing, so the config reads stricter than
+# the system behaves. Surface that rather than letting it look like a live gate.
+ENFORCED_PROFILE_CONTROLS = frozenset({"human_approval"})
+
+
+def _proportionality_checks(config: ProjectConfig) -> list[Check]:
+    checks: list[Check] = []
+
+    trivial_validated = any(
+        Tier.TRIVIAL in command.required_for for command in config.validation.values()
+    )
+    checks.append(
+        Check(
+            "validation covers trivial",
+            trivial_validated,
+            ""
+            if trivial_validated
+            else (
+                "no validation command lists `trivial` in required_for, so trivial runs "
+                "skip lint and tests and keep the slower implementation review instead; "
+                "add `trivial` to required_for to make them cheap and checked"
+            ),
+        )
+    )
+
+    inert = sorted(
+        {
+            key
+            for profile in config.profiles.definitions.values()
+            for key in profile.controls
+            if key not in ENFORCED_PROFILE_CONTROLS
+        }
+    )
+    checks.append(
+        Check(
+            "profile controls enforced",
+            not inert,
+            ""
+            if not inert
+            else (
+                f"declared but not enforced by the runner: {', '.join(inert)}; "
+                "these reach agents as prompt text only — remove them or implement them"
+            ),
+        )
+    )
     return checks

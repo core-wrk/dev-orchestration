@@ -7,7 +7,7 @@ from pathlib import Path
 from pydantic import BaseModel
 
 from dev_orchestration.adapters.registry import ReadOnlyRoleUnsupportedError, RoleRegistry
-from dev_orchestration.config.models import ProjectConfig
+from dev_orchestration.config.models import ProjectConfig, ValidationCommand
 from dev_orchestration.config.resolver import PROTECTED_DEFAULTS
 from dev_orchestration.context.assembler import Category, ContextContractError
 from dev_orchestration.context.packet import ContextRef
@@ -210,17 +210,37 @@ def _outcome(
     )
 
 
+def _implementation_review_required(tier: Tier, validation: dict[str, ValidationCommand]) -> bool:
+    """Whether this run must pass an independent implementation review.
+
+    A tier path omits the review on the premise that deterministic validation covers
+    the same ground more cheaply. Where no validation command actually runs at this
+    tier that premise is false and the review is the only check standing between the
+    worker and a completed run, so it is kept regardless of the stage path.
+    """
+    if "implementation_review" in stages_for(tier):
+        return True
+    return not any(tier in spec.required_for for spec in validation.values())
+
+
 def _effective_tier(
     classification_tier: Tier,
     override: Tier | None,
     minimum: Tier | None,
+    downgrade_reason: str | None = None,
 ) -> Tier:
     requested = classification_tier
     if override is not None:
-        if _tier_rank(override) < _tier_rank(classification_tier):
+        # A downgrade is permitted, but never silently: the classifier reads the request
+        # text alone and over-classifies when a change merely *discusses* a sensitive
+        # system. Requiring a recorded reason keeps the correction auditable instead of
+        # making over-classification unrecoverable.
+        if _tier_rank(override) < _tier_rank(classification_tier) and not (
+            downgrade_reason and downgrade_reason.strip()
+        ):
             raise TierDowngradeError(
                 f"--tier {override} is below the classified tier {classification_tier}; "
-                "an override may raise a run's controls but never lower them"
+                "pass --downgrade-reason to record why the lower tier is justified"
             )
         requested = override
     if minimum and _tier_rank(requested) < _tier_rank(minimum):
@@ -274,6 +294,7 @@ def execute_run(
     acceptance_criteria: list[str],
     *,
     tier_override: Tier | None = None,
+    downgrade_reason: str | None = None,
     external_plan: Path | None = None,
     acceptance_criteria_source: str = "explicit",
 ) -> RunOutcome:
@@ -301,6 +322,7 @@ def execute_run(
         acceptance_criteria=acceptance_criteria,
         acceptance_criteria_source=acceptance_criteria_source,
         tier_override=tier_override,
+        downgrade_reason=downgrade_reason,
     )
     _record_roles(store, registry)
     store.update_manifest(
@@ -360,12 +382,15 @@ def execute_run(
                 },
             },
         )
-        effective_tier = _effective_tier(classification.tier, tier_override, runtime.minimum_tier)
+        effective_tier = _effective_tier(
+            classification.tier, tier_override, runtime.minimum_tier, downgrade_reason
+        )
         store.update_manifest(tier=effective_tier)
         stages_for(effective_tier)
         if external_plan is not None and effective_tier not in {Tier.STANDARD, Tier.SUBSTANTIAL}:
             raise ContextContractError("an external plan requires the standard or substantial tier")
         if effective_tier is not classification.tier:
+            downgraded = _tier_rank(effective_tier) < _tier_rank(classification.tier)
             store.append_event(
                 {
                     "event": "tier_resolved",
@@ -373,6 +398,8 @@ def execute_run(
                     "effective": str(effective_tier),
                     "override": str(tier_override) if tier_override else None,
                     "minimum": str(runtime.minimum_tier) if runtime.minimum_tier else None,
+                    "downgraded": downgraded,
+                    "downgrade_reason": downgrade_reason if downgraded else None,
                 }
             )
 
@@ -537,20 +564,30 @@ def execute_run(
 
         diff = worktree_repo.change_diff(base_commit)
         review_inventory = worktree_repo.change_inventory(base_commit)
-        engine.transition(RunState.IMPLEMENTATION_REVIEW)
-        implementation_review = review_implementation(
-            registry,
-            approved,
-            diff,
-            _evidence(outcomes),
-            runtime.profile_constraints,
-            store,
-            worktree,
-        )
-        if worktree_repo.change_inventory(base_commit) != review_inventory:
-            raise ContextContractError("read-only implementation review changed the worktree")
+        implementation_review = None
+        if _implementation_review_required(effective_tier, project_config.validation):
+            engine.transition(RunState.IMPLEMENTATION_REVIEW)
+            implementation_review = review_implementation(
+                registry,
+                approved,
+                diff,
+                _evidence(outcomes),
+                runtime.profile_constraints,
+                store,
+                worktree,
+            )
+            if worktree_repo.change_inventory(base_commit) != review_inventory:
+                raise ContextContractError("read-only implementation review changed the worktree")
+        else:
+            store.append_event(
+                {
+                    "event": "implementation_review_skipped",
+                    "tier": str(effective_tier),
+                    "reason": "tier stage path omits implementation review",
+                }
+            )
         cycle = 1
-        while implementation_review.blocking_ids():
+        while implementation_review is not None and implementation_review.blocking_ids():
             if implementation_review.outcome in {Outcome.BLOCKED, Outcome.ESCALATE}:
                 target = (
                     RunState.BLOCKED
@@ -622,7 +659,10 @@ def execute_run(
                 raise ContextContractError("read-only implementation review changed the worktree")
             cycle += 1
 
-        if implementation_review.outcome in {Outcome.BLOCKED, Outcome.ESCALATE}:
+        if implementation_review is not None and implementation_review.outcome in {
+            Outcome.BLOCKED,
+            Outcome.ESCALATE,
+        }:
             target = (
                 RunState.BLOCKED
                 if implementation_review.outcome is Outcome.BLOCKED
@@ -641,7 +681,11 @@ def execute_run(
             acceptance_criteria,
             diff,
             _evidence(outcomes),
-            [finding.id for finding in implementation_review.findings],
+            (
+                [finding.id for finding in implementation_review.findings]
+                if implementation_review is not None
+                else []
+            ),
             store,
             worktree,
         )
@@ -658,7 +702,8 @@ def execute_run(
             not criteria_bound
             or verification.outcome is not Outcome.PASS
             or not all_verdicts_pass
-            or set(verification.unresolved_finding_ids) & set(implementation_review.blocking_ids())
+            or set(verification.unresolved_finding_ids)
+            & set(implementation_review.blocking_ids() if implementation_review else [])
         ):
             _terminal(
                 engine,

@@ -37,3 +37,14 @@ def test_every_stage_has_a_context_contract():
     for tier, stages in TIER_STAGES.items():
         for stage in stages:
             assert stage in STAGE_CONTRACTS, f"{tier}:{stage}"
+
+
+def test_trivial_omits_implementation_review_but_keeps_verification():
+    stages = stages_for(Tier.TRIVIAL)
+    assert "implementation_review" not in stages
+    assert "validation" in stages and "final_verification" in stages
+
+
+def test_standard_and_substantial_keep_implementation_review():
+    for tier in (Tier.STANDARD, Tier.SUBSTANTIAL):
+        assert "implementation_review" in stages_for(tier)

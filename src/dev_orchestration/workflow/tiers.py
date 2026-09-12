@@ -12,11 +12,14 @@ class TierDowngradeError(RuntimeError):
 
 
 TIER_STAGES: dict[Tier, tuple[str, ...]] = {
+    # Trivial keeps validation and final verification and drops implementation review.
+    # Validation is cheap, deterministic, and catches real defects; a second LLM review
+    # pass on a reversible local change costs more than it returns and reliably
+    # generates findings that are not worth acting on.
     Tier.TRIVIAL: (
         "classification",
         "execution",
         "validation",
-        "implementation_review",
         "final_verification",
     ),
     Tier.STANDARD: (

@@ -135,6 +135,11 @@ def run(
         None, "--plan", help="Import an external plan"
     ),
     tier: str | None = typer.Option(None, "--tier", help="Override classification"),
+    downgrade_reason: str | None = typer.Option(
+        None,
+        "--downgrade-reason",
+        help="Why a --tier below the classified tier is justified; required to downgrade",
+    ),
     criterion: list[str] | None = typer.Option(  # noqa: B008
         None,
         "--criterion",
@@ -172,6 +177,7 @@ def run(
             acceptance_criteria=criteria,
             acceptance_criteria_source=criteria_source,
             tier_override=override,
+            downgrade_reason=downgrade_reason,
             external_plan=plan_file,
         )
     except EXPECTED_ERRORS as exc:

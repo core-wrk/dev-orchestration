@@ -25,7 +25,10 @@ LEGAL_TRANSITIONS: dict[RunState, frozenset[RunState]] = {
     RunState.AWAITING_APPROVAL: _ALWAYS | {RunState.APPROVED, RunState.BLOCKED},
     RunState.APPROVED: _ALWAYS | {RunState.EXECUTING, RunState.BLOCKED},
     RunState.EXECUTING: _ALWAYS | {RunState.VALIDATING, RunState.BLOCKED},
-    RunState.VALIDATING: _ALWAYS | {RunState.IMPLEMENTATION_REVIEW, RunState.BLOCKED},
+    # FINAL_VERIFICATION is reachable directly because the trivial tier's stage path
+    # omits implementation review; independent verification still runs.
+    RunState.VALIDATING: _ALWAYS
+    | {RunState.IMPLEMENTATION_REVIEW, RunState.FINAL_VERIFICATION, RunState.BLOCKED},
     RunState.IMPLEMENTATION_REVIEW: _ALWAYS
     | {RunState.REMEDIATION, RunState.FINAL_VERIFICATION, RunState.BLOCKED},
     RunState.REMEDIATION: _ALWAYS | {RunState.VALIDATING},

@@ -191,6 +191,13 @@ def _renumber(result: ReviewResult, store: RunStore) -> ReviewResult:
     return result.model_copy(update={"findings": renumbered})
 
 
+def _evidence_line(finding: Finding) -> str:
+    """Render the evidence demand only when the finding actually carries one."""
+    if finding.evidence_required and finding.evidence_required.strip():
+        return f"\n  required evidence: {finding.evidence_required}"
+    return ""
+
+
 def reconcile(
     registry: RoleRegistry,
     plan_text: str,
@@ -205,8 +212,7 @@ def reconcile(
                 label=Category.REVIEW_FINDINGS,
                 path=None,
                 content="\n".join(
-                    f"{finding.id} [{finding.severity}] {finding.summary}\n"
-                    f"  required evidence: {finding.evidence_required}"
+                    f"{finding.id} [{finding.severity}] {finding.summary}{_evidence_line(finding)}"
                     for finding in findings
                 ),
             ),
@@ -358,8 +364,7 @@ def remediate(
                 label=Category.BLOCKING_FINDINGS,
                 path=None,
                 content="\n".join(
-                    f"{finding.id}: {finding.summary}\n"
-                    f"  required evidence: {finding.evidence_required}"
+                    f"{finding.id}: {finding.summary}{_evidence_line(finding)}"
                     for finding in blocking
                 ),
             ),
