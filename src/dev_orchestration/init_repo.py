@@ -55,7 +55,15 @@ def render_project_yaml(config: ProjectConfig) -> str:
     return yaml.safe_dump(config.model_dump(by_alias=True, mode="json"), sort_keys=False)
 
 
+# The one place settled cross-repository questions are recorded. Generated AGENTS.md
+# files point here instead of restating decisions that then drift out of date.
+DECISIONS_REGISTER = (
+    "/Users/andrewodonnell/GitRepos/dev-orchestration-spec/docs/decisions/README.md"
+)
+
+
 def render_agents_md(config: ProjectConfig) -> str:
+    decisions_register = DECISIONS_REGISTER
     scope_in = "\n".join(f"- `{p}`" for p in config.scope.include)
     scope_out = "\n".join(f"- `{p}`" for p in config.scope.exclude) or "- (none)"
     commands = (
@@ -130,12 +138,29 @@ load one.
 A command that deploys, publishes, or writes to a remote can never be registered
 as a validation gate; the deny-list is not overridable.
 
-## Open decision
+## Planning state ownership
 
-Ownership of planning state between `.ai/runs/` (dev-orchestration) and
-`.planning/` (GSD) is unsettled. Treat `.ai/runs/` as the record of what a
-dev-orchestration run did, and do not assume either system enforces the other's
-boundaries.
+GSD owns intent and planning state. `dev-orch` owns execution: classification,
+approved scope, isolated execution, validation, review, verification, run
+artifacts, and the commit policy.
+
+This repository carries `.ai/project.yaml`, so GSD phase commands do not run in
+it — GSD subagents honour neither the scope fence nor the validation deny-list.
+A GSD plan enters only as an external approved plan (`plan_origin: external`).
+
+Decided 2026-09-01 from the `helmfast-OS` pilot. Full record: ADR-002.
+
+## Decisions
+
+Settled questions live in one register, not in this file:
+
+```text
+{decisions_register}
+```
+
+Read it before assuming a rule here is current. Rules restated above are binding
+on their own; the register carries the reasoning, the evidence, and whether a
+decision still stands.
 """
 
 

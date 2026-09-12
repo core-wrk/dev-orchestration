@@ -2417,6 +2417,12 @@ dev-orchestration run did, and do not assume either system enforces the other's
 boundaries.
 """
 
+> **Superseded 2026-09-01.** The template above is the M1 plan as written and is
+> kept as the historical record. The planning-state question was decided during
+> the M3 pilot — GSD owns intent, `dev-orch` owns execution — and `init_repo.py`
+> now emits that decision plus a pointer to the register at
+> `dev-orchestration-spec/docs/decisions/README.md`. See ADR-002.
+
 
 def render_context_md(config: ProjectConfig) -> str:
     return f"""# Repository context — {config.project.name}

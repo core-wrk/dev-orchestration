@@ -78,23 +78,26 @@ load one.
 A command that deploys, publishes, or writes to a remote can never be registered
 as a validation gate; the deny-list is not overridable.
 
-## Planning state ownership — decided 2026-09-12
+## Planning state ownership
 
-A repository carrying `.ai/project.yaml` is governed by dev-orchestration. GSD
-phase commands do not run in it. GSD subagents do not honour the scope fence or
-the validation deny-list, and the fence protects a dev-orchestration run rather
-than the repository, so a GSD executor here would write wherever it liked.
+GSD owns intent and planning state. `dev-orch` owns execution: classification,
+approved scope, isolated execution, validation, review, verification, run
+artifacts, and the commit policy.
 
-Layers:
+This repository carries `.ai/project.yaml`, so GSD phase commands do not run in
+it — GSD subagents honour neither the scope fence nor the validation deny-list.
+A GSD plan enters only as an external approved plan (`plan_origin: external`).
 
-- the repository's own in-fence planning directory is the intent layer, authored
-  by humans;
-- `.ai/runs/` is the evidence layer, framework-owned and outside the fence.
+Decided 2026-09-01 from the `helmfast-OS` pilot. Full record: ADR-002.
 
-A GSD-authored plan may still be imported as an external approved plan
-(`plan_origin: external`). Import is a supported entry point; GSD execution is
-not.
+## Decisions
 
-Decided from the 2026-09-01 `helmfast-OS` pilot: no observed failure would have
-been prevented by a stronger intent layer, and the fence demonstrably fired on
-real writes. See §11.1 of the v1 design specification.
+Settled questions live in one register, not in this file:
+
+```text
+/Users/andrewodonnell/GitRepos/dev-orchestration-spec/docs/decisions/README.md
+```
+
+Read it before assuming a rule here is current. Rules restated above are binding
+on their own; the register carries the reasoning, the evidence, and whether a
+decision still stands.

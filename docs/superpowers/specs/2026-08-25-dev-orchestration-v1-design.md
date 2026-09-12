@@ -31,7 +31,7 @@ divergence below is deliberate and is justified by evidence gathered on 2026-08-
 | First real run | `helmfast-OS` | Highest value; trivial-tier run precedes standard-tier |
 | Dirty working trees | Hard block, no escape hatch | Framework never touches uncommitted work |
 | Business-knowledge trees | Hard-fenced out of scope | A development framework has no business editing GTM docs |
-| GSD relationship | **Deferred** — decide after M3 | See §11.1 |
+| GSD relationship | **Decided** 2026-09-01 — GSD owns intent, `dev-orch` owns execution | ADR-002; see §11.1 |
 
 ---
 
@@ -269,10 +269,12 @@ Run 2026-09-01 on `helmfast-OS`: twelve runs, three reaching `COMPLETE_LOCAL`.
 - [x] Run artifacts are legible to a future investigator without chat history. — the
       manifests, classifications and review rounds carried this decision without
       recourse to any transcript.
-- [x] At least one framework improvement is identified from pilot evidence. — three:
-      the cycle-finalization close barrier, prompt supersession on expired reviews,
-      and adapter reliability (below).
-- [x] The GSD boundary decision (§11.1) is made on evidence. — decided 2026-09-12.
+- [x] At least one framework improvement is identified from pilot evidence. — the
+      scope-fence ephemeral-cache fix (`04ef81c`), plus the cycle-finalization close
+      barrier and prompt supersession; adapter reliability (below) is a fourth,
+      identified on review of the pilot record 2026-09-12.
+- [x] The GSD boundary decision (§11.1) is made on evidence. — decided 2026-09-01,
+      recorded in `M3-PILOT-REPORT.md`, promoted to ADR-002 on 2026-09-12.
 
 **The finding that should shape M4.** A third of pilot runs failed inside the Codex
 adapter rather than anywhere in the workflow: two provider exits, a Classification
@@ -366,15 +368,22 @@ specification and the implementation agree again.
 
 ## 11. Open decisions
 
-### 11.1 GSD boundary — DECIDED 2026-09-12
+### 11.1 GSD boundary — DECIDED 2026-09-01
 
-**Decision: GSD does not execute in a repository carrying `.ai/project.yaml`.** The
-repository's own in-fence planning directory is the intent layer; `.ai/runs/` is the
-evidence layer. A GSD-authored plan may be imported as an external approved plan
-(`plan_origin: external`); GSD phase execution is not permitted.
+**Decision: GSD owns intent and planning state; `dev-orch` owns execution.** A GSD
+plan enters only by explicit import as an external approved plan
+(`plan_origin: external`), copied and hashed by the framework. GSD phase execution
+must not bypass the scope fence, validation deny-list, worktree isolation,
+validation, review, or verification — in practice, GSD phase commands do not run in
+a repository carrying `.ai/project.yaml`.
 
-Decided on evidence from the 2026-09-01 `helmfast-OS` pilot — twelve runs, three
-reaching `COMPLETE_LOCAL`.
+Decided during the M3 pilot and first recorded in `M3-PILOT-REPORT.md`. Promoted to
+**ADR-002** on 2026-09-12; the register at
+`dev-orchestration-spec/docs/decisions/README.md` is authoritative and this section
+is a pointer to it.
+
+The evidence, from the 2026-09-01 `helmfast-OS` pilot — twelve runs, three reaching
+`COMPLETE_LOCAL`.
 
 What the evidence showed:
 
