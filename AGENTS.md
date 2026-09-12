@@ -78,9 +78,23 @@ load one.
 A command that deploys, publishes, or writes to a remote can never be registered
 as a validation gate; the deny-list is not overridable.
 
-## Open decision
+## Planning state ownership — decided 2026-09-12
 
-Ownership of planning state between `.ai/runs/` (dev-orchestration) and
-`.planning/` (GSD) is unsettled. Treat `.ai/runs/` as the record of what a
-dev-orchestration run did, and do not assume either system enforces the other's
-boundaries.
+A repository carrying `.ai/project.yaml` is governed by dev-orchestration. GSD
+phase commands do not run in it. GSD subagents do not honour the scope fence or
+the validation deny-list, and the fence protects a dev-orchestration run rather
+than the repository, so a GSD executor here would write wherever it liked.
+
+Layers:
+
+- the repository's own in-fence planning directory is the intent layer, authored
+  by humans;
+- `.ai/runs/` is the evidence layer, framework-owned and outside the fence.
+
+A GSD-authored plan may still be imported as an external approved plan
+(`plan_origin: external`). Import is a supported entry point; GSD execution is
+not.
+
+Decided from the 2026-09-01 `helmfast-OS` pilot: no observed failure would have
+been prevented by a stronger intent layer, and the fence demonstrably fired on
+real writes. See §11.1 of the v1 design specification.

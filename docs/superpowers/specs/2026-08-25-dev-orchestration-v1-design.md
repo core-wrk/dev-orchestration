@@ -260,13 +260,26 @@ plan import; `codex exec` executor; validation runner; implementation review; re
 
 **Build:** nothing new. Run the framework.
 
+Run 2026-09-01 on `helmfast-OS`: twelve runs, three reaching `COMPLETE_LOCAL`.
+
 **Acceptance:**
-- [ ] One trivial-tier run completes on `helmfast-OS`.
-- [ ] One standard-tier run completes on `helmfast-OS`.
-- [ ] No remote push occurs.
-- [ ] Run artifacts are legible to a future investigator without chat history.
-- [ ] At least one framework improvement is identified from pilot evidence.
-- [ ] The GSD boundary decision (§11.1) is made on evidence.
+- [x] One trivial-tier run completes on `helmfast-OS`. — two did.
+- [x] One standard-tier run completes on `helmfast-OS`. — one did.
+- [x] No remote push occurs. — pilot evidence is still local and unpushed.
+- [x] Run artifacts are legible to a future investigator without chat history. — the
+      manifests, classifications and review rounds carried this decision without
+      recourse to any transcript.
+- [x] At least one framework improvement is identified from pilot evidence. — three:
+      the cycle-finalization close barrier, prompt supersession on expired reviews,
+      and adapter reliability (below).
+- [x] The GSD boundary decision (§11.1) is made on evidence. — decided 2026-09-12.
+
+**The finding that should shape M4.** A third of pilot runs failed inside the Codex
+adapter rather than anywhere in the workflow: two provider exits, a Classification
+schema miss with four validation errors, a ReviewResult miss with twenty-four. One
+further run is still parked in `EXECUTING` with no timeout to recover it. Process
+design is not the binding constraint on completion rate; adapter and
+structured-output reliability is.
 
 ---
 
@@ -353,7 +366,38 @@ specification and the implementation agree again.
 
 ## 11. Open decisions
 
-### 11.1 GSD boundary — deferred to post-M3
+### 11.1 GSD boundary — DECIDED 2026-09-12
+
+**Decision: GSD does not execute in a repository carrying `.ai/project.yaml`.** The
+repository's own in-fence planning directory is the intent layer; `.ai/runs/` is the
+evidence layer. A GSD-authored plan may be imported as an external approved plan
+(`plan_origin: external`); GSD phase execution is not permitted.
+
+Decided on evidence from the 2026-09-01 `helmfast-OS` pilot — twelve runs, three
+reaching `COMPLETE_LOCAL`.
+
+What the evidence showed:
+
+- **No observed failure would have been prevented by a stronger intent layer.** The
+  dominant failure mode was Codex adapter and structured-output unreliability — four
+  of twelve runs, a third of the pilot. Planning was not implicated in any failure.
+- **The run that exhausted its remediation budget was a worker no-op**
+  (`20260901-053245`): an approved one-word README correction was never applied, three
+  cycles running, and the independent implementation reviewer caught it each time from
+  the diff. The plan was correct and approved. Better planning would have changed
+  nothing; reading the diff rather than the builder's narration is what caught it.
+- **The scope fence fired on real writes**, escalating a run that wrote outside it. It
+  is the control the pilot most clearly validated, and GSD subagents do not honour it.
+  Admitting an executor that ignores the fence would regress the one control that
+  demonstrably works.
+- **The lifecycle gap GSD would fill is already filled.** `helmfast-OS` carries a
+  nineteen-document in-fence `planning/` tree — ADRs, specs, plans, adversarial
+  reviews — and still has no `.planning/`. The overlap remained prospective throughout
+  the pilot.
+
+The original analysis, retained because it is what the decision rests on:
+
+#### Background as assessed pre-pilot
 
 GSD is installed globally (67 skills under `~/.claude/skills/gsd-*`) and is therefore live
 in every repository. No helmfast repo has used it — there is no `.planning/` anywhere — so
@@ -372,8 +416,9 @@ an external approved plan with `plan_origin: external`, `.planning/` staying the
 layer and `.ai/runs/` the evidence layer. Plan import is already built in M2, so this
 option stays open at no additional cost.
 
-Until decided, each `AGENTS.md` records the ownership question as open rather than
-prescribing an answer.
+Each `AGENTS.md` recorded the ownership question as open until the decision above was
+taken; `dev-orchestration/AGENTS.md` now records the decision. The other onboarded
+repositories still carry the "unsettled" wording and are stale until updated.
 
 Note also that `helmfast-OS` already carries two prior trails — `.superpowers/sdd/` and a
 hand-written `planning/` folder. Any eventual consolidation should account for four
