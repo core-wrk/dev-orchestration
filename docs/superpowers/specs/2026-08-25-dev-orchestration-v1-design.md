@@ -270,18 +270,44 @@ Run 2026-09-01 on `helmfast-OS`: twelve runs, three reaching `COMPLETE_LOCAL`.
       manifests, classifications and review rounds carried this decision without
       recourse to any transcript.
 - [x] At least one framework improvement is identified from pilot evidence. — the
-      scope-fence ephemeral-cache fix (`04ef81c`), plus the cycle-finalization close
-      barrier and prompt supersession; adapter reliability (below) is a fourth,
-      identified on review of the pilot record 2026-09-12.
+      scope-fence ephemeral-cache fix (`04ef81c`), the Codex JSONL and Claude
+      result-envelope parsers (`85b8da6`, `e201435`), provider-compatible schema
+      emission (`6c57bd4`), the cycle-finalization close barrier, and prompt
+      supersession. All landed 2026-09-01, during the pilot.
 - [x] The GSD boundary decision (§11.1) is made on evidence. — decided 2026-09-01,
       recorded in `M3-PILOT-REPORT.md`, promoted to ADR-002 on 2026-09-12.
 
-**The finding that should shape M4.** A third of pilot runs failed inside the Codex
-adapter rather than anywhere in the workflow: two provider exits, a Classification
-schema miss with four validation errors, a ReviewResult miss with twenty-four. One
-further run is still parked in `EXECUTING` with no timeout to recover it. Process
-design is not the binding constraint on completion rate; adapter and
-structured-output reliability is.
+**What the failures were, and what M4 should take from them.**
+
+Nine of twelve runs did not complete, but the failures are not one population and
+should not be counted as a rate. Four were framework defects found and fixed inside
+the pilot itself; three were gates working correctly; two are still open.
+
+*Found and fixed during the pilot (2026-09-01).* Two runs failed structured-output
+validation, and neither was model unreliability. The adapters handed the wrong object
+to the validator: `Classification` received Codex's transport envelope
+(`{"type": "turn.completed", "usage": {…}}`) and `ReviewResult` received Claude's
+result wrapper (`{"is_error": false, "duration_api_ms": …, "stop_reason": "end_turn"}`).
+Both are deterministic parsing defects, fixed the same day by `85b8da6` and `e201435`,
+with `6c57bd4` correcting schema emission. They are historical, not a standing rate.
+
+*Gates working.* A remediation budget exhausted on a worker no-op, a final
+verification that refused an unqualified PASS, and a scope fence that escalated an
+out-of-fence write. These are the system behaving as designed.
+
+*Still open, and the M4 scope.*
+
+1. **A provider failure cannot be diagnosed.** `AgentResult` carries `exit_code` and
+   `output` but no `stderr`, and no adapter captures it. Two runs recorded
+   `provider 'codex' exited with 1` and discarded the only evidence of why. Those two
+   failures remain unexplained, which is the real reason the pilot's failure profile
+   looked like flakiness: the instrumentation cannot tell flakiness from a bug.
+2. **A stalled run never reaches a terminal state.** `20260901-061413` has been parked
+   in `EXECUTING` since 2026-09-01. There is no timeout, heartbeat, resume, or manual
+   cancel; `CANCELLED` exists in the state machine and nothing reaches it.
+
+M4 is therefore diagnostics and stall recovery, not adapter rewriting. Both are
+testable without invoking a provider.
 
 ---
 
@@ -387,9 +413,12 @@ The evidence, from the 2026-09-01 `helmfast-OS` pilot — twelve runs, three rea
 
 What the evidence showed:
 
-- **No observed failure would have been prevented by a stronger intent layer.** The
-  dominant failure mode was Codex adapter and structured-output unreliability — four
-  of twelve runs, a third of the pilot. Planning was not implicated in any failure.
+- **No observed failure was traceable to the intent layer.** The largest group —
+  four of twelve runs — were defects in the framework itself, not in planning and
+  not in model quality: two adapter bugs that fed a transport envelope to the schema
+  validator instead of the payload, and two provider exits whose cause was discarded
+  because no adapter captures stderr. The parsing defects were fixed the same day
+  (`85b8da6`, `e201435`). Planning was implicated in none of it.
 - **The run that exhausted its remediation budget was a worker no-op**
   (`20260901-053245`): an approved one-word README correction was never applied, three
   cycles running, and the independent implementation reviewer caught it each time from
