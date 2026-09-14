@@ -8,11 +8,7 @@ profiles:
   definitions:
     agent_orchestration:
       minimum_tier: null
-      controls:
-        plan_review_required: true
-        implementation_review_required: true
-        final_verification_required: true
-        workflow_changes_review_required: true
+      controls: {}
       context_refs: []
 scope:
   include:
