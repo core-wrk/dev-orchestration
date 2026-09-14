@@ -39,6 +39,15 @@ def test_safe_command_is_accepted():
     assert cmd.command == "npm run build"
 
 
+def test_role_timeout_must_be_positive_and_is_optional():
+    from dev_orchestration.config.models import RoleConfig
+
+    assert RoleConfig(adapter="fake").timeout_seconds is None
+    assert RoleConfig(adapter="fake", timeout_seconds=7).timeout_seconds == 7
+    with pytest.raises(ValidationError):
+        RoleConfig(adapter="fake", timeout_seconds=0)
+
+
 @pytest.mark.parametrize(
     "command",
     [

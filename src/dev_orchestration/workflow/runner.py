@@ -6,6 +6,7 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
+from dev_orchestration.adapters.base import AgentTimeoutError
 from dev_orchestration.adapters.registry import ReadOnlyRoleUnsupportedError, RoleRegistry
 from dev_orchestration.config.models import ProjectConfig, ValidationCommand
 from dev_orchestration.config.resolver import PROTECTED_DEFAULTS
@@ -25,6 +26,7 @@ from dev_orchestration.workflow.engine import Engine, IllegalTransitionError
 from dev_orchestration.workflow.invoke import AgentInvocationError, SchemaEscalation
 from dev_orchestration.workflow.scope_check import (
     ScopeViolation,
+    cleanup_ephemeral_paths,
     enforce_fence,
     enforce_ignored_writes,
 )
@@ -146,6 +148,7 @@ def _record_roles(store, registry: RoleRegistry) -> None:
             adapter=binding.adapter,
             model_alias=binding.model,
             reasoning=binding.reasoning,
+            timeout_seconds=binding.timeout_seconds,
             resolved_binary=str(binary) if binary is not None else None,
         )
     store.update_manifest(roles=roles)
@@ -262,8 +265,10 @@ def _run_worktree_stage(
         enforce_ignored_writes(worktree_repo, ignored_before, fence)
     except Exception:
         worktree_repo.restore_ignored_snapshot(ignored_before)
+        cleanup_ephemeral_paths(worktree_repo.root)
         raise
     worktree_repo.restore_ignored_snapshot(ignored_before)
+    cleanup_ephemeral_paths(worktree_repo.root)
     return result
 
 
@@ -283,6 +288,7 @@ def _run_validation_stage(
         return result
     finally:
         worktree_repo.restore_ignored_snapshot(ignored_before)
+        cleanup_ephemeral_paths(worktree_repo.root)
 
 
 def execute_run(
@@ -576,6 +582,7 @@ def execute_run(
                 store,
                 worktree,
             )
+            cleanup_ephemeral_paths(worktree_repo.root)
             if worktree_repo.change_inventory(base_commit) != review_inventory:
                 raise ContextContractError("read-only implementation review changed the worktree")
         else:
@@ -655,6 +662,7 @@ def execute_run(
                 store,
                 worktree,
             )
+            cleanup_ephemeral_paths(worktree_repo.root)
             if worktree_repo.change_inventory(base_commit) != review_inventory:
                 raise ContextContractError("read-only implementation review changed the worktree")
             cycle += 1
@@ -689,6 +697,7 @@ def execute_run(
             store,
             worktree,
         )
+        cleanup_ephemeral_paths(worktree_repo.root)
         if worktree_repo.change_inventory(base_commit) != review_inventory:
             raise ContextContractError("read-only verification changed the worktree")
         verdict_criteria = [verdict.criterion for verdict in verification.verdicts]
@@ -754,6 +763,9 @@ def execute_run(
         return _outcome(engine)
     except (IllegalTransitionError, UnsupportedTierError, TierDowngradeError) as exc:
         _terminal(engine, RunState.ESCALATED, str(exc))
+        return _outcome(engine)
+    except AgentTimeoutError as exc:
+        _terminal(engine, RunState.FAILED, str(exc))
         return _outcome(engine)
     except (OSError, subprocess.SubprocessError) as exc:
         _terminal(engine, RunState.ESCALATED, f"provider invocation failed: {exc}")

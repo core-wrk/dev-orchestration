@@ -5,7 +5,11 @@ import json
 import re
 from pathlib import Path
 
-from dev_orchestration.adapters.base import AgentResult
+from dev_orchestration.adapters.base import (
+    AgentResult,
+    agent_result_record,
+    provider_failure_reason,
+)
 from dev_orchestration.adapters.registry import RoleRegistry
 from dev_orchestration.artifacts.store import RunStore
 from dev_orchestration.context.assembler import Category, assemble
@@ -31,15 +35,7 @@ def _raw_text(output: dict | str) -> str:
 
 
 def _agent_result_json(result: AgentResult) -> dict:
-    return {
-        "provider": result.provider,
-        "model": result.model,
-        "exit_code": result.exit_code,
-        "output": result.output,
-        "started_at": result.started_at.isoformat(),
-        "completed_at": result.completed_at.isoformat(),
-        "usage": result.usage,
-    }
+    return agent_result_record(result)
 
 
 def _record_result(store: RunStore, name: str, value: object) -> None:
@@ -64,7 +60,10 @@ def classify(
     )
     request = _request(registry, "classifier", store, packet, store.repo_root)
     result = invoke_structured(
-        registry.adapter_for("classifier"), request, Classification, store.root / "schemas"
+        registry.adapter_for("classifier"),
+        request,
+        Classification,
+        store.root / "schemas",
     )
     _record_result(store, "classification.json", result.model_dump(mode="json"))
     store.append_event(
@@ -93,9 +92,7 @@ def plan(
     result = registry.adapter_for("planner").run(request)
     store.write_json_artifact("execution/planner-result.json", _agent_result_json(result))
     if result.exit_code != 0:
-        raise AgentInvocationError(
-            f"planner provider {result.provider!r} exited with {result.exit_code}"
-        )
+        raise AgentInvocationError(provider_failure_reason("planner", result))
     text = _raw_text(result.output)
     path = store.write_plan_version(text)
     store.append_event({"event": "plan_written", "version": path.name})
@@ -119,7 +116,10 @@ def review_plan(
     )
     request = _request(registry, "plan_reviewer", store, packet, store.repo_root)
     raw = invoke_structured(
-        registry.adapter_for("plan_reviewer"), request, ReviewResult, store.root / "schemas"
+        registry.adapter_for("plan_reviewer"),
+        request,
+        ReviewResult,
+        store.root / "schemas",
     )
     result = _renumber(raw, store)
     store.write_versioned_json("plan-review", result.model_dump(mode="json"))
@@ -220,10 +220,9 @@ def reconcile(
     )
     request = _request(registry, "plan_reconciler", store, packet, store.repo_root)
     result = registry.adapter_for("plan_reconciler").run(request)
+    store.write_json_artifact("execution/reconciler-result.json", _agent_result_json(result))
     if result.exit_code != 0:
-        raise AgentInvocationError(
-            f"plan reconciler provider {result.provider!r} exited with {result.exit_code}"
-        )
+        raise AgentInvocationError(provider_failure_reason("plan reconciler", result))
     path = store.write_plan_version(_raw_text(result.output))
     store.append_event(
         {
@@ -281,9 +280,7 @@ def execute(
     result = registry.adapter_for("implementation_worker").run(request)
     store.write_json_artifact("execution/worker-result.json", _agent_result_json(result))
     if result.exit_code != 0:
-        raise AgentInvocationError(
-            f"implementation worker provider {result.provider!r} exited with {result.exit_code}"
-        )
+        raise AgentInvocationError(provider_failure_reason("implementation worker", result))
     store.append_event({"event": "executed", "exit_code": result.exit_code})
     return result
 
@@ -376,9 +373,7 @@ def remediate(
     result = registry.adapter_for("implementation_worker").run(request)
     store.write_json_artifact(f"execution/remediation-v{cycle}.json", _agent_result_json(result))
     if result.exit_code != 0:
-        raise AgentInvocationError(
-            f"remediation worker provider {result.provider!r} exited with {result.exit_code}"
-        )
+        raise AgentInvocationError(provider_failure_reason("remediation worker", result))
     store.append_event(
         {"event": "remediated", "cycle": cycle, "finding_ids": [f.id for f in blocking]}
     )
@@ -421,7 +416,10 @@ def verify(
     )
     request = _request(registry, "verifier", store, packet, worktree or store.repo_root)
     result = invoke_structured(
-        registry.adapter_for("verifier"), request, Verification, store.root / "schemas"
+        registry.adapter_for("verifier"),
+        request,
+        Verification,
+        store.root / "schemas",
     )
     _record_result(store, "verification/final-verification.json", result.model_dump(mode="json"))
     store.append_event(

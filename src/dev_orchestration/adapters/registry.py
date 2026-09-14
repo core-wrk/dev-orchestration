@@ -79,6 +79,7 @@ class RoleRegistry:
                     "restriction cannot be enforced."
                 )
             allowed = list(READ_ONLY_TOOLS)
+        kwargs.setdefault("timeout_seconds", binding.timeout_seconds)
         return AgentRequest(
             role=role,
             prompt=prompt,

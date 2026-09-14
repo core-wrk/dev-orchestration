@@ -9,6 +9,7 @@ from dev_orchestration.adapters.base import (
     AdapterStatus,
     AgentRequest,
     AgentResult,
+    AgentTimeoutError,
     compose_prompt,
 )
 
@@ -75,14 +76,18 @@ class ClaudeAdapter:
 
     def run(self, request: AgentRequest) -> AgentResult:
         started = datetime.now(UTC)
-        proc = subprocess.run(
-            self.build_command(request),
-            capture_output=True,
-            text=True,
-            cwd=request.cwd,
-            timeout=request.timeout_seconds or DEFAULT_TIMEOUT_SECONDS,
-            check=False,
-        )
+        timeout = request.timeout_seconds or DEFAULT_TIMEOUT_SECONDS
+        try:
+            proc = subprocess.run(
+                self.build_command(request),
+                capture_output=True,
+                text=True,
+                cwd=request.cwd,
+                timeout=timeout,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise AgentTimeoutError(request.role, timeout, self.name) from exc
         output = _decode_output(proc.stdout)
         return AgentResult(
             provider=self.name,
@@ -91,6 +96,7 @@ class ClaudeAdapter:
             output=output,
             started_at=started,
             completed_at=datetime.now(UTC),
+            stderr=getattr(proc, "stderr", "") or "",
         )
 
 

@@ -62,3 +62,11 @@ class Engine:
         )
         self.store.append_event({"event": "state_changed", "from": str(current), "to": str(to)})
         return manifest
+
+    def cancel(self, reason: str = "operator requested cancellation") -> RunManifest:
+        """Move a non-terminal run to CANCELLED with an auditable reason."""
+        if self.state in TERMINAL_STATES:
+            raise IllegalTransitionError(f"{self.state} is already terminal")
+        self.store.update_manifest(terminal_reason=reason)
+        self.store.append_event({"event": "run_cancel_requested", "detail": reason})
+        return self.transition(RunState.CANCELLED)

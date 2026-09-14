@@ -1,3 +1,4 @@
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -16,9 +17,10 @@ BAD = {"tier": "not-a-tier", "rationale": "x", "profiles": []}
 
 
 class ScriptedAdapter:
-    def __init__(self, payloads, exit_codes=None):
+    def __init__(self, payloads, exit_codes=None, stderrs=None):
         self.payloads = list(payloads)
         self.exit_codes = list(exit_codes or [0] * len(self.payloads))
+        self.stderrs = list(stderrs or [""] * len(self.payloads))
         self.calls = 0
         self.requests = []
 
@@ -32,7 +34,15 @@ class ScriptedAdapter:
         self.calls += 1
         self.requests.append(request)
         now = datetime.now(UTC)
-        return AgentResult("scripted", None, self.exit_codes.pop(0), self.payloads.pop(0), now, now)
+        return AgentResult(
+            "scripted",
+            None,
+            self.exit_codes.pop(0),
+            self.payloads.pop(0),
+            now,
+            now,
+            stderr=self.stderrs.pop(0),
+        )
 
 
 def request():
@@ -61,10 +71,14 @@ def test_two_invalid_responses_escalate_rather_than_looping(tmp_path):
     assert adapter.calls == 2
 
 
-def test_provider_nonzero_exit_is_rejected_before_payload_validation(tmp_path):
-    adapter = ScriptedAdapter([GOOD], exit_codes=[3])
-    with pytest.raises(AgentInvocationError):
+def test_provider_nonzero_exit_persists_stderr_and_surfaces_it(tmp_path):
+    adapter = ScriptedAdapter([GOOD], exit_codes=[3], stderrs=["service unavailable"])
+    with pytest.raises(AgentInvocationError, match="service unavailable"):
         invoke_structured(adapter, request(), Classification, tmp_path)
+    failure = json.loads(
+        (tmp_path / "execution" / "provider-failure-classifier-attempt-1.json").read_text()
+    )
+    assert failure["stderr"] == "service unavailable"
 
 
 def test_the_generated_schema_is_written_where_the_caller_asks(tmp_path):

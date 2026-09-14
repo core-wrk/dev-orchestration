@@ -1,6 +1,8 @@
 """Enforce the scope fence against every Git change state."""
 
-from pathlib import PurePosixPath
+import os
+import shutil
+from pathlib import Path, PurePosixPath
 
 from dev_orchestration.git.repo import GitRepo
 from dev_orchestration.scope import ScopeFence
@@ -22,14 +24,39 @@ _EPHEMERAL_IGNORED_FILES = frozenset({".coverage"})
 
 
 def _is_ephemeral_ignored_path(path: str) -> bool:
+    return _is_ephemeral_path(path)
+
+
+def _is_ephemeral_path(path: str) -> bool:
     parts = PurePosixPath(path).parts
     return path in _EPHEMERAL_IGNORED_FILES or any(
         part in _EPHEMERAL_IGNORED_DIRECTORIES for part in parts
     )
 
 
+def cleanup_ephemeral_paths(root: Path) -> None:
+    """Remove only known reproducible tool caches from an isolated worktree."""
+    for current, directories, files in os.walk(root, topdown=True, followlinks=False):
+        current_path = Path(current)
+        for name in list(directories):
+            if name not in _EPHEMERAL_IGNORED_DIRECTORIES:
+                continue
+            target = current_path / name
+            directories.remove(name)
+            if target.is_symlink():
+                target.unlink()
+            else:
+                shutil.rmtree(target)
+        for name in files:
+            if name == ".coverage":
+                (current_path / name).unlink()
+
+
 def check_diff_against_fence(repo: GitRepo, base_ref: str, fence: ScopeFence) -> list[str]:
-    return fence.violations(repo.change_inventory(base_ref))
+    inventory = repo.change_inventory(base_ref)
+    return fence.violations(
+        path for path in inventory if not (_is_ephemeral_path(path) and not repo.is_tracked(path))
+    )
 
 
 def check_ignored_writes(

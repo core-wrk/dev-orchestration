@@ -3,7 +3,9 @@ import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
-from dev_orchestration.adapters.base import AgentRequest
+import pytest
+
+from dev_orchestration.adapters.base import AgentRequest, AgentTimeoutError
 from dev_orchestration.adapters.claude import (
     DEFAULT_TIMEOUT_SECONDS,
     READ_ONLY_TOOLS,
@@ -76,18 +78,19 @@ def test_prompt_flag_is_last_even_with_tools():
 
 
 class _FakeProcess:
-    def __init__(self, stdout: str, returncode: int = 0) -> None:
+    def __init__(self, stdout: str, returncode: int = 0, stderr: str = "") -> None:
         self.stdout = stdout
         self.returncode = returncode
+        self.stderr = stderr
 
 
-def _capture_subprocess_run(monkeypatch, *, stdout="", returncode=0):
+def _capture_subprocess_run(monkeypatch, *, stdout="", returncode=0, stderr=""):
     """Monkeypatch subprocess.run inside the claude module and capture the call."""
     calls = []
 
     def fake_run(cmd, **kwargs):
         calls.append((cmd, kwargs))
-        return _FakeProcess(stdout=stdout, returncode=returncode)
+        return _FakeProcess(stdout=stdout, returncode=returncode, stderr=stderr)
 
     monkeypatch.setattr("dev_orchestration.adapters.claude.subprocess.run", fake_run)
     return calls
@@ -156,6 +159,23 @@ def test_run_maps_agent_result_fields_correctly(monkeypatch):
     assert result.started_at.tzinfo is not None
     assert result.completed_at.tzinfo is not None
     assert before <= result.started_at <= result.completed_at <= after
+
+
+def test_run_captures_provider_stderr(monkeypatch):
+    _capture_subprocess_run(monkeypatch, stdout="", returncode=7, stderr="invalid api key")
+    result = ClaudeAdapter().run(AgentRequest(role="plan_reviewer", prompt="p", cwd=Path("/w")))
+    assert result.stderr == "invalid api key"
+
+
+def test_run_turns_a_timeout_into_a_named_stage_error(monkeypatch):
+    def timeout(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired(cmd="claude", timeout=42)
+
+    monkeypatch.setattr("dev_orchestration.adapters.claude.subprocess.run", timeout)
+    with pytest.raises(AgentTimeoutError, match="plan_reviewer.*42-second"):
+        ClaudeAdapter().run(
+            AgentRequest(role="plan_reviewer", prompt="p", cwd=Path("/w"), timeout_seconds=42)
+        )
 
 
 def test_run_unwraps_claude_result_envelope(monkeypatch):
