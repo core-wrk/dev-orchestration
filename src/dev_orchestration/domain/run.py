@@ -16,6 +16,7 @@ class RoleBinding(BaseModel):
     adapter: str
     model_alias: str | None = None
     reasoning: str | None = None
+    timeout_seconds: int | None = None
     resolved_binary: str | None = None
     resolved_version: str | None = None
 

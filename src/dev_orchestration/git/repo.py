@@ -161,6 +161,10 @@ class GitRepo:
         )
         return proc.returncode == 0
 
+    def is_tracked(self, path: str) -> bool:
+        """Return whether a path is part of the repository index."""
+        return self._path_is_tracked(path)
+
     def ignored_paths(self) -> IgnoredPathInventory:
         """Inventory every currently ignored file and snapshot its contents.
 

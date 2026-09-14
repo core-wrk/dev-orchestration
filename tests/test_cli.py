@@ -3,13 +3,41 @@ import subprocess
 import yaml
 from typer.testing import CliRunner
 
+from dev_orchestration.artifacts.store import RunStore
 from dev_orchestration.cli import app
+from dev_orchestration.domain.enums import ProjectClass, RunState, Tier
+from dev_orchestration.domain.run import RunManifest
 
 
 def test_help_exits_zero():
     result = CliRunner().invoke(app, ["--help"])
     assert result.exit_code == 0
     assert "Usage" in result.stdout
+
+
+def test_cancel_command_moves_a_non_terminal_run_to_cancelled(tmp_path, monkeypatch):
+    _init_git_repo(tmp_path)
+    store = RunStore(tmp_path, "run-1")
+    store.initialize(
+        RunManifest(
+            run_id="run-1",
+            repository="demo",
+            workflow="standard",
+            tier=Tier.STANDARD,
+            project_class=ProjectClass.INTERNAL_UTILITY,
+        )
+    )
+    monkeypatch.chdir(tmp_path)
+
+    result = CliRunner().invoke(app, ["cancel", "run-1", "--reason", "stale request"])
+
+    assert result.exit_code == 0, result.output
+    manifest = store.read_manifest()
+    assert manifest.status is RunState.CANCELLED
+    assert manifest.terminal_reason == "stale request"
+    events = store.root.joinpath("events.jsonl").read_text()
+    assert "run_cancel_requested" in events
+    assert '"to": "CANCELLED"' in events
 
 
 def _init_git_repo(root):

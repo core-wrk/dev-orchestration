@@ -26,6 +26,19 @@ class AgentRequest:
     context: ContextPacket | None = None
 
 
+class AgentTimeoutError(RuntimeError):
+    """A provider stage exceeded its configured time budget."""
+
+    def __init__(self, role: str, timeout_seconds: int, provider: str) -> None:
+        super().__init__(
+            f"role {role!r} exceeded its {timeout_seconds}-second timeout "
+            f"while running provider {provider!r}"
+        )
+        self.role = role
+        self.timeout_seconds = timeout_seconds
+        self.provider = provider
+
+
 @dataclass(frozen=True)
 class AgentResult:
     provider: str
@@ -35,6 +48,31 @@ class AgentResult:
     started_at: datetime
     completed_at: datetime
     usage: dict | None = None
+    stderr: str = ""
+
+
+def agent_result_record(result: AgentResult) -> dict:
+    """Return the durable, provider-neutral representation of one result."""
+    return {
+        "provider": result.provider,
+        "model": result.model,
+        "exit_code": result.exit_code,
+        "output": result.output,
+        "stderr": result.stderr,
+        "started_at": result.started_at.isoformat(),
+        "completed_at": result.completed_at.isoformat(),
+        "usage": result.usage,
+    }
+
+
+def provider_failure_reason(role: str, result: AgentResult, *, attempt: int | None = None) -> str:
+    """Describe a failed provider call, retaining the provider's diagnosis."""
+    retry = f" on attempt {attempt}" if attempt is not None else ""
+    stderr = result.stderr.strip() or "(no stderr)"
+    return (
+        f"{role} provider {result.provider!r} exited with {result.exit_code}{retry}; "
+        f"stderr: {stderr}"
+    )
 
 
 @dataclass(frozen=True)

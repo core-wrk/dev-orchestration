@@ -8,6 +8,7 @@ from dev_orchestration.workflow.scope_check import (
     ScopeViolation,
     check_diff_against_fence,
     check_ignored_writes,
+    cleanup_ephemeral_paths,
     enforce_fence,
     enforce_ignored_writes,
 )
@@ -33,6 +34,33 @@ def test_committed_inside_and_outside_paths_are_checked(repo):
     (repo.root / "secrets").mkdir()
     (repo.root / "secrets" / "keys.txt").write_text("token\n")
     assert check_diff_against_fence(repo, base, FENCE) == ["secrets/keys.txt"]
+
+
+def test_unignored_tool_cache_is_allowed_but_other_out_of_scope_write_is_not(repo):
+    base = repo.current_commit()
+    cache_file = repo.root / ".pytest_cache" / "v" / "cache" / "nodeids"
+    cache_file.parent.mkdir(parents=True)
+    cache_file.write_text("cache\n")
+    assert check_diff_against_fence(repo, base, FENCE) == []
+
+    outside = repo.root / "vendor" / "payload.py"
+    outside.parent.mkdir()
+    outside.write_text("application data\n")
+    assert check_diff_against_fence(repo, base, FENCE) == ["vendor/payload.py"]
+
+
+def test_cleanup_removes_unignored_tool_cache_without_touching_other_files(repo):
+    cache_file = repo.root / "src" / "__pycache__" / "module.pyc"
+    cache_file.parent.mkdir()
+    cache_file.write_text("cache\n")
+    outside = repo.root / "vendor" / "payload.py"
+    outside.parent.mkdir()
+    outside.write_text("keep\n")
+
+    cleanup_ephemeral_paths(repo.root)
+
+    assert not cache_file.parent.exists()
+    assert outside.read_text() == "keep\n"
 
 
 @pytest.mark.parametrize("state", ["untracked", "staged", "unstaged"])

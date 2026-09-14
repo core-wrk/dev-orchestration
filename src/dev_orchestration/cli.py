@@ -7,7 +7,7 @@ import yaml
 
 from dev_orchestration import doctor as doctor_module
 from dev_orchestration.adapters.registry import ReadOnlyRoleUnsupportedError, default_registry
-from dev_orchestration.artifacts.store import NoApprovedPlanError
+from dev_orchestration.artifacts.store import NoApprovedPlanError, RunStore
 from dev_orchestration.config.models import DeniedCommandError, GlobalConfig, ProjectConfig
 from dev_orchestration.config.resolver import ProtectedRuleViolation
 from dev_orchestration.context.assembler import ContextContractError
@@ -25,7 +25,7 @@ from dev_orchestration.init_repo import (
 )
 from dev_orchestration.roles.loader import MissingTemplateError
 from dev_orchestration.workflow.bootstrap import BootstrapIntegrityError
-from dev_orchestration.workflow.engine import IllegalTransitionError
+from dev_orchestration.workflow.engine import Engine, IllegalTransitionError
 from dev_orchestration.workflow.invoke import AgentInvocationError, SchemaEscalation
 from dev_orchestration.workflow.reporting import describe_status, list_runs, read_events
 from dev_orchestration.workflow.runner import execute_run
@@ -208,6 +208,28 @@ def status(run_id: str | None = typer.Argument(None, help="Run id to inspect")) 
             (store_root / "manifest.json").read_text(encoding="utf-8")
         )
         typer.echo(describe_status(manifest, read_events(store_root)))
+    except EXPECTED_ERRORS + (NoSuchRunError,) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+
+
+@app.command()
+def cancel(
+    run_id: str = typer.Argument(..., help="Run id to cancel"),
+    reason: str = typer.Option(
+        "operator requested cancellation",
+        "--reason",
+        help="Why the operator is cancelling the run",
+    ),
+) -> None:
+    """Move a non-terminal run to CANCELLED and record the operator's reason."""
+    try:
+        repo = discover_repo(Path.cwd())
+        store = RunStore(repo.root, run_id)
+        if not (store.root / "manifest.json").is_file():
+            raise NoSuchRunError(f"run {run_id!r} does not exist")
+        outcome = Engine(store).cancel(reason)
+        typer.echo(f"{run_id}: {outcome.status}")
     except EXPECTED_ERRORS + (NoSuchRunError,) as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(1) from exc

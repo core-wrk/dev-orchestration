@@ -1,11 +1,19 @@
 """Provider invocation with strict validation and exactly one retry."""
 
+import json
+import re
 from dataclasses import replace
 from pathlib import Path
 
 from pydantic import BaseModel, ValidationError
 
-from dev_orchestration.adapters.base import AgentAdapter, AgentRequest
+from dev_orchestration.adapters.base import (
+    AgentAdapter,
+    AgentRequest,
+    AgentResult,
+    agent_result_record,
+    provider_failure_reason,
+)
 from dev_orchestration.schemas import write_schema
 
 
@@ -34,8 +42,9 @@ def invoke_structured(
     request = replace(request, expected_schema=schema_path)
     result = adapter.run(request)
     if result.exit_code != 0:
+        _persist_provider_failure(schema_dir, request.role, result, attempt=1)
         raise AgentInvocationError(
-            f"{model.__name__} provider {result.provider!r} exited with {result.exit_code}"
+            f"{model.__name__} {provider_failure_reason(request.role, result, attempt=1)}"
         )
     try:
         return _validate(model, result.output)
@@ -47,9 +56,9 @@ def invoke_structured(
         retry = replace(request, prompt=correction, expected_schema=schema_path)
         retry_result = adapter.run(retry)
         if retry_result.exit_code != 0:
+            _persist_provider_failure(schema_dir, request.role, retry_result, attempt=2)
             raise AgentInvocationError(
-                f"{model.__name__} provider {retry_result.provider!r} exited with "
-                f"{retry_result.exit_code} on the bounded retry"
+                f"{model.__name__} {provider_failure_reason(request.role, retry_result, attempt=2)}"
             )
         try:
             return _validate(model, retry_result.output)
@@ -57,3 +66,22 @@ def invoke_structured(
             raise SchemaEscalation(
                 f"{model.__name__} schema not satisfied after one retry: {second_error}"
             ) from second_error
+
+
+def _persist_provider_failure(
+    schema_dir: Path,
+    role: str,
+    result: AgentResult,
+    *,
+    attempt: int,
+) -> None:
+    """Keep failed structured calls diagnosable in the run directory."""
+    artifact_root = schema_dir.parent if schema_dir.name == "schemas" else schema_dir
+    target_dir = artifact_root / "execution"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    safe_role = re.sub(r"[^a-z0-9_-]+", "-", role.lower()).strip("-") or "provider"
+    target = target_dir / f"provider-failure-{safe_role}-attempt-{attempt}.json"
+    target.write_text(
+        json.dumps(agent_result_record(result), indent=2, default=str) + "\n",
+        encoding="utf-8",
+    )

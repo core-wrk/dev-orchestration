@@ -86,6 +86,16 @@ def test_build_request_carries_the_configured_model(registry):
     assert request.role == "implementation_worker"
 
 
+def test_build_request_carries_the_configured_role_timeout():
+    adapter = FakeAdapter()
+    registry = RoleRegistry(
+        roles={"implementation_worker": RoleConfig(adapter="fake", timeout_seconds=7)},
+        adapters={"fake": adapter},
+    )
+    request = registry.build_request("implementation_worker", prompt="build", cwd=Path("/w"))
+    assert request.timeout_seconds == 7
+
+
 def test_review_roles_are_restricted_to_read_only_tools(registry):
     request = registry.build_request("plan_reviewer", prompt="review", cwd=Path("/w"))
     assert request.allowed_tools == ["Read", "Grep", "Glob"]

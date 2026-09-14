@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from dev_orchestration.adapters.base import AdapterStatus, AgentResult
+from dev_orchestration.adapters.base import AdapterStatus, AgentResult, AgentTimeoutError
 from dev_orchestration.adapters.registry import RoleRegistry
 from dev_orchestration.config.models import ProjectConfig, RoleConfig
 from dev_orchestration.context.assembler import ContextContractError
@@ -72,9 +72,16 @@ ROLES = (
 )
 
 
-def registry(adapter):
+def registry(adapter, worker_timeout=None):
     return RoleRegistry(
-        roles={role: RoleConfig(adapter="fake", model="m") for role in ROLES},
+        roles={
+            role: RoleConfig(
+                adapter="fake",
+                model="m",
+                timeout_seconds=worker_timeout if role == "implementation_worker" else None,
+            )
+            for role in ROLES
+        },
         adapters={"fake": adapter},
     )
 
@@ -116,6 +123,13 @@ class NonzeroWorker(Scripted):
                 result.completed_at,
             )
         return result
+
+
+class TimeoutWorker(Scripted):
+    def run(self, request):
+        if request.role == "implementation_worker":
+            raise AgentTimeoutError(request.role, request.timeout_seconds or 0, "fake")
+        return super().run(request)
 
 
 def repo(tmp_path):
@@ -290,6 +304,45 @@ def test_failing_validation_cannot_complete_local(tmp_path):
         next((outcome.store_root / "execution").glob("validation-v1.json")).read_text()
     )
     assert data[0]["exit_code"] == 3
+
+
+def test_unignored_validation_cache_is_cleaned_and_does_not_trip_the_fence(tmp_path):
+    git = repo(tmp_path)
+    config = ProjectConfig.model_validate(
+        CONFIG.model_dump(mode="json")
+        | {
+            "validation": {
+                "unit": {
+                    "command": (
+                        "mkdir -p .pytest_cache/v/cache && "
+                        "printf cache > .pytest_cache/v/cache/nodeids"
+                    ),
+                    "required_for": ["standard"],
+                }
+            }
+        }
+    )
+    outcome = execute_run(
+        git, config, registry(Scripted(script())), "cache safely", tmp_path / "wt", CRITERIA
+    )
+    worktree = tmp_path / "wt" / "demo" / outcome.run_id
+    assert outcome.final_state is RunState.COMPLETE_LOCAL
+    assert not (worktree / ".pytest_cache").exists()
+
+
+def test_role_timeout_ends_run_terminally_with_role_and_limit(tmp_path):
+    git = repo(tmp_path)
+    outcome = execute_run(
+        git,
+        CONFIG,
+        registry(TimeoutWorker(script()), worker_timeout=7),
+        "timeout safely",
+        tmp_path / "wt",
+        CRITERIA,
+    )
+    assert outcome.final_state is RunState.FAILED
+    assert "implementation_worker" in outcome.reason
+    assert "7-second" in outcome.reason
 
 
 @pytest.mark.parametrize("verdict", ["FAIL", "UNKNOWN"])

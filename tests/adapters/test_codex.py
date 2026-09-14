@@ -1,9 +1,10 @@
+import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
-from dev_orchestration.adapters.base import AgentRequest
+from dev_orchestration.adapters.base import AgentRequest, AgentTimeoutError
 from dev_orchestration.adapters.codex import (
     CODEX_BUNDLE_PATH,
     DEFAULT_TIMEOUT_SECONDS,
@@ -131,18 +132,19 @@ class _FakeCompleted:
 
 
 class _FakeProcess:
-    def __init__(self, stdout: str, returncode: int = 0) -> None:
+    def __init__(self, stdout: str, returncode: int = 0, stderr: str = "") -> None:
         self.stdout = stdout
         self.returncode = returncode
+        self.stderr = stderr
 
 
-def _capture_subprocess_run(monkeypatch, *, stdout="", returncode=0):
+def _capture_subprocess_run(monkeypatch, *, stdout="", returncode=0, stderr=""):
     """Monkeypatch subprocess.run inside the codex module and capture the call."""
     calls = []
 
     def fake_run(cmd, **kwargs):
         calls.append((cmd, kwargs))
-        return _FakeProcess(stdout=stdout, returncode=returncode)
+        return _FakeProcess(stdout=stdout, returncode=returncode, stderr=stderr)
 
     monkeypatch.setattr("dev_orchestration.adapters.codex.subprocess.run", fake_run)
     return calls
@@ -192,6 +194,25 @@ def test_run_maps_agent_result_fields_correctly(monkeypatch):
     assert result.started_at.tzinfo is not None
     assert result.completed_at.tzinfo is not None
     assert before <= result.started_at <= result.completed_at <= after
+
+
+def test_run_captures_provider_stderr(monkeypatch):
+    _capture_subprocess_run(monkeypatch, stdout="", returncode=7, stderr="quota exceeded")
+    result = CodexAdapter(binary=Path("/bin/codex")).run(
+        AgentRequest(role="planner", prompt="p", cwd=Path("/w"))
+    )
+    assert result.stderr == "quota exceeded"
+
+
+def test_run_turns_a_timeout_into_a_named_stage_error(monkeypatch):
+    def timeout(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired(cmd="codex", timeout=42)
+
+    monkeypatch.setattr("dev_orchestration.adapters.codex.subprocess.run", timeout)
+    with pytest.raises(AgentTimeoutError, match="planner.*42-second"):
+        CodexAdapter(binary=Path("/bin/codex")).run(
+            AgentRequest(role="planner", prompt="p", cwd=Path("/w"), timeout_seconds=42)
+        )
 
 
 def test_run_falls_back_to_raw_stdout_when_nothing_parses(monkeypatch):

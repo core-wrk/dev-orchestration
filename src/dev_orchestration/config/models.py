@@ -110,6 +110,7 @@ class RoleConfig(BaseModel):
     adapter: str
     model: str | None = None
     reasoning: str | None = None
+    timeout_seconds: int | None = Field(default=None, gt=0)
 
 
 class GlobalConfig(BaseModel):
