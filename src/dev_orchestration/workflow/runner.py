@@ -278,11 +278,12 @@ def _run_validation_stage(
     fence: ScopeFence,
     action,
     validation_root: Path | None = None,
+    link_paths: tuple[str, ...] = (".venv",),
 ):
     """Run validation while ensuring its ignored caches do not become residue."""
     ignored_before = worktree_repo.ignored_paths()
     try:
-        with validation_environment(validation_root, worktree_repo.root):
+        with validation_environment(validation_root, worktree_repo.root, link_paths):
             result = action()
         enforce_fence(worktree_repo, base_commit, fence)
         return result
@@ -547,6 +548,7 @@ def execute_run(
             fence,
             lambda: run_validations(project_config.validation, effective_tier, worktree),
             repo.root,
+            tuple(project_config.validation_links),
         )
         store.write_json_artifact(
             "execution/validation-v1.json", _validation_json(outcomes), immutable=True
@@ -633,6 +635,7 @@ def execute_run(
                 fence,
                 lambda: run_validations(project_config.validation, effective_tier, worktree),
                 repo.root,
+                tuple(project_config.validation_links),
             )
             store.write_json_artifact(
                 f"execution/validation-v{cycle + 1}.json",

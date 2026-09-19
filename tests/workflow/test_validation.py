@@ -95,3 +95,31 @@ def test_validation_environment_preserves_existing_worktree_venv(tmp_path):
         assert not (worktree / ".venv").is_symlink()
 
     assert (worktree / ".venv").is_dir()
+
+
+def test_validation_environment_links_configured_paths_including_nested(tmp_path):
+    base = tmp_path / "base"
+    worktree = tmp_path / "worktree"
+    (base / "node_modules" / "pkg").mkdir(parents=True)
+    (base / "functions" / "node_modules" / "pkg").mkdir(parents=True)
+    (worktree / "functions").mkdir(parents=True)
+
+    link_paths = ("node_modules", "functions/node_modules")
+    with validation_environment(base, worktree, link_paths):
+        assert (worktree / "node_modules").resolve() == (base / "node_modules").resolve()
+        assert (worktree / "functions" / "node_modules").resolve() == (
+            base / "functions" / "node_modules"
+        ).resolve()
+
+    assert not (worktree / "node_modules").exists()
+    assert not (worktree / "functions" / "node_modules").exists()
+
+
+def test_validation_environment_skips_paths_missing_from_base(tmp_path):
+    base = tmp_path / "base"
+    worktree = tmp_path / "worktree"
+    base.mkdir()
+    worktree.mkdir()
+
+    with validation_environment(base, worktree, ("node_modules",)):
+        assert not (worktree / "node_modules").exists()

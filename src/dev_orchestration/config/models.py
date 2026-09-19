@@ -99,6 +99,7 @@ class ProjectConfig(BaseModel):
     profiles: Profiles = Field(default_factory=Profiles)
     scope: Scope = Field(default_factory=Scope)
     validation: dict[str, ValidationCommand] = Field(default_factory=dict)
+    validation_links: list[str] = Field(default_factory=lambda: [".venv"])
     git: GitPolicy = Field(default_factory=GitPolicy)
     context: ContextPolicy = Field(default_factory=ContextPolicy)
     approval: ApprovalPolicy = Field(default_factory=ApprovalPolicy)
