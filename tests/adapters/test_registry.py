@@ -30,18 +30,21 @@ def registry():
 
 
 def test_default_roles_match_the_specification():
-    assert DEFAULT_ROLES["planner"].adapter == "codex"
-    assert DEFAULT_ROLES["planner"].model == "sol"
+    assert DEFAULT_ROLES["implementation_worker"].adapter == "codex"
     assert DEFAULT_ROLES["implementation_worker"].model == "luna"
     assert DEFAULT_ROLES["plan_reviewer"].adapter == "claude"
     assert DEFAULT_ROLES["implementation_reviewer"].adapter == "claude"
-    # verifier is bound to claude, NOT to codex/sol as CONFIGURATION.md section 2
-    # illustrates. It is in READ_ONLY_ROLES, and codex cannot honour a read-only
-    # restriction: build_exec_command ignores allowed_tools and always emits
-    # -s workspace-write. Binding it to codex would give the independent
-    # verifier write access to the worktree it exists to check.
-    assert DEFAULT_ROLES["verifier"].adapter == "claude"
-    assert "verifier" in READ_ONLY_ROLES
+    # classifier, planner, plan_reconciler, and verifier are all bound to
+    # claude, NOT to codex, despite CONFIGURATION.md section 2's illustration.
+    # Each is in READ_ONLY_ROLES: its job is to read the worktree and return
+    # text (a tier, a plan, a review), never to change anything, and codex
+    # cannot honour that restriction -- build_exec_command ignores
+    # allowed_tools and always emits -s workspace-write regardless of role.
+    # Binding any of them to codex would give it real write access to the
+    # worktree it is only supposed to be reading.
+    for role in ("classifier", "planner", "plan_reconciler", "verifier"):
+        assert DEFAULT_ROLES[role].adapter == "claude", role
+        assert role in READ_ONLY_ROLES
 
 
 def test_a_read_only_role_cannot_be_bound_to_an_adapter_that_ignores_the_restriction():
@@ -117,12 +120,12 @@ def test_verifier_role_is_restricted_to_read_only_tools(registry):
 
 
 def test_adapter_for_returns_the_adapter_bound_to_the_role(registry):
-    assert registry.adapter_for("planner") is registry.adapters["codex"]
+    assert registry.adapter_for("implementation_worker") is registry.adapters["codex"]
     assert registry.adapter_for("plan_reviewer") is registry.adapters["claude"]
 
 
 def test_build_request_carries_reasoning_from_the_binding(registry):
-    request = registry.build_request("planner", prompt="plan", cwd=Path("/w"))
+    request = registry.build_request("implementation_worker", prompt="plan", cwd=Path("/w"))
     assert request.reasoning == "high"
 
 
@@ -150,7 +153,7 @@ def test_project_roles_override_global_which_override_framework_defaults():
     assert registry.binding_for("planner").adapter == "claude"
     assert registry.binding_for("planner").model == "opus"
     assert registry.binding_for("classifier").adapter == "claude"
-    assert registry.binding_for("plan_reconciler").adapter == "codex"
+    assert registry.binding_for("plan_reconciler").adapter == "claude"
 
 
 def test_default_registry_without_configuration_uses_framework_defaults():

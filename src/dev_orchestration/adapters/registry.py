@@ -10,33 +10,43 @@ from dev_orchestration.adapters.claude import READ_ONLY_TOOLS, ClaudeAdapter
 from dev_orchestration.adapters.codex import CodexAdapter, discover_codex
 from dev_orchestration.config.models import GlobalConfig, ProjectConfig, RoleConfig
 
-READ_ONLY_ROLES = frozenset({"classifier", "plan_reviewer", "implementation_reviewer", "verifier"})
+# classifier, planner, and plan_reconciler all share one shape: their own role
+# prompt says outright not to implement anything, and their stage function
+# (workflow/stages.py) only ever consumes the model's text response --
+# nothing about them expects, or even looks at, a changed worktree file.
+# codex cannot be trusted to honour that prompt-level instruction once it has
+# write tools: build_exec_command always emits -s workspace-write regardless
+# of role, and observed in practice, a long, precise request (the kind a real
+# feature brief looks like) is enough for a "just classify this" or "just
+# draft a plan" call to start actually implementing the change instead --
+# reading the repo's generated types, editing source files, same as
+# implementation_worker would. That is unbounded work with no relation to the
+# role's actual job, so all three are read-only roles (below) bound to claude,
+# the same way plan_reviewer, implementation_reviewer, and verifier already
+# are: --allowedTools is a restriction the CLI enforces, not just a prompt
+# request. implementation_worker is the one role that legitimately writes
+# code, so it is the only one still on codex with full workspace-write.
+READ_ONLY_ROLES = frozenset(
+    {
+        "classifier",
+        "planner",
+        "plan_reviewer",
+        "plan_reconciler",
+        "implementation_reviewer",
+        "verifier",
+    }
+)
 
 DEFAULT_ROLES: dict[str, RoleConfig] = {
-    # Classification is supposed to be a bounded read of the request text
-    # into a tier -- the classifier.md role prompt says outright "Do not
-    # plan, implement, review, or verify the change". codex cannot be
-    # trusted to honour that: build_exec_command always emits
-    # -s workspace-write regardless of role, and observed in practice, a
-    # long, precise request (the kind a real feature brief looks like) is
-    # enough for it to start actually implementing the change instead of
-    # just classifying it -- reading the repo's generated types, editing
-    # source files, same as implementation_worker would. That is unbounded
-    # work with no relation to picking a tier, so classifier is bound to
-    # claude (via READ_ONLY_ROLES above) the same way plan_reviewer,
-    # implementation_reviewer, and verifier already are below: --allowedTools
-    # is a real restriction the CLI enforces, not just a prompt request. The
-    # 600s timeout stays as a second, cheap line of defense.
+    # The 600s timeout is a second, cheap line of defense on top of the
+    # allowedTools restriction: classification in particular should never
+    # need anywhere near that long.
     "classifier": RoleConfig(adapter="claude", model="opus", timeout_seconds=600),
-    "planner": RoleConfig(adapter="codex", model="sol", reasoning="high"),
+    "planner": RoleConfig(adapter="claude", model="opus"),
     "plan_reviewer": RoleConfig(adapter="claude", model="opus"),
-    "plan_reconciler": RoleConfig(adapter="codex", model="sol", reasoning="high"),
+    "plan_reconciler": RoleConfig(adapter="claude", model="opus"),
     "implementation_worker": RoleConfig(adapter="codex", model="luna", reasoning="high"),
     "implementation_reviewer": RoleConfig(adapter="claude", model="opus"),
-    # verifier is in READ_ONLY_ROLES, so it must be bound to an adapter that
-    # supports read_only_review. codex does not: build_exec_command ignores
-    # allowed_tools and always emits -s workspace-write, which would silently
-    # give the independent verifier write access to the run worktree.
     "verifier": RoleConfig(adapter="claude", model="opus"),
 }
 
