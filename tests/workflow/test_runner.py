@@ -452,7 +452,57 @@ def test_success_and_escalation_leave_complete_audit_artifacts(tmp_path):
     assert [event["event"] for event in events(escalated)][-1] in {
         "state_changed",
         "run_terminal",
+        "worktree_cleanup_skipped",
+        "worktree_cleanup_failed",
+        "worktree_removed",
     }
+
+
+def test_escalation_with_a_clean_worktree_removes_it(tmp_path):
+    git = repo(tmp_path)
+    outcome = execute_run(
+        git,
+        CONFIG,
+        registry(NoOpWorker(script(review=dict(PASS, outcome="ESCALATE")))),
+        "escalate before writing anything",
+        tmp_path / "wt",
+        CRITERIA,
+    )
+    assert outcome.final_state is RunState.ESCALATED
+    worktree = tmp_path / "wt" / "demo" / outcome.run_id
+    assert not worktree.exists()
+    assert any(event["event"] == "worktree_removed" for event in events(outcome))
+
+
+def test_escalation_with_a_dirty_worktree_leaves_it_for_manual_review(tmp_path):
+    git = repo(tmp_path)
+    outcome = execute_run(
+        git,
+        CONFIG,
+        registry(Scripted(script(review=dict(PASS, outcome="ESCALATE")))),
+        "escalate after writing something",
+        tmp_path / "wt",
+        CRITERIA,
+    )
+    assert outcome.final_state is RunState.ESCALATED
+    worktree = tmp_path / "wt" / "demo" / outcome.run_id
+    assert worktree.exists()
+    assert (worktree / "src" / "app.py").read_text() == "x = 2\n"
+    assert any(event["event"] == "worktree_cleanup_skipped" for event in events(outcome))
+
+
+def test_completed_run_keeps_its_worktree_for_human_review(tmp_path):
+    git = repo(tmp_path)
+    outcome = execute_run(
+        git, CONFIG, registry(Scripted(script(tier="trivial"))), "fix", tmp_path / "wt", CRITERIA
+    )
+    assert outcome.final_state is RunState.COMPLETE_LOCAL
+    worktree = tmp_path / "wt" / "demo" / outcome.run_id
+    assert worktree.exists()
+    assert not any(
+        event["event"].startswith("worktree_cleanup") or event["event"] == "worktree_removed"
+        for event in events(outcome)
+    )
 
 
 def test_external_plan_is_imported_hashed_and_planner_is_skipped(tmp_path):

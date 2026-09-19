@@ -18,6 +18,7 @@ from dev_orchestration.git.repo import (
     GitCommandError,
     discover_repo,
 )
+from dev_orchestration.git.worktree import worktree_path
 from dev_orchestration.init_repo import (
     FileExistsRefusal,
     UncommittedContractFileError,
@@ -28,7 +29,7 @@ from dev_orchestration.workflow.bootstrap import BootstrapIntegrityError
 from dev_orchestration.workflow.engine import Engine, IllegalTransitionError
 from dev_orchestration.workflow.invoke import AgentInvocationError, SchemaEscalation
 from dev_orchestration.workflow.reporting import describe_status, list_runs, read_events
-from dev_orchestration.workflow.runner import execute_run
+from dev_orchestration.workflow.runner import cleanup_worktree_if_unproductive, execute_run
 from dev_orchestration.workflow.scope_check import ScopeViolation
 from dev_orchestration.workflow.stages import RemediationExhausted
 from dev_orchestration.workflow.tiers import TierDowngradeError, UnsupportedTierError
@@ -228,7 +229,16 @@ def cancel(
         store = RunStore(repo.root, run_id)
         if not (store.root / "manifest.json").is_file():
             raise NoSuchRunError(f"run {run_id!r} does not exist")
-        outcome = Engine(store).cancel(reason)
+        engine = Engine(store)
+        outcome = engine.cancel(reason)
+        try:
+            config = _project_config(repo)
+            worktree_root = Path(_global_config().worktree_root).expanduser()
+            worktree = worktree_path(worktree_root, config.project.name, run_id)
+        except GitCommandError:
+            pass  # no project.yaml (yet, or ever) -- cancellation itself still stands
+        else:
+            cleanup_worktree_if_unproductive(engine, repo, worktree)
         typer.echo(f"{run_id}: {outcome.status}")
     except EXPECTED_ERRORS + (NoSuchRunError,) as exc:
         typer.echo(str(exc), err=True)

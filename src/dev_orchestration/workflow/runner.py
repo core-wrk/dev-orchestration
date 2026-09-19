@@ -15,7 +15,8 @@ from dev_orchestration.context.packet import ContextRef
 from dev_orchestration.domain.enums import Outcome, RunState, Tier
 from dev_orchestration.domain.findings import Verification
 from dev_orchestration.domain.run import GitBlock, RoleBinding
-from dev_orchestration.git.repo import EmptySnapshotError, GitRepo
+from dev_orchestration.git.repo import EmptySnapshotError, GitCommandError, GitRepo
+from dev_orchestration.git.worktree import remove_worktree
 from dev_orchestration.scope import ScopeFence
 from dev_orchestration.workflow.bootstrap import (
     bootstrap_run,
@@ -198,11 +199,54 @@ def _terminal(
         engine.transition(state)
 
 
+# COMPLETE_LOCAL is deliberately excluded from cleanup: that worktree and its
+# branch are the run's deliverable, left for a human to review, diff, and
+# merge by hand. Only the terminal states that produced nothing worth keeping
+# checked out are swept.
+_UNPRODUCTIVE_TERMINAL_STATES = frozenset({RunState.FAILED, RunState.ESCALATED, RunState.CANCELLED})
+
+
+def cleanup_worktree_if_unproductive(engine: Engine, repo: GitRepo, worktree: Path) -> None:
+    """Remove a run's worktree once nothing further can happen in it.
+
+    Left in place, unproductive worktrees accumulate indefinitely (nothing
+    else ever removes them) and each one adds objects to the shared git
+    database. A large backlog of unreachable objects has been observed to
+    make plain `git` calls -- including ones agents run unprompted while
+    exploring a repo -- slow enough to blow through provider timeouts.
+    A worktree with uncommitted changes is left alone and merely noted:
+    dev-orch never modifies or discards uncommitted work (see
+    GitRepo.ensure_clean), and an unproductive run can still have left real,
+    unfinished output behind for a human to recover by hand.
+    """
+    if engine.state not in _UNPRODUCTIVE_TERMINAL_STATES or not worktree.exists():
+        return
+    if GitRepo(worktree).status_paths():
+        engine.store.append_event(
+            {
+                "event": "worktree_cleanup_skipped",
+                "detail": f"{worktree} has uncommitted changes; left in place for manual review",
+            }
+        )
+        return
+    try:
+        remove_worktree(repo, worktree)
+    except GitCommandError as exc:
+        engine.store.append_event({"event": "worktree_cleanup_failed", "detail": str(exc)})
+        return
+    engine.store.append_event({"event": "worktree_removed", "path": str(worktree)})
+
+
 def _outcome(
     engine: Engine,
     verification: Verification | None = None,
     reason: str | None = None,
+    *,
+    repo: GitRepo | None = None,
+    worktree: Path | None = None,
 ) -> RunOutcome:
+    if repo is not None and worktree is not None:
+        cleanup_worktree_if_unproductive(engine, repo, worktree)
     manifest = engine.store.read_manifest()
     return RunOutcome(
         run_id=manifest.run_id,
@@ -323,7 +367,7 @@ def execute_run(
     base_commit = store.read_manifest().git.base_commit
     if base_commit is None:
         _terminal(engine, RunState.FAILED, "bootstrap did not record a base commit")
-        return _outcome(engine)
+        return _outcome(engine, repo=repo, worktree=worktree)
     worktree_repo = GitRepo(worktree)
     store.update_manifest(
         acceptance_criteria=acceptance_criteria,
@@ -461,7 +505,7 @@ def execute_run(
                         else RunState.ESCALATED
                     )
                     _terminal(engine, target, "plan review: " + str(plan_review.outcome))
-                    return _outcome(engine)
+                    return _outcome(engine, repo=repo, worktree=worktree)
                 reconciliation_cycles += 1
                 if reconciliation_cycles > MAX_REMEDIATION_CYCLES:
                     raise RemediationExhausted(
@@ -486,7 +530,7 @@ def execute_run(
                     else RunState.ESCALATED
                 )
                 _terminal(engine, target, "plan review: " + str(plan_review.outcome))
-                return _outcome(engine)
+                return _outcome(engine, repo=repo, worktree=worktree)
             store.approve_plan(version)
             engine.transition(RunState.PLAN_FINALIZED)
             approved = store.approved_plan()
@@ -522,7 +566,12 @@ def execute_run(
                 }
             )
             engine.transition(RunState.AWAITING_APPROVAL)
-            return _outcome(engine, reason="human approval required before execution")
+            return _outcome(
+                engine,
+                reason="human approval required before execution",
+                repo=repo,
+                worktree=worktree,
+            )
 
         engine.transition(RunState.EXECUTING)
         _run_worktree_stage(
@@ -568,7 +617,7 @@ def execute_run(
         )
         if not all_passed(outcomes):
             _terminal(engine, RunState.FAILED, "required validation failed")
-            return _outcome(engine)
+            return _outcome(engine, repo=repo, worktree=worktree)
 
         diff = worktree_repo.change_diff(base_commit)
         review_inventory = worktree_repo.change_inventory(base_commit)
@@ -606,7 +655,7 @@ def execute_run(
                 _terminal(
                     engine, target, "implementation review: " + str(implementation_review.outcome)
                 )
-                return _outcome(engine)
+                return _outcome(engine, repo=repo, worktree=worktree)
             engine.transition(RunState.REMEDIATION)
             blocking = [
                 finding
@@ -652,7 +701,7 @@ def execute_run(
             )
             if not all_passed(outcomes):
                 _terminal(engine, RunState.FAILED, "required validation failed after remediation")
-                return _outcome(engine)
+                return _outcome(engine, repo=repo, worktree=worktree)
             diff = worktree_repo.change_diff(base_commit)
             review_inventory = worktree_repo.change_inventory(base_commit)
             engine.transition(RunState.IMPLEMENTATION_REVIEW)
@@ -682,7 +731,7 @@ def execute_run(
             _terminal(
                 engine, target, "implementation review: " + str(implementation_review.outcome)
             )
-            return _outcome(engine)
+            return _outcome(engine, repo=repo, worktree=worktree)
 
         engine.transition(RunState.FINAL_VERIFICATION)
         verification = verify(
@@ -722,13 +771,13 @@ def execute_run(
                 RunState.FAILED,
                 "final verification did not provide an unqualified PASS for the supplied criteria",
             )
-            return _outcome(engine, verification)
+            return _outcome(engine, verification, repo=repo, worktree=worktree)
 
         enforce_fence(worktree_repo, base_commit, fence)
         changed = worktree_repo.change_inventory(base_commit)
         if not changed:
             _terminal(engine, RunState.FAILED, "the run produced no change to commit")
-            return _outcome(engine, verification)
+            return _outcome(engine, verification, repo=repo, worktree=worktree)
         final_commit = worktree_repo.commit_snapshot(
             f"ai({store.run_id}): complete orchestrated run", changed
         )
@@ -750,7 +799,7 @@ def execute_run(
             {"changed_files": changed, "base_commit": base_commit, "final_commit": final_commit},
         )
         engine.transition(RunState.COMPLETE_LOCAL)
-        return _outcome(engine, verification)
+        return _outcome(engine, verification, repo=repo, worktree=worktree)
 
     except (
         RemediationExhausted,
@@ -763,19 +812,19 @@ def execute_run(
         ReadOnlyRoleUnsupportedError,
     ) as exc:
         _terminal(engine, RunState.ESCALATED, str(exc))
-        return _outcome(engine)
+        return _outcome(engine, repo=repo, worktree=worktree)
     except (IllegalTransitionError, UnsupportedTierError, TierDowngradeError) as exc:
         _terminal(engine, RunState.ESCALATED, str(exc))
-        return _outcome(engine)
+        return _outcome(engine, repo=repo, worktree=worktree)
     except AgentTimeoutError as exc:
         _terminal(engine, RunState.FAILED, str(exc))
-        return _outcome(engine)
+        return _outcome(engine, repo=repo, worktree=worktree)
     except (OSError, subprocess.SubprocessError) as exc:
         _terminal(engine, RunState.ESCALATED, f"provider invocation failed: {exc}")
-        return _outcome(engine)
+        return _outcome(engine, repo=repo, worktree=worktree)
     except Exception as exc:  # noqa: BLE001 - guarantee a durable terminal state
         _terminal(engine, RunState.FAILED, f"unexpected workflow failure: {exc}")
-        return _outcome(engine)
+        return _outcome(engine, repo=repo, worktree=worktree)
 
 
 def _normalize_criteria(criteria: list[str]) -> list[str]:

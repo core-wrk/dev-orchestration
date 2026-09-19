@@ -13,7 +13,15 @@ from dev_orchestration.config.models import GlobalConfig, ProjectConfig, RoleCon
 READ_ONLY_ROLES = frozenset({"plan_reviewer", "implementation_reviewer", "verifier"})
 
 DEFAULT_ROLES: dict[str, RoleConfig] = {
-    "classifier": RoleConfig(adapter="codex", model="luna", reasoning="medium"),
+    # Classification is a bounded read of the request text into a tier, not
+    # open-ended work -- it should never need anywhere near the 3600s default
+    # every other codex role gets. A tight timeout here is a second, cheap
+    # line of defense: if a classifier call ever runs away (e.g. exploring
+    # the repo's git history instead of just classifying), it fails in
+    # minutes instead of silently consuming an hour per attempt.
+    "classifier": RoleConfig(
+        adapter="codex", model="luna", reasoning="medium", timeout_seconds=600
+    ),
     "planner": RoleConfig(adapter="codex", model="sol", reasoning="high"),
     "plan_reviewer": RoleConfig(adapter="claude", model="opus"),
     "plan_reconciler": RoleConfig(adapter="codex", model="sol", reasoning="high"),
