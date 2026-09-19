@@ -10,18 +10,24 @@ from dev_orchestration.adapters.claude import READ_ONLY_TOOLS, ClaudeAdapter
 from dev_orchestration.adapters.codex import CodexAdapter, discover_codex
 from dev_orchestration.config.models import GlobalConfig, ProjectConfig, RoleConfig
 
-READ_ONLY_ROLES = frozenset({"plan_reviewer", "implementation_reviewer", "verifier"})
+READ_ONLY_ROLES = frozenset({"classifier", "plan_reviewer", "implementation_reviewer", "verifier"})
 
 DEFAULT_ROLES: dict[str, RoleConfig] = {
-    # Classification is a bounded read of the request text into a tier, not
-    # open-ended work -- it should never need anywhere near the 3600s default
-    # every other codex role gets. A tight timeout here is a second, cheap
-    # line of defense: if a classifier call ever runs away (e.g. exploring
-    # the repo's git history instead of just classifying), it fails in
-    # minutes instead of silently consuming an hour per attempt.
-    "classifier": RoleConfig(
-        adapter="codex", model="luna", reasoning="medium", timeout_seconds=600
-    ),
+    # Classification is supposed to be a bounded read of the request text
+    # into a tier -- the classifier.md role prompt says outright "Do not
+    # plan, implement, review, or verify the change". codex cannot be
+    # trusted to honour that: build_exec_command always emits
+    # -s workspace-write regardless of role, and observed in practice, a
+    # long, precise request (the kind a real feature brief looks like) is
+    # enough for it to start actually implementing the change instead of
+    # just classifying it -- reading the repo's generated types, editing
+    # source files, same as implementation_worker would. That is unbounded
+    # work with no relation to picking a tier, so classifier is bound to
+    # claude (via READ_ONLY_ROLES above) the same way plan_reviewer,
+    # implementation_reviewer, and verifier already are below: --allowedTools
+    # is a real restriction the CLI enforces, not just a prompt request. The
+    # 600s timeout stays as a second, cheap line of defense.
+    "classifier": RoleConfig(adapter="claude", model="opus", timeout_seconds=600),
     "planner": RoleConfig(adapter="codex", model="sol", reasoning="high"),
     "plan_reviewer": RoleConfig(adapter="claude", model="opus"),
     "plan_reconciler": RoleConfig(adapter="codex", model="sol", reasoning="high"),
