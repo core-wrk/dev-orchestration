@@ -43,13 +43,13 @@ def test_unknown_stage_fails_closed():
         assemble("not_a_stage", [])
 
 
-def test_read_reference_refuses_a_path_outside_the_fence(tmp_path):
+def test_read_reference_allows_a_declared_path_outside_the_write_fence(tmp_path):
     (tmp_path / "secrets").mkdir()
     (tmp_path / "secrets" / "keys.txt").write_text("token")
-    with pytest.raises(ContextContractError):
-        read_reference(
-            tmp_path, "secrets/keys.txt", ScopeFence(include=["**"], exclude=["secrets"])
-        )
+    item = read_reference(
+        tmp_path, "secrets/keys.txt", ScopeFence(include=["**"], exclude=["secrets"])
+    )
+    assert item.content == "token"
 
 
 def test_read_reference_reads_a_path_inside_the_fence(tmp_path):
@@ -60,18 +60,21 @@ def test_read_reference_reads_a_path_inside_the_fence(tmp_path):
     assert "print('hi')" in item.content
 
 
-def test_reference_symlinks_cannot_escape_root_or_fence(tmp_path):
+def test_reference_symlinks_cannot_escape_the_repository_root(tmp_path):
     outside = tmp_path.parent / f"{tmp_path.name}-outside.txt"
     outside.write_text("secret")
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "outside.txt").symlink_to(outside)
     (tmp_path / "src" / "excluded.txt").write_text("secret")
     (tmp_path / "src" / "link-to-excluded.txt").symlink_to(tmp_path / "src" / "excluded.txt")
-    fence = ScopeFence(include=["src/"], exclude=["src/excluded.txt"])
     with pytest.raises(ContextContractError):
         read_reference(tmp_path, "src/outside.txt", ScopeFence(include=["**"], exclude=[]))
-    with pytest.raises(ContextContractError):
-        read_reference(tmp_path, "src/link-to-excluded.txt", fence)
+    item = read_reference(
+        tmp_path,
+        "src/link-to-excluded.txt",
+        ScopeFence(include=["src/"], exclude=["src/excluded.txt"]),
+    )
+    assert item.content == "secret"
     outside.unlink()
 
 

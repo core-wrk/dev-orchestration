@@ -45,7 +45,9 @@ DEFAULT_ROLES: dict[str, RoleConfig] = {
     "planner": RoleConfig(adapter="claude", model="opus"),
     "plan_reviewer": RoleConfig(adapter="claude", model="opus"),
     "plan_reconciler": RoleConfig(adapter="claude", model="opus"),
-    "implementation_worker": RoleConfig(adapter="codex", model="luna", reasoning="high"),
+    "implementation_worker": RoleConfig(
+        adapter="codex", model="luna", reasoning="high", timeout_seconds=1800
+    ),
     "implementation_reviewer": RoleConfig(adapter="claude", model="opus"),
     "verifier": RoleConfig(adapter="claude", model="opus"),
 }

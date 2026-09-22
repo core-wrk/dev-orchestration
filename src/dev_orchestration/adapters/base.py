@@ -4,6 +4,7 @@ Workflow code invokes roles through this protocol and never sees provider
 command syntax. Adding a provider means adding an adapter, nothing else.
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -24,6 +25,8 @@ class AgentRequest:
     expected_schema: Path | None = None
     timeout_seconds: int | None = None
     context: ContextPacket | None = None
+    on_process_started: Callable[[int], None] | None = None
+    on_process_finished: Callable[[], None] | None = None
 
 
 class AgentTimeoutError(RuntimeError):

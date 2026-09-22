@@ -230,6 +230,7 @@ def cancel(
         if not (store.root / "manifest.json").is_file():
             raise NoSuchRunError(f"run {run_id!r} does not exist")
         engine = Engine(store)
+        provider_stopped = store.stop_active_provider()
         outcome = engine.cancel(reason)
         try:
             config = _project_config(repo)
@@ -239,7 +240,8 @@ def cancel(
             pass  # no project.yaml (yet, or ever) -- cancellation itself still stands
         else:
             cleanup_worktree_if_unproductive(engine, repo, worktree)
-        typer.echo(f"{run_id}: {outcome.status}")
+        suffix = " (active provider terminated)" if provider_stopped else ""
+        typer.echo(f"{run_id}: {outcome.status}{suffix}")
     except EXPECTED_ERRORS + (NoSuchRunError,) as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(1) from exc

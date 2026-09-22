@@ -188,11 +188,13 @@ def assemble(stage: str, offered: list[ContextRef]) -> ContextPacket:
 
 
 def read_reference(repo_root: Path, rel_path: str, fence: ScopeFence) -> ContextRef:
-    """Read only a regular file whose resolved path stays inside the fence."""
-    if not fence.allows(rel_path):
-        raise ContextContractError(
-            f"{rel_path} is outside the scope fence and must not enter a prompt"
-        )
+    """Read a declared regular file that resolves inside the repository.
+
+    The scope fence limits writes, not declared prompt sources. A project may
+    exclude its instruction files from modification while still requiring them
+    in every agent prompt.
+    """
+    del fence
     root = repo_root.resolve()
     target = (repo_root / rel_path).resolve()
     try:
@@ -203,11 +205,6 @@ def read_reference(repo_root: Path, rel_path: str, fence: ScopeFence) -> Context
         ) from exc
     if not target.is_file():
         raise ContextContractError(f"{rel_path} is not a readable file")
-    resolved_rel = target.relative_to(root).as_posix()
-    if not fence.allows(resolved_rel):
-        raise ContextContractError(
-            f"{rel_path} resolves to excluded path {resolved_rel} and must not enter a prompt"
-        )
     try:
         content = target.read_text(encoding="utf-8")
     except OSError as exc:

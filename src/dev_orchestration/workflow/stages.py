@@ -27,7 +27,14 @@ from dev_orchestration.workflow.invoke import AgentInvocationError, invoke_struc
 
 
 def _request(registry: RoleRegistry, role: str, store: RunStore, packet, cwd: Path):
-    return registry.build_request(role, prompt=load_role_prompt(role), cwd=cwd, context=packet)
+    return registry.build_request(
+        role,
+        prompt=load_role_prompt(role),
+        cwd=cwd,
+        context=packet,
+        on_process_started=lambda pid: store.record_active_provider(role, "codex", pid),
+        on_process_finished=store.clear_active_provider,
+    )
 
 
 def _raw_text(output: dict | str) -> str:

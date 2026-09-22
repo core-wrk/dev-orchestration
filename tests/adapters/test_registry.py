@@ -32,6 +32,7 @@ def registry():
 def test_default_roles_match_the_specification():
     assert DEFAULT_ROLES["implementation_worker"].adapter == "codex"
     assert DEFAULT_ROLES["implementation_worker"].model == "luna"
+    assert DEFAULT_ROLES["implementation_worker"].timeout_seconds == 1800
     assert DEFAULT_ROLES["plan_reviewer"].adapter == "claude"
     assert DEFAULT_ROLES["implementation_reviewer"].adapter == "claude"
     # classifier, planner, plan_reconciler, and verifier are all bound to

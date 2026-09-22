@@ -6,7 +6,10 @@ explain. Plan versions are immutable once written.
 
 import hashlib
 import json
+import os
 import re
+import signal
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -179,3 +182,54 @@ class RunStore:
 
     def append_event(self, event: dict) -> None:
         append_event(self.root / "events.jsonl", event)
+
+    @property
+    def active_provider_path(self) -> Path:
+        return self.root / "execution" / "active-provider.json"
+
+    def record_active_provider(self, role: str, provider: str, pid: int) -> None:
+        """Record a provider PID so a separate `cancel` command can stop it."""
+        value = {
+            "role": role,
+            "provider": provider,
+            "pid": pid,
+            "process_group": pid,
+            "started_at": datetime.now(UTC).isoformat(),
+        }
+        self.write_json_artifact("execution/active-provider.json", value)
+        self.append_event({"event": "provider_started", **value})
+
+    def clear_active_provider(self) -> None:
+        if self.active_provider_path.exists():
+            self.active_provider_path.unlink()
+
+    def stop_active_provider(self) -> bool:
+        """Best-effort termination of the recorded provider process group."""
+        if not self.active_provider_path.is_file():
+            return False
+        value = json.loads(self.active_provider_path.read_text(encoding="utf-8"))
+        pid = value.get("pid")
+        pgid = value.get("process_group")
+        if not isinstance(pid, int) or not isinstance(pgid, int):
+            self.clear_active_provider()
+            return False
+        try:
+            if os.getpgid(pid) != pgid:
+                self.clear_active_provider()
+                return False
+            os.killpg(pgid, signal.SIGTERM)
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.1)
+            else:
+                os.killpg(pgid, signal.SIGKILL)
+            self.append_event({"event": "provider_cancelled", "pid": pid, "process_group": pgid})
+            return True
+        except ProcessLookupError:
+            return False
+        finally:
+            self.clear_active_provider()

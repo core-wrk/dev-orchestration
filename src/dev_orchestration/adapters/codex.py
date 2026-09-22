@@ -7,8 +7,10 @@ assumed.
 """
 
 import json
+import os
 import re
 import shutil
+import signal
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
@@ -25,7 +27,7 @@ CODEX_BUNDLE_PATH = Path("/Applications/ChatGPT.app/Contents/Resources/codex")
 
 MODEL_ALIASES = {"sol": "gpt-5.6-sol", "luna": "gpt-5.6-luna"}
 
-DEFAULT_TIMEOUT_SECONDS = 3600
+DEFAULT_TIMEOUT_SECONDS = 1800
 
 
 def parse_version(text: str) -> str | None:
@@ -118,6 +120,7 @@ class CodexAdapter:
             str(self.binary),
             "exec",
             "--json",
+            "--ignore-user-config",
             "-C",
             str(request.cwd),
             "-s",
@@ -135,28 +138,47 @@ class CodexAdapter:
     def run(self, request: AgentRequest) -> AgentResult:
         started = datetime.now(UTC)
         timeout = request.timeout_seconds or DEFAULT_TIMEOUT_SECONDS
+        proc = subprocess.Popen(
+            self.build_exec_command(request),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=request.cwd,
+            start_new_session=True,
+        )
+        if request.on_process_started is not None:
+            request.on_process_started(proc.pid)
         try:
-            proc = subprocess.run(
-                self.build_exec_command(request),
-                capture_output=True,
-                text=True,
-                cwd=request.cwd,
-                timeout=timeout,
-                check=False,
-            )
+            stdout, stderr = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired as exc:
+            _terminate_process_group(proc)
             raise AgentTimeoutError(request.role, timeout, self.name) from exc
+        finally:
+            if request.on_process_finished is not None:
+                request.on_process_finished()
         return AgentResult(
             provider=self.name,
             model=MODEL_ALIASES.get(request.model_alias or "", request.model_alias),
             exit_code=proc.returncode,
-            output=_last_json_object(proc.stdout)
-            or _last_agent_message(proc.stdout)
-            or proc.stdout,
+            output=_last_json_object(stdout) or _last_agent_message(stdout) or stdout,
             started_at=started,
             completed_at=datetime.now(UTC),
-            stderr=getattr(proc, "stderr", "") or "",
+            stderr=stderr or "",
         )
+
+
+def _terminate_process_group(proc: subprocess.Popen) -> None:
+    """Stop Codex and every MCP child it spawned after a timeout."""
+    if proc.poll() is not None:
+        return
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait()
+    except ProcessLookupError:
+        pass
 
 
 def _last_json_object(stdout: str) -> dict | None:

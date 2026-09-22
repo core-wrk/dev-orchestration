@@ -40,6 +40,31 @@ def test_cancel_command_moves_a_non_terminal_run_to_cancelled(tmp_path, monkeypa
     assert '"to": "CANCELLED"' in events
 
 
+def test_cancel_command_terminates_a_recorded_provider(tmp_path, monkeypatch):
+    _init_git_repo(tmp_path)
+    store = RunStore(tmp_path, "run-1")
+    store.initialize(
+        RunManifest(
+            run_id="run-1",
+            repository="demo",
+            workflow="standard",
+            tier=Tier.STANDARD,
+            project_class=ProjectClass.INTERNAL_UTILITY,
+        )
+    )
+    stopped = []
+    monkeypatch.setattr(
+        RunStore, "stop_active_provider", lambda _self: stopped.append(True) or True
+    )
+    monkeypatch.chdir(tmp_path)
+
+    result = CliRunner().invoke(app, ["cancel", "run-1"])
+
+    assert result.exit_code == 0, result.output
+    assert stopped == [True]
+    assert "active provider terminated" in result.output
+
+
 def _init_git_repo(root):
     subprocess.run(["git", "init", "-q", str(root)], check=True)
     subprocess.run(["git", "-C", str(root), "config", "user.email", "t@t.t"], check=True)

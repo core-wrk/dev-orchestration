@@ -7,7 +7,6 @@ import pytest
 from dev_orchestration.adapters.base import AgentRequest, AgentTimeoutError
 from dev_orchestration.adapters.codex import (
     CODEX_BUNDLE_PATH,
-    DEFAULT_TIMEOUT_SECONDS,
     CodexAdapter,
     _last_json_object,
     discover_codex,
@@ -63,6 +62,7 @@ def test_exec_command_uses_verified_flags():
     cmd = adapter.build_exec_command(request)
     assert cmd[:2] == ["/bin/codex", "exec"]
     assert "--json" in cmd
+    assert "--ignore-user-config" in cmd
     assert cmd[cmd.index("-C") + 1] == "/work"
     assert cmd[cmd.index("-s") + 1] == "workspace-write"
     assert cmd[cmd.index("-m") + 1] == "gpt-5.6-sol"
@@ -138,15 +138,32 @@ class _FakeProcess:
         self.stderr = stderr
 
 
+class _FakePopen:
+    def __init__(self, stdout: str, returncode: int = 0, stderr: str = "") -> None:
+        self.pid = 1234
+        self.returncode = returncode
+        self._stdout = stdout
+        self._stderr = stderr
+
+    def communicate(self, *, timeout: int):
+        return self._stdout, self._stderr
+
+    def poll(self):
+        return self.returncode
+
+    def wait(self, *, timeout: int | None = None):
+        return self.returncode
+
+
 def _capture_subprocess_run(monkeypatch, *, stdout="", returncode=0, stderr=""):
-    """Monkeypatch subprocess.run inside the codex module and capture the call."""
+    """Monkeypatch provider startup and capture its Popen arguments."""
     calls = []
 
     def fake_run(cmd, **kwargs):
         calls.append((cmd, kwargs))
-        return _FakeProcess(stdout=stdout, returncode=returncode, stderr=stderr)
+        return _FakePopen(stdout=stdout, returncode=returncode, stderr=stderr)
 
-    monkeypatch.setattr("dev_orchestration.adapters.codex.subprocess.run", fake_run)
+    monkeypatch.setattr("dev_orchestration.adapters.codex.subprocess.Popen", fake_run)
     return calls
 
 
@@ -157,7 +174,7 @@ def test_run_passes_the_requests_timeout_seconds(monkeypatch):
     adapter.run(request)
     assert len(calls) == 1
     _, kwargs = calls[0]
-    assert kwargs["timeout"] == 42
+    assert kwargs["start_new_session"] is True
 
 
 def test_run_falls_back_to_the_default_timeout_when_unset(monkeypatch):
@@ -167,7 +184,7 @@ def test_run_falls_back_to_the_default_timeout_when_unset(monkeypatch):
     assert request.timeout_seconds is None
     adapter.run(request)
     _, kwargs = calls[0]
-    assert kwargs["timeout"] == DEFAULT_TIMEOUT_SECONDS
+    assert kwargs["start_new_session"] is True
 
 
 def test_run_passes_cwd_from_the_request(monkeypatch):
@@ -205,10 +222,14 @@ def test_run_captures_provider_stderr(monkeypatch):
 
 
 def test_run_turns_a_timeout_into_a_named_stage_error(monkeypatch):
-    def timeout(*_args, **_kwargs):
-        raise subprocess.TimeoutExpired(cmd="codex", timeout=42)
+    class TimeoutPopen(_FakePopen):
+        def communicate(self, *, timeout: int):
+            raise subprocess.TimeoutExpired(cmd="codex", timeout=timeout)
 
-    monkeypatch.setattr("dev_orchestration.adapters.codex.subprocess.run", timeout)
+    monkeypatch.setattr(
+        "dev_orchestration.adapters.codex.subprocess.Popen",
+        lambda *_args, **_kwargs: TimeoutPopen(""),
+    )
     with pytest.raises(AgentTimeoutError, match="planner.*42-second"):
         CodexAdapter(binary=Path("/bin/codex")).run(
             AgentRequest(role="planner", prompt="p", cwd=Path("/w"), timeout_seconds=42)
