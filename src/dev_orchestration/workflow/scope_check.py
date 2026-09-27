@@ -18,7 +18,7 @@ class ScopeViolation(RuntimeError):
 # fence and are still violations; in particular, this is not an allowlist for
 # ignored application data.
 _EPHEMERAL_IGNORED_DIRECTORIES = frozenset(
-    {".mypy_cache", ".pytest_cache", ".ruff_cache", "__pycache__"}
+    {".mypy_cache", ".pytest_cache", ".ruff_cache", "__pycache__", ".vite"}
 )
 _EPHEMERAL_IGNORED_FILES = frozenset({".coverage"})
 
