@@ -23,8 +23,8 @@ from dev_orchestration.config.models import GlobalConfig, ProjectConfig, RoleCon
 # implementation_worker would. That is unbounded work with no relation to the
 # role's actual job, so all three are read-only roles (below) bound to claude,
 # the same way plan_reviewer, implementation_reviewer, and verifier already
-# are: --allowedTools is a restriction the CLI enforces, not just a prompt
-# request. implementation_worker is the one role that legitimately writes
+# are: --tools is a restriction the CLI enforces, not just a prompt request
+# (--allowedTools only pre-approves; see ClaudeAdapter.build_command). implementation_worker is the one role that legitimately writes
 # code, so it is the only one still on codex with full workspace-write.
 READ_ONLY_ROLES = frozenset(
     {

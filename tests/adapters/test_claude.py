@@ -40,6 +40,25 @@ def test_allowed_tools_are_comma_joined_in_one_argument():
     assert cmd[cmd.index("--allowedTools") + 1] == "Read,Grep,Glob"
 
 
+def test_permission_skip_only_with_tool_set_restricted():
+    restricted = ClaudeAdapter().build_command(
+        AgentRequest(
+            role="plan_reviewer",
+            prompt="review",
+            cwd=Path("/work"),
+            allowed_tools=list(READ_ONLY_TOOLS),
+        )
+    )
+    assert "--dangerously-skip-permissions" in restricted
+    assert restricted[restricted.index("--tools") + 1] == "Read,Grep,Glob"
+
+    unrestricted = ClaudeAdapter().build_command(
+        AgentRequest(role="plan_reviewer", prompt="review", cwd=Path("/work"))
+    )
+    assert "--dangerously-skip-permissions" not in unrestricted
+    assert "--tools" not in unrestricted
+
+
 def test_model_alias_is_passed_through():
     cmd = ClaudeAdapter().build_command(
         AgentRequest(role="plan_reviewer", prompt="r", cwd=Path("/w"), model_alias="opus")

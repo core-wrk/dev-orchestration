@@ -68,7 +68,15 @@ class ClaudeAdapter:
         if request.model_alias:
             cmd += ["--model", request.model_alias]
         if request.allowed_tools:
-            cmd += ["--allowedTools", ",".join(request.allowed_tools)]
+            tools = ",".join(request.allowed_tools)
+            # --tools is the actual restriction: it removes every other
+            # built-in tool from the session. --allowedTools alone only
+            # pre-approves the listed tools; anything else still exists and
+            # merely needs approval. Only with the tool set fenced this way is
+            # it safe to skip permission checks, which headless `-p` mode needs
+            # because nothing can answer a permission or workspace-trust
+            # prompt in a fresh, dev-orch-managed worktree.
+            cmd += ["--tools", tools, "--allowedTools", tools, "--dangerously-skip-permissions"]
         if request.expected_schema:
             cmd += ["--json-schema", request.expected_schema.read_text(encoding="utf-8")]
         cmd += ["-p", compose_prompt(request)]
