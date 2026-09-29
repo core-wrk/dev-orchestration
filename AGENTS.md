@@ -21,7 +21,10 @@ handoffs; providers and model names are replaceable implementations.
 - deploy or publish;
 - production data mutation.
 
-Uncommitted work is never modified, stashed, or worked around.
+Uncommitted work outside a dev-orch run's own isolated worktree is never modified,
+stashed, or worked around. A resumed run may continue editing its recorded worktree
+only when the branch, scope, and saved change snapshot still match. It never
+discards partial work or adopts unrelated edits automatically.
 
 ## Escalate rather than improvise
 
