@@ -294,3 +294,11 @@ def test_healthcheck_reports_unavailable_when_the_binary_times_out(monkeypatch):
     monkeypatch.setattr(subprocess, "run", hang)
     status = ClaudeAdapter().healthcheck()
     assert status.available is False
+
+
+def test_run_attaches_normalised_usage(monkeypatch):
+    stdout = json.dumps({"type": "result", "result": "ok", "usage": {"output_tokens": 9}})
+    _capture_subprocess_run(monkeypatch, stdout=stdout)
+    result = ClaudeAdapter().run(AgentRequest(role="planner", prompt="p", cwd=Path("/w")))
+    assert result.usage["output_tokens"] == 9
+    assert result.usage["total_tokens"] == 9

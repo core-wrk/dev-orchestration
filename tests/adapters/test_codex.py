@@ -334,3 +334,12 @@ def test_last_json_object_ignores_non_message_item_events():
         '{"type":"turn.completed","usage":{"output_tokens":1}}\n'
     )
     assert _last_json_object(stdout) is None
+
+
+def test_run_attaches_normalised_usage(monkeypatch):
+    stdout = '{"type":"turn.completed","usage":{"input_tokens":5,"output_tokens":2}}\n'
+    _capture_subprocess_run(monkeypatch, stdout=stdout)
+    result = CodexAdapter(binary=Path("/bin/codex")).run(
+        AgentRequest(role="planner", prompt="p", cwd=Path("/w"))
+    )
+    assert result.usage["total_tokens"] == 7

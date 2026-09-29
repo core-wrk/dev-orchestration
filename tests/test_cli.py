@@ -208,3 +208,44 @@ def test_init_force_proceeds_once_the_contract_files_are_committed(tmp_path, mon
 
     assert result.exit_code == 0, result.output
     assert "wrote AGENTS.md" in result.output
+
+
+def _usage_run(tmp_path, run_id, total):
+    store = RunStore(tmp_path, run_id)
+    store.initialize(
+        RunManifest(
+            run_id=run_id,
+            repository="demo",
+            workflow="standard",
+            tier=Tier.STANDARD,
+            project_class=ProjectClass.INTERNAL_UTILITY,
+        )
+    )
+    store.append_event(
+        {
+            "event": "token_usage",
+            "role": "planner",
+            "provider": "claude",
+            "model": "opus",
+            "reasoning": "medium",
+            "usage": {"input_tokens": total, "total_tokens": total},
+        }
+    )
+
+
+def test_usage_command_reports_one_run_or_all_runs(tmp_path, monkeypatch):
+    _init_git_repo(tmp_path)
+    _usage_run(tmp_path, "20260101-000000_standard_a", 100)
+    _usage_run(tmp_path, "20260102-000000_standard_b", 300)
+    monkeypatch.chdir(tmp_path)
+
+    newest = CliRunner().invoke(app, ["usage"])
+    everything = CliRunner().invoke(app, ["usage", "--all"])
+    as_json = CliRunner().invoke(app, ["usage", "20260101-000000_standard_a", "--json"])
+    missing = CliRunner().invoke(app, ["usage", "nope"])
+
+    assert newest.exit_code == 0, newest.output
+    assert "300" in newest.output and "400" not in newest.output
+    assert "400" in everything.output
+    assert '"total_tokens": 100' in as_json.output
+    assert missing.exit_code == 1

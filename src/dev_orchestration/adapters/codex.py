@@ -26,6 +26,7 @@ from dev_orchestration.adapters.base import (
     AgentTimeoutError,
     compose_prompt,
 )
+from dev_orchestration.adapters.tokens import codex_usage
 from dev_orchestration.adapters.usage import UsageObservation, parse_codex_snapshot
 
 CODEX_BUNDLE_PATH = Path("/Applications/ChatGPT.app/Contents/Resources/codex")
@@ -274,6 +275,7 @@ class CodexAdapter:
             output=_last_json_object(stdout) or _last_agent_message(stdout) or stdout,
             started_at=started,
             completed_at=datetime.now(UTC),
+            usage=codex_usage(stdout),
             stderr=stderr or "",
             diagnostic=_error_diagnostic(stdout),
         )

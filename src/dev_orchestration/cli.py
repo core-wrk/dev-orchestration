@@ -1,5 +1,6 @@
 """Typer entry point. Commands register here; logic lives in modules."""
 
+import json
 import shlex
 from datetime import UTC, datetime
 from pathlib import Path
@@ -47,7 +48,13 @@ from dev_orchestration.workflow.recovery import (
     resume_due,
     resume_run,
 )
-from dev_orchestration.workflow.reporting import describe_status, list_runs, read_events
+from dev_orchestration.workflow.reporting import (
+    describe_status,
+    list_runs,
+    read_events,
+    render_token_usage,
+    summarize_token_usage,
+)
 from dev_orchestration.workflow.runner import cleanup_worktree_if_unproductive, execute_run
 from dev_orchestration.workflow.scheduler import (
     SchedulerError,
@@ -486,3 +493,32 @@ def scheduler_tick() -> None:
                     typer.echo(f"{run_id}: another wakeup owns this run")
             else:
                 queue.cancel(repo_root, run_id)
+
+
+@app.command()
+def usage(
+    run_id: str | None = typer.Argument(None, help="Run id; defaults to the newest run"),
+    all_runs: bool = typer.Option(False, "--all", help="Aggregate every run in this repository"),
+    as_json: bool = typer.Option(False, "--json", help="Emit machine-readable rows"),
+) -> None:
+    """Show token usage per role and model, biggest cost sink first."""
+    try:
+        repo = discover_repo(Path.cwd())
+        candidates = [run for run, _ in list_runs(repo.root)]
+        if all_runs:
+            selected = candidates
+        else:
+            chosen = run_id or (candidates[0] if candidates else None)
+            if chosen is None:
+                raise NoSuchRunError("no runs found in this repository")
+            if not (repo.root / ".ai" / "runs" / chosen / "manifest.json").is_file():
+                raise NoSuchRunError(f"run {chosen!r} does not exist")
+            selected = [chosen]
+        events = [
+            event for run in selected for event in read_events(repo.root / ".ai" / "runs" / run)
+        ]
+        rows = summarize_token_usage(events)
+    except EXPECTED_ERRORS + (NoSuchRunError,) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(json.dumps(rows, indent=2) if as_json else render_token_usage(rows))
