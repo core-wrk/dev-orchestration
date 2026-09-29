@@ -6,8 +6,10 @@ from datetime import UTC, datetime, timedelta
 
 from dev_orchestration.adapters.base import (
     AgentAdapter,
+    AgentInterruptedError,
     AgentRequest,
     AgentResult,
+    AgentTimeoutError,
     agent_result_record,
 )
 from dev_orchestration.artifacts.store import RunStore
@@ -190,6 +192,37 @@ class UsageAwareAdapter:
         probe = getattr(self.adapter, "observe_usage", None)
         return probe() if callable(probe) else UsageObservation(provider=self.name)
 
+    def _record_call(
+        self,
+        request: AgentRequest,
+        attempt: int | None,
+        *,
+        result: AgentResult | None = None,
+        outcome: str | None = None,
+    ) -> None:
+        """Append one token_usage event per provider call; retries count too."""
+        if self.store is None:
+            return
+        event: dict = {
+            "event": "token_usage",
+            "role": request.role,
+            "provider": self.name,
+            "model": result.model if result is not None else request.model_alias,
+            "reasoning": request.reasoning,
+            "attempt": attempt,
+        }
+        if result is not None:
+            event["outcome"] = "ok" if result.exit_code == 0 else "failed"
+            event["exit_code"] = result.exit_code
+            event["duration_seconds"] = round(
+                (result.completed_at - result.started_at).total_seconds(), 3
+            )
+            event["usage"] = result.usage
+        else:
+            event["outcome"] = outcome
+            event["usage"] = None
+        self.store.append_event(event)
+
     def run(self, request: AgentRequest) -> AgentResult:
         observation = None
         if self.auto_resume:
@@ -214,7 +247,15 @@ class UsageAwareAdapter:
             attempts = dict(self.store.read_manifest().stage_attempts)
             attempts[request.role] = attempts.get(request.role, 0) + 1
             self.store.update_manifest(stage_attempts=attempts)
-        result = self.adapter.run(request)
+        attempt = attempts[request.role] if self.store is not None else None
+        try:
+            result = self.adapter.run(request)
+        except (AgentTimeoutError, AgentInterruptedError) as exc:
+            # Tokens spent before a timeout or signal are unknowable, but the
+            # call itself is still a cost sink worth seeing in the ledger.
+            self._record_call(request, attempt, outcome=type(exc).__name__)
+            raise
+        self._record_call(request, attempt, result=result)
         limited = rejection(result)
         if limited is not None:
             if observation is not None and limited.account_id is None:

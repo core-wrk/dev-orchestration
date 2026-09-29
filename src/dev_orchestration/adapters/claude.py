@@ -15,6 +15,7 @@ from dev_orchestration.adapters.base import (
     AgentTimeoutError,
     compose_prompt,
 )
+from dev_orchestration.adapters.tokens import claude_usage
 from dev_orchestration.adapters.usage import UsageObservation
 
 READ_ONLY_TOOLS = ("Read", "Grep", "Glob")
@@ -175,6 +176,7 @@ class ClaudeAdapter:
             output=output,
             started_at=started,
             completed_at=datetime.now(UTC),
+            usage=claude_usage(envelope),
             stderr=stderr or "",
             diagnostic=diagnostic,
         )

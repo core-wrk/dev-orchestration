@@ -103,3 +103,96 @@ def list_runs(repo_root: Path) -> list[tuple[str, str]]:
         manifest = RunManifest.model_validate_json(manifest_path.read_text(encoding="utf-8"))
         listed.append((manifest.run_id, str(manifest.status)))
     return listed
+
+
+TOKEN_FIELDS = (
+    "input_tokens",
+    "cached_input_tokens",
+    "cache_creation_tokens",
+    "output_tokens",
+    "reasoning_tokens",
+    "total_tokens",
+)
+
+
+def summarize_token_usage(events: list[dict]) -> list[dict]:
+    """Aggregate token_usage events by role, provider, model and reasoning effort.
+
+    Calls whose provider reported no usage (timeouts, signals, unparsed output)
+    are counted in ``calls`` and ``unreported`` so a gap is visible, not silent.
+    """
+    rows: dict[tuple, dict] = {}
+    for event in events:
+        if event.get("event") != "token_usage":
+            continue
+        key = (
+            event.get("role"),
+            event.get("provider"),
+            event.get("model"),
+            event.get("reasoning"),
+        )
+        row = rows.setdefault(
+            key,
+            {
+                "role": key[0],
+                "provider": key[1],
+                "model": key[2],
+                "reasoning": key[3],
+                "calls": 0,
+                "unreported": 0,
+                "duration_seconds": 0.0,
+                "cost_usd": 0.0,
+                **dict.fromkeys(TOKEN_FIELDS, 0),
+            },
+        )
+        row["calls"] += 1
+        row["duration_seconds"] += event.get("duration_seconds") or 0.0
+        usage = event.get("usage")
+        if not isinstance(usage, dict):
+            row["unreported"] += 1
+            continue
+        for field in TOKEN_FIELDS:
+            row[field] += usage.get(field) or 0
+        row["cost_usd"] += usage.get("cost_usd") or 0.0
+    return sorted(rows.values(), key=lambda row: row["total_tokens"], reverse=True)
+
+
+def render_token_usage(rows: list[dict]) -> str:
+    """Render the summary as a plain-text table, biggest cost sink first."""
+    if not rows:
+        return "No token usage recorded."
+    header = ("role", "model", "effort", "calls", "input", "cached", "output", "total", "cost$")
+    body = [
+        (
+            str(row["role"]),
+            f"{row['provider']}/{row['model'] or '?'}",
+            str(row["reasoning"] or "-"),
+            f"{row['calls']}" + (f" ({row['unreported']} unreported)" if row["unreported"] else ""),
+            f"{row['input_tokens'] + row['cache_creation_tokens']:,}",
+            f"{row['cached_input_tokens']:,}",
+            f"{row['output_tokens']:,}",
+            f"{row['total_tokens']:,}",
+            f"{row['cost_usd']:.4f}" if row["cost_usd"] else "-",
+        )
+        for row in rows
+    ]
+    totals = (
+        "TOTAL",
+        "",
+        "",
+        str(sum(row["calls"] for row in rows)),
+        f"{sum(row['input_tokens'] + row['cache_creation_tokens'] for row in rows):,}",
+        f"{sum(row['cached_input_tokens'] for row in rows):,}",
+        f"{sum(row['output_tokens'] for row in rows):,}",
+        f"{sum(row['total_tokens'] for row in rows):,}",
+        f"{sum(row['cost_usd'] for row in rows):.4f}" if any(r["cost_usd"] for r in rows) else "-",
+    )
+    table = [header, *body, totals]
+    widths = [max(len(line[i]) for line in table) for i in range(len(header))]
+    return "\n".join(
+        "  ".join(
+            cell.ljust(width) if i < 3 else cell.rjust(width)
+            for i, (cell, width) in enumerate(zip(line, widths, strict=True))
+        ).rstrip()
+        for line in table
+    )
