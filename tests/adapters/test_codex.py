@@ -84,6 +84,19 @@ def test_luna_alias_resolves_to_the_worker_model():
     assert cmd[cmd.index("-m") + 1] == "gpt-5.6-luna"
 
 
+def test_read_only_request_uses_read_only_sandbox():
+    adapter = CodexAdapter(binary=Path("/bin/codex"))
+    cmd = adapter.build_exec_command(
+        AgentRequest(
+            role="verifier",
+            prompt="verify",
+            cwd=Path("/w"),
+            allowed_tools=["Read", "Grep", "Glob"],
+        )
+    )
+    assert cmd[cmd.index("-s") + 1] == "read-only"
+
+
 def test_prompt_is_its_own_argv_element_not_concatenated():
     # A prompt containing shell metacharacters must never be interpretable;
     # it must be a single, standalone argv element, never appended onto
@@ -113,7 +126,7 @@ def test_healthcheck_reports_version_and_capabilities(monkeypatch):
             return _FakeCompleted(stdout="goals              stable        true\n")
         if args == ("exec", "--help"):
             return _FakeCompleted(
-                stdout="--json --output-schema <FILE> -m <MODEL> -C <DIR> -s <SANDBOX_MODE> -o <FILE>\n"
+                stdout="--json --output-schema <FILE> -m <MODEL> -C <DIR> -s <SANDBOX_MODE> read-only -o <FILE>\n"
             )
         raise AssertionError(f"unexpected probe args: {args}")
 
@@ -124,6 +137,7 @@ def test_healthcheck_reports_version_and_capabilities(monkeypatch):
     assert status.capabilities["exec"] is True
     assert status.capabilities["goals_feature"] is True
     assert status.capabilities["goal_headless"] is False
+    assert status.capabilities["read_only_review"] is True
 
 
 class _FakeCompleted:

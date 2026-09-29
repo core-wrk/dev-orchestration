@@ -68,6 +68,20 @@ def test_model_alias_is_passed_through():
     assert cmd[cmd.index("--model") + 1] == "opus"
 
 
+def test_effort_is_passed_to_claude():
+    cmd = ClaudeAdapter().build_command(
+        AgentRequest(
+            role="planner",
+            prompt="plan",
+            cwd=Path("/w"),
+            model_alias="claude-opus-5-5",
+            reasoning="medium",
+        )
+    )
+    assert cmd[cmd.index("--model") + 1] == "claude-opus-5-5"
+    assert cmd[cmd.index("--effort") + 1] == "medium"
+
+
 def test_expected_schema_is_passed_to_claude_as_json(tmp_path):
     schema = tmp_path / "review.json"
     schema.write_text('{"type":"object","required":["outcome"]}')

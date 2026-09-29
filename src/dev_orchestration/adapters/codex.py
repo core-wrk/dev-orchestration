@@ -103,17 +103,20 @@ class CodexAdapter:
             return self._capabilities
         goals_feature = False
         goal_headless = False
+        read_only_review = False
         try:
             features = self._probe("features", "list").stdout
             goals_feature = bool(re.search(r"^goals\s+\S+\s+true", features, re.MULTILINE))
             exec_help = self._probe("exec", "--help").stdout
             goal_headless = "--goal" in exec_help
+            read_only_review = "read-only" in exec_help
         except (subprocess.SubprocessError, OSError):
             pass
         self._capabilities = {
             "exec": True,
             "goals_feature": goals_feature,
             "goal_headless": goal_headless,
+            "read_only_review": read_only_review,
         }
         return self._capabilities
 
@@ -229,7 +232,7 @@ class CodexAdapter:
             "-C",
             str(request.cwd),
             "-s",
-            "workspace-write",
+            "read-only" if request.allowed_tools is not None else "workspace-write",
         ]
         if request.model_alias:
             cmd += ["-m", MODEL_ALIASES.get(request.model_alias, request.model_alias)]

@@ -4,6 +4,7 @@ import pytest
 
 from dev_orchestration.adapters.base import FakeAdapter
 from dev_orchestration.adapters.claude import ClaudeAdapter
+from dev_orchestration.adapters.codex import CodexAdapter
 from dev_orchestration.adapters.registry import (
     DEFAULT_ROLES,
     READ_ONLY_ROLES,
@@ -16,36 +17,31 @@ from dev_orchestration.config.models import GlobalConfig, ProjectConfig, RoleCon
 
 @pytest.fixture
 def registry():
-    # The codex double declares only "exec", matching the real CodexAdapter,
-    # which builds its argv from a fixed sandbox mode and never reads
-    # allowed_tools. A double that claimed read_only_review would let an
-    # unenforceable binding pass every test in this file.
     return RoleRegistry(
         roles=DEFAULT_ROLES,
         adapters={
-            "codex": FakeAdapter(capabilities={"exec"}),
+            "codex": FakeAdapter(capabilities={"exec", "read_only_review"}),
             "claude": FakeAdapter(),
         },
     )
 
 
 def test_default_roles_match_the_specification():
-    assert DEFAULT_ROLES["implementation_worker"].adapter == "codex"
-    assert DEFAULT_ROLES["implementation_worker"].model == "luna"
+    expected = {
+        "classifier": ("codex", "gpt-6-luna", "high"),
+        "planner": ("claude", "claude-opus-5-5", "medium"),
+        "plan_reviewer": ("codex", "gpt-6-sol", "high"),
+        "plan_reconciler": ("claude", "claude-sonnet-5-5", "high"),
+        "implementation_worker": ("codex", "gpt-6-luna", "high"),
+        "implementation_reviewer": ("claude", "claude-opus-5-5", "high"),
+        "verifier": ("codex", "gpt-6-luna", "high"),
+    }
+    assert {
+        role: (binding.adapter, binding.model, binding.reasoning)
+        for role, binding in DEFAULT_ROLES.items()
+    } == expected
+    assert DEFAULT_ROLES["classifier"].timeout_seconds == 600
     assert DEFAULT_ROLES["implementation_worker"].timeout_seconds == 1800
-    assert DEFAULT_ROLES["plan_reviewer"].adapter == "claude"
-    assert DEFAULT_ROLES["implementation_reviewer"].adapter == "claude"
-    # classifier, planner, plan_reconciler, and verifier are all bound to
-    # claude, NOT to codex, despite CONFIGURATION.md section 2's illustration.
-    # Each is in READ_ONLY_ROLES: its job is to read the worktree and return
-    # text (a tier, a plan, a review), never to change anything, and codex
-    # cannot honour that restriction -- build_exec_command ignores
-    # allowed_tools and always emits -s workspace-write regardless of role.
-    # Binding any of them to codex would give it real write access to the
-    # worktree it is only supposed to be reading.
-    for role in ("classifier", "planner", "plan_reconciler", "verifier"):
-        assert DEFAULT_ROLES[role].adapter == "claude", role
-        assert role in READ_ONLY_ROLES
 
 
 def test_a_read_only_role_cannot_be_bound_to_an_adapter_that_ignores_the_restriction():
@@ -63,7 +59,10 @@ def test_a_read_only_role_cannot_be_bound_to_an_adapter_that_ignores_the_restric
 def test_every_read_only_role_default_binding_can_honour_the_restriction():
     # Guards the whole set, not just verifier: adding a role to READ_ONLY_ROLES
     # while binding it to an adapter that drops allowed_tools fails here.
-    adapters = {"codex": FakeAdapter(capabilities={"exec"}), "claude": FakeAdapter()}
+    adapters = {
+        "codex": FakeAdapter(capabilities={"exec", "read_only_review"}),
+        "claude": FakeAdapter(),
+    }
     registry = RoleRegistry(roles=DEFAULT_ROLES, adapters=adapters)
     for role in READ_ONLY_ROLES:
         request = registry.build_request(role, prompt="x", cwd=Path("/w"))
@@ -71,22 +70,31 @@ def test_every_read_only_role_default_binding_can_honour_the_restriction():
 
 
 def test_the_read_only_restriction_survives_into_the_emitted_command():
-    # The join the per-task reviews could not see: registry tests asserted on
-    # the request object, adapter tests asserted on the argv, and nothing
-    # checked that the restriction actually crossed the boundary between them.
+    codex = CodexAdapter(binary=Path("/bin/codex"))
+    codex._capabilities = {"exec": True, "read_only_review": True}
     registry = RoleRegistry(
         roles=DEFAULT_ROLES,
-        adapters={"codex": FakeAdapter(capabilities={"exec"}), "claude": ClaudeAdapter()},
+        adapters={"codex": codex, "claude": ClaudeAdapter()},
     )
-    request = registry.build_request("verifier", prompt="verify", cwd=Path("/w"))
-    argv = ClaudeAdapter().build_command(request)
-    assert "--allowedTools" in argv
-    assert argv[argv.index("--allowedTools") + 1] == "Read,Grep,Glob"
+    for role in READ_ONLY_ROLES:
+        request = registry.build_request(role, prompt="read", cwd=Path("/w"))
+        if DEFAULT_ROLES[role].adapter == "codex":
+            argv = codex.build_exec_command(request)
+            assert argv[argv.index("-s") + 1] == "read-only"
+            assert argv[argv.index("-m") + 1] == DEFAULT_ROLES[role].model
+        else:
+            argv = ClaudeAdapter().build_command(request)
+            assert argv[argv.index("--tools") + 1] == "Read,Grep,Glob"
+            assert argv[argv.index("--model") + 1] == DEFAULT_ROLES[role].model
+            assert argv[argv.index("--effort") + 1] == DEFAULT_ROLES[role].reasoning
+    worker = registry.build_request("implementation_worker", prompt="build", cwd=Path("/w"))
+    argv = codex.build_exec_command(worker)
+    assert argv[argv.index("-s") + 1] == "workspace-write"
 
 
 def test_build_request_carries_the_configured_model(registry):
     request = registry.build_request("implementation_worker", prompt="build", cwd=Path("/w"))
-    assert request.model_alias == "luna"
+    assert request.model_alias == "gpt-6-luna"
     assert request.role == "implementation_worker"
 
 
@@ -122,7 +130,7 @@ def test_verifier_role_is_restricted_to_read_only_tools(registry):
 
 def test_adapter_for_returns_the_adapter_bound_to_the_role(registry):
     assert registry.adapter_for("implementation_worker") is registry.adapters["codex"]
-    assert registry.adapter_for("plan_reviewer") is registry.adapters["claude"]
+    assert registry.adapter_for("plan_reviewer") is registry.adapters["codex"]
 
 
 def test_build_request_carries_reasoning_from_the_binding(registry):
@@ -130,9 +138,9 @@ def test_build_request_carries_reasoning_from_the_binding(registry):
     assert request.reasoning == "high"
 
 
-def test_build_request_reasoning_is_none_when_not_configured(registry):
-    request = registry.build_request("plan_reviewer", prompt="review", cwd=Path("/w"))
-    assert request.reasoning is None
+def test_build_request_carries_claude_effort(registry):
+    request = registry.build_request("planner", prompt="plan", cwd=Path("/w"))
+    assert request.reasoning == "medium"
 
 
 def test_project_roles_override_global_which_override_framework_defaults():

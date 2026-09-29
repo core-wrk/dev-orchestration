@@ -10,22 +10,8 @@ from dev_orchestration.adapters.claude import READ_ONLY_TOOLS, ClaudeAdapter
 from dev_orchestration.adapters.codex import CodexAdapter, discover_codex
 from dev_orchestration.config.models import GlobalConfig, ProjectConfig, RoleConfig
 
-# classifier, planner, and plan_reconciler all share one shape: their own role
-# prompt says outright not to implement anything, and their stage function
-# (workflow/stages.py) only ever consumes the model's text response --
-# nothing about them expects, or even looks at, a changed worktree file.
-# codex cannot be trusted to honour that prompt-level instruction once it has
-# write tools: build_exec_command always emits -s workspace-write regardless
-# of role, and observed in practice, a long, precise request (the kind a real
-# feature brief looks like) is enough for a "just classify this" or "just
-# draft a plan" call to start actually implementing the change instead --
-# reading the repo's generated types, editing source files, same as
-# implementation_worker would. That is unbounded work with no relation to the
-# role's actual job, so all three are read-only roles (below) bound to claude,
-# the same way plan_reviewer, implementation_reviewer, and verifier already
-# are: --tools is a restriction the CLI enforces, not just a prompt request
-# (--allowedTools only pre-approves; see ClaudeAdapter.build_command). implementation_worker is the one role that legitimately writes
-# code, so it is the only one still on codex with full workspace-write.
+# Only the implementation worker may edit the worktree. Both adapters must
+# enforce this boundary for every other role, regardless of its prompt.
 READ_ONLY_ROLES = frozenset(
     {
         "classifier",
@@ -41,15 +27,19 @@ DEFAULT_ROLES: dict[str, RoleConfig] = {
     # The 600s timeout is a second, cheap line of defense on top of the
     # allowedTools restriction: classification in particular should never
     # need anywhere near that long.
-    "classifier": RoleConfig(adapter="claude", model="opus", timeout_seconds=600),
-    "planner": RoleConfig(adapter="claude", model="opus"),
-    "plan_reviewer": RoleConfig(adapter="claude", model="opus"),
-    "plan_reconciler": RoleConfig(adapter="claude", model="opus"),
-    "implementation_worker": RoleConfig(
-        adapter="codex", model="luna", reasoning="high", timeout_seconds=1800
+    "classifier": RoleConfig(
+        adapter="codex", model="gpt-6-luna", reasoning="high", timeout_seconds=600
     ),
-    "implementation_reviewer": RoleConfig(adapter="claude", model="opus"),
-    "verifier": RoleConfig(adapter="claude", model="opus"),
+    "planner": RoleConfig(adapter="claude", model="claude-opus-5-5", reasoning="medium"),
+    "plan_reviewer": RoleConfig(adapter="codex", model="gpt-6-sol", reasoning="high"),
+    "plan_reconciler": RoleConfig(adapter="claude", model="claude-sonnet-5-5", reasoning="high"),
+    "implementation_worker": RoleConfig(
+        adapter="codex", model="gpt-6-luna", reasoning="high", timeout_seconds=1800
+    ),
+    "implementation_reviewer": RoleConfig(
+        adapter="claude", model="claude-opus-5-5", reasoning="high"
+    ),
+    "verifier": RoleConfig(adapter="codex", model="gpt-6-luna", reasoning="high"),
 }
 
 

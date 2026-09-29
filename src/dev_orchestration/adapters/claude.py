@@ -90,6 +90,8 @@ class ClaudeAdapter:
         cmd = [self.binary, "--output-format", "json"]
         if request.model_alias:
             cmd += ["--model", request.model_alias]
+        if request.reasoning:
+            cmd += ["--effort", request.reasoning]
         if request.allowed_tools:
             tools = ",".join(request.allowed_tools)
             # --tools is the actual restriction: it removes every other
