@@ -1,16 +1,20 @@
 import json
 import subprocess
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
 from dev_orchestration.adapters.base import AdapterStatus, AgentResult, AgentTimeoutError
 from dev_orchestration.adapters.registry import RoleRegistry
+from dev_orchestration.artifacts.store import RunStore
 from dev_orchestration.config.models import ProjectConfig, RoleConfig
 from dev_orchestration.context.assembler import ContextContractError
 from dev_orchestration.domain.enums import RunState, Tier
 from dev_orchestration.domain.run import RunManifest
 from dev_orchestration.git.repo import GitRepo
+from dev_orchestration.workflow.cloud import link_cloud_session
+from dev_orchestration.workflow.recovery import ResumeRefused, approve_run, resume_run
 from dev_orchestration.workflow.runner import execute_run
 
 CRITERIA = ["the flag exists"]
@@ -213,6 +217,93 @@ def test_substantial_run_pauses_before_worker_when_approval_is_required(tmp_path
     assert any(event["event"] == "approval_required" for event in events(outcome))
 
 
+def test_linked_cloud_run_requires_explicit_approval_then_resumes_saved_plan(tmp_path):
+    git = repo(tmp_path)
+    config = ProjectConfig.model_validate(
+        CONFIG.model_dump(mode="json")
+        | {
+            "approval": {"substantial": True},
+            "validation": {"unit": {"command": "true", "required_for": ["substantial"]}},
+        }
+    )
+    adapter = Scripted(script(tier="substantial"))
+    roles = registry(adapter)
+    outcome = execute_run(
+        git, config, roles, "change the flag with approval", tmp_path / "wt", CRITERIA
+    )
+    assert outcome.final_state is RunState.AWAITING_APPROVAL
+    assert adapter.seen == ["classifier", "planner", "plan_reviewer"]
+    with pytest.raises(ResumeRefused, match="link the intact cloud session"):
+        approve_run(git, config, roles, outcome.run_id)
+    with pytest.raises(ResumeRefused, match="awaiting explicit human approval"):
+        resume_run(git, config, roles, outcome.run_id)
+
+    store = RunStore(git.root, outcome.run_id)
+    saved_worktree = Path(store.read_manifest().git.worktree)
+    link_cloud_session(
+        git,
+        outcome.run_id,
+        "claude",
+        "session-1",
+        "environment-1",
+        restored_worktree=saved_worktree,
+    )
+    plan_before = (store.root / "planning/approved-plan.md").read_bytes()
+    digest = approve_run(
+        git,
+        config,
+        roles,
+        outcome.run_id,
+        restored_worktree=saved_worktree,
+    )
+    assert store.read_manifest().status is RunState.APPROVED
+    assert len(digest) == 64
+    proof = json.loads((store.root / "approval/approved.json").read_text())
+    assert proof["plan_sha256"] == store.read_manifest().plan_sha256
+    assert proof["cloud_session_id"] == "session-1"
+    with pytest.raises(ResumeRefused, match="needs the checkpoint digest"):
+        resume_run(git, config, roles, outcome.run_id)
+    with pytest.raises(ResumeRefused, match="not awaiting human approval"):
+        approve_run(git, config, roles, outcome.run_id)
+
+    resumed = resume_run(
+        git,
+        config,
+        roles,
+        outcome.run_id,
+        expected_checkpoint_digest=digest,
+        restored_worktree=saved_worktree,
+    )
+    assert resumed.final_state is RunState.COMPLETE_LOCAL
+    assert adapter.seen == [
+        "classifier",
+        "planner",
+        "plan_reviewer",
+        "implementation_worker",
+        "implementation_reviewer",
+        "verifier",
+    ]
+    assert (store.root / "planning/approved-plan.md").read_bytes() == plan_before
+
+
+def test_cloud_approval_refuses_changed_summary_before_provider_call(tmp_path):
+    git = repo(tmp_path)
+    config = ProjectConfig.model_validate(
+        CONFIG.model_dump(mode="json") | {"approval": {"substantial": True}}
+    )
+    adapter = Scripted(script(tier="substantial"))
+    roles = registry(adapter)
+    outcome = execute_run(
+        git, config, roles, "change the flag with approval", tmp_path / "wt", CRITERIA
+    )
+    link_cloud_session(git, outcome.run_id, "codex", "task-1", "environment-1")
+    summary = outcome.store_root / "approval/human-approval.md"
+    summary.write_text("changed summary")
+    with pytest.raises(ResumeRefused, match="checkpoint artifact"):
+        approve_run(git, config, roles, outcome.run_id)
+    assert adapter.seen == ["classifier", "planner", "plan_reviewer"]
+
+
 def test_complete_local_persists_clean_final_commit(tmp_path):
     git = repo(tmp_path)
     base = git.current_commit()
@@ -330,7 +421,7 @@ def test_unignored_validation_cache_is_cleaned_and_does_not_trip_the_fence(tmp_p
     assert not (worktree / ".pytest_cache").exists()
 
 
-def test_role_timeout_ends_run_terminally_with_role_and_limit(tmp_path):
+def test_role_timeout_pauses_run_with_role_and_limit(tmp_path):
     git = repo(tmp_path)
     outcome = execute_run(
         git,
@@ -340,9 +431,10 @@ def test_role_timeout_ends_run_terminally_with_role_and_limit(tmp_path):
         tmp_path / "wt",
         CRITERIA,
     )
-    assert outcome.final_state is RunState.FAILED
-    assert "implementation_worker" in outcome.reason
-    assert "7-second" in outcome.reason
+    assert outcome.final_state is RunState.PAUSED_INTERRUPTED
+    pause = json.loads((outcome.store_root / "manifest.json").read_text())["pause"]
+    assert pause["role"] == "implementation_worker"
+    assert "7-second" in pause["diagnostic"]
 
 
 @pytest.mark.parametrize("verdict", ["FAIL", "UNKNOWN"])

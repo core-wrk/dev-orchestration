@@ -1,0 +1,12 @@
+{
+  "_fixture": {
+    "cli": "Claude Code 2.1.272",
+    "captured_at": "2026-09-28",
+    "redaction": "session and account identifiers removed"
+  },
+  "type": "result",
+  "subtype": "success",
+  "is_error": true,
+  "terminal_reason": "api_error",
+  "result": "Not logged in · Please run /login"
+}

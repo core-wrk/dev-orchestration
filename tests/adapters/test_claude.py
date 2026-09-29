@@ -1,3 +1,4 @@
+import json
 import shutil
 import subprocess
 from datetime import UTC, datetime
@@ -5,12 +6,13 @@ from pathlib import Path
 
 import pytest
 
-from dev_orchestration.adapters.base import AgentRequest, AgentTimeoutError
+from dev_orchestration.adapters.base import AgentInterruptedError, AgentRequest, AgentTimeoutError
 from dev_orchestration.adapters.claude import (
     DEFAULT_TIMEOUT_SECONDS,
     READ_ONLY_TOOLS,
     ClaudeAdapter,
 )
+from dev_orchestration.adapters.usage import rejection
 
 
 def test_read_only_tools_contains_only_read_only_tools():
@@ -195,6 +197,29 @@ def test_run_turns_a_timeout_into_a_named_stage_error(monkeypatch):
         ClaudeAdapter().run(
             AgentRequest(role="plan_reviewer", prompt="p", cwd=Path("/w"), timeout_seconds=42)
         )
+
+
+def test_run_reports_process_signal_as_interruption(monkeypatch):
+    _capture_subprocess_run(monkeypatch, returncode=-15)
+    with pytest.raises(AgentInterruptedError, match="plan_reviewer.*signal 15"):
+        ClaudeAdapter().run(AgentRequest(role="plan_reviewer", prompt="p", cwd=Path("/w")))
+
+
+def test_installed_cli_auth_error_is_not_a_usage_pause(monkeypatch):
+    fixture = Path(__file__).resolve().parents[1] / "fixtures/claude_auth_error.json"
+    envelope = json.loads(fixture.read_text())
+    envelope.pop("_fixture")
+    _capture_subprocess_run(monkeypatch, stdout=json.dumps(envelope), returncode=1)
+    result = ClaudeAdapter().run(AgentRequest(role="plan_reviewer", prompt="p", cwd=Path("/w")))
+    assert result.diagnostic["error"] == "Not logged in · Please run /login"
+    assert rejection(result) is None
+
+
+def test_read_only_auth_status_requires_login(monkeypatch):
+    _capture_subprocess_run(monkeypatch, stdout='{"loggedIn": false}', returncode=1)
+    assert ClaudeAdapter().authenticated() is False
+    _capture_subprocess_run(monkeypatch, stdout='{"loggedIn": true}', returncode=0)
+    assert ClaudeAdapter().authenticated() is True
 
 
 def test_run_unwraps_claude_result_envelope(monkeypatch):

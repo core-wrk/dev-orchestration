@@ -1,0 +1,21 @@
+{
+  "_fixture": {
+    "cli": "codex-cli 0.155.0-alpha.16.3",
+    "captured_at": "2026-09-28",
+    "redaction": "account fields removed; limit ID replaced"
+  },
+  "rateLimitsByLimitId": {
+    "redacted_limit_id": {
+      "primary": {
+        "windowDurationMins": 300,
+        "usedPercent": 18,
+        "resetsAt": 1790655418
+      },
+      "secondary": {
+        "windowDurationMins": 10080,
+        "usedPercent": 34,
+        "resetsAt": 1791205949
+      }
+    }
+  }
+}

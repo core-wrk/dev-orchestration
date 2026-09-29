@@ -1,17 +1,21 @@
 """Claude Code adapter, driven in non-interactive print mode."""
 
 import json
+import os
 import shutil
+import signal
 import subprocess
 from datetime import UTC, datetime
 
 from dev_orchestration.adapters.base import (
     AdapterStatus,
+    AgentInterruptedError,
     AgentRequest,
     AgentResult,
     AgentTimeoutError,
     compose_prompt,
 )
+from dev_orchestration.adapters.usage import UsageObservation
 
 READ_ONLY_TOOLS = ("Read", "Grep", "Glob")
 
@@ -63,6 +67,25 @@ class ClaudeAdapter:
     def supports(self, capability: str) -> bool:
         return capability in {"exec", "read_only_review"}
 
+    def observe_usage(self) -> UsageObservation:
+        # The installed CLI does not expose a reliable read-only allowance probe.
+        return UsageObservation(provider=self.name)
+
+    def authenticated(self) -> bool:
+        """Check login without reading credentials or starting a model turn."""
+        try:
+            proc = subprocess.run(
+                [self.binary, "auth", "status", "--json"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+            status = json.loads(proc.stdout)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            return False
+        return proc.returncode == 0 and status.get("loggedIn") is True
+
     def build_command(self, request: AgentRequest) -> list[str]:
         cmd = [self.binary, "--output-format", "json"]
         if request.model_alias:
@@ -85,26 +108,73 @@ class ClaudeAdapter:
     def run(self, request: AgentRequest) -> AgentResult:
         started = datetime.now(UTC)
         timeout = request.timeout_seconds or DEFAULT_TIMEOUT_SECONDS
-        try:
-            proc = subprocess.run(
+        if request.on_process_started is None:
+            try:
+                proc = subprocess.run(
+                    self.build_command(request),
+                    capture_output=True,
+                    text=True,
+                    cwd=request.cwd,
+                    timeout=timeout,
+                    check=False,
+                )
+                stdout, stderr, returncode = proc.stdout, proc.stderr, proc.returncode
+            except subprocess.TimeoutExpired as exc:
+                raise AgentTimeoutError(request.role, timeout, self.name) from exc
+        else:
+            proc = subprocess.Popen(
                 self.build_command(request),
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
                 cwd=request.cwd,
-                timeout=timeout,
-                check=False,
+                start_new_session=True,
             )
-        except subprocess.TimeoutExpired as exc:
-            raise AgentTimeoutError(request.role, timeout, self.name) from exc
-        output = _decode_output(proc.stdout)
+            request.on_process_started(proc.pid)
+            try:
+                stdout, stderr = proc.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired as exc:
+                if proc.poll() is None:
+                    try:
+                        os.killpg(proc.pid, signal.SIGTERM)
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        try:
+                            os.killpg(proc.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                        proc.wait()
+                    except ProcessLookupError:
+                        pass
+                raise AgentTimeoutError(request.role, timeout, self.name) from exc
+            finally:
+                if request.on_process_finished is not None:
+                    request.on_process_finished()
+            returncode = proc.returncode
+        if returncode < 0:
+            raise AgentInterruptedError(request.role, self.name, -returncode)
+        output = _decode_output(stdout)
+        try:
+            envelope = json.loads(stdout)
+        except json.JSONDecodeError:
+            envelope = None
+        diagnostic = None
+        if isinstance(envelope, dict) and envelope.get("is_error"):
+            diagnostic = {
+                "type": "error",
+                "is_error": True,
+                "error": envelope.get("result") or envelope.get("error"),
+                "reset_at": envelope.get("reset_at"),
+            }
         return AgentResult(
             provider=self.name,
             model=request.model_alias,
-            exit_code=proc.returncode,
+            exit_code=returncode,
             output=output,
             started_at=started,
             completed_at=datetime.now(UTC),
-            stderr=getattr(proc, "stderr", "") or "",
+            stderr=stderr or "",
+            diagnostic=diagnostic,
         )
 
 

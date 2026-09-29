@@ -2,19 +2,21 @@
 
 import json
 import subprocess
+from datetime import UTC, datetime
 from pathlib import Path
 
 from pydantic import BaseModel
 
-from dev_orchestration.adapters.base import AgentTimeoutError
+from dev_orchestration.adapters.base import AgentInterruptedError, AgentTimeoutError
 from dev_orchestration.adapters.registry import ReadOnlyRoleUnsupportedError, RoleRegistry
+from dev_orchestration.adapters.usage import UsageAwareAdapter, UsageLimitError, next_attempt
 from dev_orchestration.config.models import ProjectConfig, ValidationCommand
 from dev_orchestration.config.resolver import PROTECTED_DEFAULTS
 from dev_orchestration.context.assembler import Category, ContextContractError
 from dev_orchestration.context.packet import ContextRef
 from dev_orchestration.domain.enums import Outcome, RunState, Tier
 from dev_orchestration.domain.findings import Verification
-from dev_orchestration.domain.run import GitBlock, RoleBinding
+from dev_orchestration.domain.run import GitBlock, PauseRecord, RoleBinding
 from dev_orchestration.git.repo import EmptySnapshotError, GitCommandError, GitRepo
 from dev_orchestration.git.worktree import remove_worktree
 from dev_orchestration.scope import ScopeFence
@@ -23,14 +25,17 @@ from dev_orchestration.workflow.bootstrap import (
     resolve_run_policy,
     resolve_runtime_context,
 )
+from dev_orchestration.workflow.checkpoints import record_stage
 from dev_orchestration.workflow.engine import Engine, IllegalTransitionError
 from dev_orchestration.workflow.invoke import AgentInvocationError, SchemaEscalation
+from dev_orchestration.workflow.scheduler import SchedulerQueue
 from dev_orchestration.workflow.scope_check import (
     ScopeViolation,
     cleanup_ephemeral_paths,
     enforce_fence,
     enforce_ignored_writes,
 )
+from dev_orchestration.workflow.snapshot import capture_snapshot
 from dev_orchestration.workflow.stages import (
     MAX_REMEDIATION_CYCLES,
     FindingIdentityAmbiguity,
@@ -308,8 +313,12 @@ def _run_worktree_stage(
         enforce_fence(worktree_repo, base_commit, fence)
         enforce_ignored_writes(worktree_repo, ignored_before, fence)
     except Exception:
-        worktree_repo.restore_ignored_snapshot(ignored_before)
-        cleanup_ephemeral_paths(worktree_repo.root)
+        try:
+            enforce_fence(worktree_repo, base_commit, fence)
+            enforce_ignored_writes(worktree_repo, ignored_before, fence)
+        finally:
+            worktree_repo.restore_ignored_snapshot(ignored_before)
+            cleanup_ephemeral_paths(worktree_repo.root)
         raise
     worktree_repo.restore_ignored_snapshot(ignored_before)
     cleanup_ephemeral_paths(worktree_repo.root)
@@ -348,6 +357,8 @@ def execute_run(
     downgrade_reason: str | None = None,
     external_plan: Path | None = None,
     acceptance_criteria_source: str = "explicit",
+    auto_resume: bool = False,
+    scheduler_queue: SchedulerQueue | None = None,
 ) -> RunOutcome:
     """Execute a run; every started run is returned in a terminal state."""
     if not request_text.strip():
@@ -368,22 +379,55 @@ def execute_run(
     if base_commit is None:
         _terminal(engine, RunState.FAILED, "bootstrap did not record a base commit")
         return _outcome(engine, repo=repo, worktree=worktree)
-    worktree_repo = GitRepo(worktree)
-    store.update_manifest(
-        acceptance_criteria=acceptance_criteria,
-        acceptance_criteria_source=acceptance_criteria_source,
-        tier_override=tier_override,
-        downgrade_reason=downgrade_reason,
-    )
-    _record_roles(store, registry)
-    store.update_manifest(
-        available_profiles=project_config.profiles.available,
-        config_layers=[project_config.model_dump(mode="json")],
-    )
-    store.write_text_artifact("request.md", request_text + "\n", immutable=True)
-    store.write_json_artifact("acceptance-criteria.json", acceptance_criteria, immutable=True)
+    claim = store.claim()
+    claim.__enter__()
+    try:
+        worktree_repo = GitRepo(worktree)
+        registry = RoleRegistry(
+            registry.roles,
+            {
+                name: UsageAwareAdapter(adapter, auto_resume=auto_resume, store=store)
+                for name, adapter in registry.adapters.items()
+            },
+        )
+        store.update_manifest(auto_resume=auto_resume)
+
+        def receipt(next_stage: str, artifacts: list[str], cycle: int = 0) -> None:
+            record_stage(
+                store,
+                registry,
+                worktree,
+                next_stage=next_stage,
+                artifacts=artifacts,
+                cycle=cycle,
+            )
+
+        store.update_manifest(
+            acceptance_criteria=acceptance_criteria,
+            acceptance_criteria_source=acceptance_criteria_source,
+            tier_override=tier_override,
+            downgrade_reason=downgrade_reason,
+        )
+        _record_roles(store, registry)
+        store.update_manifest(
+            available_profiles=project_config.profiles.available,
+            config_layers=[project_config.model_dump(mode="json")],
+        )
+        store.write_text_artifact("request.md", request_text + "\n", immutable=True)
+        store.write_json_artifact("acceptance-criteria.json", acceptance_criteria, immutable=True)
+        if external_plan is not None:
+            stored_external = "planning/external-plan-pending.md"
+            store.write_text_artifact(
+                stored_external, external_plan.read_text(encoding="utf-8"), immutable=True
+            )
+            store.update_manifest(external_plan_artifact=stored_external)
+            external_plan = store.root / stored_external
+    except BaseException:
+        claim.__exit__(None, None, None)
+        raise
 
     try:
+        receipt("classifier", ["request.md", "acceptance-criteria.json", "roles.json"])
         classification = classify(
             registry,
             request_text,
@@ -438,6 +482,18 @@ def execute_run(
         )
         store.update_manifest(tier=effective_tier)
         stages_for(effective_tier)
+        receipt(
+            "planner"
+            if effective_tier in {Tier.STANDARD, Tier.SUBSTANTIAL}
+            else "implementation_worker",
+            [
+                "classification.json",
+                "context.json",
+                "request.md",
+                "acceptance-criteria.json",
+                "roles.json",
+            ],
+        )
         if external_plan is not None and effective_tier not in {Tier.STANDARD, Tier.SUBSTANTIAL}:
             raise ContextContractError("an external plan requires the standard or substantial tier")
         if effective_tier is not classification.tier:
@@ -487,6 +543,7 @@ def execute_run(
                     store,
                 )
             engine.transition(RunState.PLANNED)
+            receipt("plan_reviewer", [f"planning/{version.name}"])
             plan_text = version.read_text(encoding="utf-8")
             plan_review = review_plan(
                 registry,
@@ -496,6 +553,13 @@ def execute_run(
                 store,
             )
             engine.transition(RunState.PLAN_REVIEWED)
+            receipt(
+                "plan_reconciler" if plan_review.blocking_ids() else "plan_finalization",
+                [
+                    f"review/{max((store.root / 'review').glob('plan-review-v*.json')).name}",
+                    "review/finding-index.json",
+                ],
+            )
             reconciliation_cycles = 0
             while plan_review.blocking_ids():
                 if plan_review.outcome in {Outcome.BLOCKED, Outcome.ESCALATE}:
@@ -514,6 +578,7 @@ def execute_run(
                     )
                 engine.transition(RunState.PLANNED)
                 version = reconcile(registry, plan_text, plan_review.findings, store)
+                receipt("plan_reviewer", [f"planning/{version.name}"], reconciliation_cycles)
                 plan_text = version.read_text(encoding="utf-8")
                 plan_review = review_plan(
                     registry,
@@ -523,6 +588,14 @@ def execute_run(
                     store,
                 )
                 engine.transition(RunState.PLAN_REVIEWED)
+                receipt(
+                    "plan_reconciler" if plan_review.blocking_ids() else "plan_finalization",
+                    [
+                        f"review/{max((store.root / 'review').glob('plan-review-v*.json')).name}",
+                        "review/finding-index.json",
+                    ],
+                    reconciliation_cycles,
+                )
             if plan_review.outcome in {Outcome.BLOCKED, Outcome.ESCALATE}:
                 target = (
                     RunState.BLOCKED
@@ -534,6 +607,7 @@ def execute_run(
             store.approve_plan(version)
             engine.transition(RunState.PLAN_FINALIZED)
             approved = store.approved_plan()
+            approval_artifact = "planning/approved-plan.md"
         else:
             approved = _task_contract(request_text, project_config, acceptance_criteria, invariants)
             store.write_text_artifact("planning/task-contract.md", approved, immutable=True)
@@ -541,6 +615,7 @@ def execute_run(
                 plan_origin="task_contract", approved_plan_version="task-contract"
             )
             store.append_event({"event": "task_contract_written"})
+            approval_artifact = "planning/task-contract.md"
 
         approval_required = _approval_required(
             project_config, effective_tier, classification.profiles
@@ -558,6 +633,7 @@ def execute_run(
                 ),
                 immutable=True,
             )
+            receipt("implementation_worker", [approval_artifact, "approval/human-approval.md"])
             store.append_event(
                 {
                     "event": "approval_required",
@@ -572,6 +648,8 @@ def execute_run(
                 repo=repo,
                 worktree=worktree,
             )
+
+        receipt("implementation_worker", [approval_artifact])
 
         engine.transition(RunState.EXECUTING)
         _run_worktree_stage(
@@ -589,6 +667,7 @@ def execute_run(
                 scope_context,
             ),
         )
+        receipt("validation", ["execution/worker-result.json"])
 
         engine.transition(RunState.VALIDATING)
         outcomes = _run_validation_stage(
@@ -615,6 +694,12 @@ def execute_run(
                 "outcomes": _validation_json(outcomes),
             }
         )
+        receipt(
+            "implementation_reviewer"
+            if _implementation_review_required(effective_tier, project_config.validation)
+            else "verifier",
+            ["execution/validation-v1.json"],
+        )
         if not all_passed(outcomes):
             _terminal(engine, RunState.FAILED, "required validation failed")
             return _outcome(engine, repo=repo, worktree=worktree)
@@ -632,6 +717,13 @@ def execute_run(
                 runtime.profile_constraints,
                 store,
                 worktree,
+            )
+            receipt(
+                "remediation" if implementation_review.blocking_ids() else "verifier",
+                [
+                    f"review/{max((store.root / 'review').glob('implementation-review-v*.json')).name}",
+                    "review/finding-index.json",
+                ],
             )
             cleanup_ephemeral_paths(worktree_repo.root)
             if worktree_repo.change_inventory(base_commit) != review_inventory:
@@ -677,6 +769,7 @@ def execute_run(
                     cycle=cycle,
                 ),
             )
+            receipt("validation", [f"execution/remediation-v{cycle}.json"], cycle)
             engine.transition(RunState.VALIDATING)
             outcomes = _run_validation_stage(
                 worktree_repo,
@@ -699,6 +792,7 @@ def execute_run(
                     "outcomes": _validation_json(outcomes),
                 }
             )
+            receipt("implementation_reviewer", [f"execution/validation-v{cycle + 1}.json"], cycle)
             if not all_passed(outcomes):
                 _terminal(engine, RunState.FAILED, "required validation failed after remediation")
                 return _outcome(engine, repo=repo, worktree=worktree)
@@ -713,6 +807,14 @@ def execute_run(
                 runtime.profile_constraints,
                 store,
                 worktree,
+            )
+            receipt(
+                "remediation" if implementation_review.blocking_ids() else "verifier",
+                [
+                    f"review/{max((store.root / 'review').glob('implementation-review-v*.json')).name}",
+                    "review/finding-index.json",
+                ],
+                cycle,
             )
             cleanup_ephemeral_paths(worktree_repo.root)
             if worktree_repo.change_inventory(base_commit) != review_inventory:
@@ -749,6 +851,7 @@ def execute_run(
             store,
             worktree,
         )
+        receipt("commit", ["verification/final-verification.json"])
         cleanup_ephemeral_paths(worktree_repo.root)
         if worktree_repo.change_inventory(base_commit) != review_inventory:
             raise ContextContractError("read-only verification changed the worktree")
@@ -816,8 +919,59 @@ def execute_run(
     except (IllegalTransitionError, UnsupportedTierError, TierDowngradeError) as exc:
         _terminal(engine, RunState.ESCALATED, str(exc))
         return _outcome(engine, repo=repo, worktree=worktree)
-    except AgentTimeoutError as exc:
-        _terminal(engine, RunState.FAILED, str(exc))
+    except (UsageLimitError, AgentTimeoutError, AgentInterruptedError) as exc:
+        try:
+            enforce_fence(worktree_repo, base_commit, fence)
+            snapshot = capture_snapshot(worktree_repo, base_commit)
+        except (ScopeViolation, OSError, GitCommandError) as guard_error:
+            _terminal(engine, RunState.ESCALATED, str(guard_error))
+            return _outcome(engine, repo=repo, worktree=worktree)
+        if isinstance(exc, UsageLimitError):
+            observation = exc.observation
+            due = next_attempt(observation)
+            pause_artifact = (
+                f"execution/pause-snapshot-{datetime.now(UTC).strftime('%Y%m%d%H%M%S%f')}.json"
+            )
+            store.write_json_artifact(pause_artifact, snapshot, immutable=True)
+            store.update_manifest(
+                pause=PauseRecord(
+                    provider=observation.provider,
+                    role=exc.role,
+                    limit_kind=observation.limit_kind,
+                    observed_at=observation.observed_at,
+                    reset_at=observation.reset_at,
+                    next_attempt_at=due,
+                    diagnostic=observation.diagnostic,
+                    worktree_digest=snapshot["digest"],
+                    snapshot_artifact=pause_artifact,
+                    account_id=observation.account_id,
+                    raw_diagnostic_ref=observation.raw_diagnostic_ref,
+                ),
+            )
+            engine.transition(RunState.PAUSED_USAGE)
+            if auto_resume and due is not None:
+                try:
+                    (scheduler_queue or SchedulerQueue()).register(repo.root, store.run_id, due)
+                except OSError as schedule_error:
+                    store.append_event(
+                        {"event": "scheduler_register_failed", "detail": str(schedule_error)}
+                    )
+        else:
+            pause_artifact = (
+                f"execution/pause-snapshot-{datetime.now(UTC).strftime('%Y%m%d%H%M%S%f')}.json"
+            )
+            store.write_json_artifact(pause_artifact, snapshot, immutable=True)
+            store.update_manifest(
+                pause=PauseRecord(
+                    provider=exc.provider,
+                    role=exc.role,
+                    observed_at=datetime.now(UTC),
+                    worktree_digest=snapshot["digest"],
+                    snapshot_artifact=pause_artifact,
+                    diagnostic=str(exc),
+                ),
+            )
+            engine.transition(RunState.PAUSED_INTERRUPTED)
         return _outcome(engine, repo=repo, worktree=worktree)
     except (OSError, subprocess.SubprocessError) as exc:
         _terminal(engine, RunState.ESCALATED, f"provider invocation failed: {exc}")
@@ -825,6 +979,8 @@ def execute_run(
     except Exception as exc:  # noqa: BLE001 - guarantee a durable terminal state
         _terminal(engine, RunState.FAILED, f"unexpected workflow failure: {exc}")
         return _outcome(engine, repo=repo, worktree=worktree)
+    finally:
+        claim.__exit__(None, None, None)
 
 
 def _normalize_criteria(criteria: list[str]) -> list[str]:

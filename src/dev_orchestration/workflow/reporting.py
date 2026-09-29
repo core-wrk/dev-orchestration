@@ -12,13 +12,15 @@ NEXT_ACTION: dict[RunState, str] = {
     RunState.PLANNED: "the plan is awaiting review",
     RunState.PLAN_REVIEWED: "the plan review is being reconciled",
     RunState.PLAN_FINALIZED: "execution starts next",
-    RunState.AWAITING_APPROVAL: "a human must approve the plan",
-    RunState.APPROVED: "execution starts next",
+    RunState.AWAITING_APPROVAL: "review the saved plan, then run `dev-orch approve RUN_ID`",
+    RunState.APPROVED: "run `dev-orch resume RUN_ID --checkpoint-digest DIGEST` in the linked cloud checkout",
     RunState.EXECUTING: "the implementation worker is running in the isolated worktree",
     RunState.VALIDATING: "configured validation commands are running",
     RunState.IMPLEMENTATION_REVIEW: "the actual diff is being reviewed",
     RunState.REMEDIATION: "blocking findings are being addressed",
     RunState.FINAL_VERIFICATION: "acceptance criteria are being verified",
+    RunState.PAUSED_USAGE: "resume after the provider's usage window resets",
+    RunState.PAUSED_INTERRUPTED: "run `dev-orch resume RUN_ID` after inspecting the interruption",
     RunState.COMPLETE_LOCAL: "review the local branch; dev-orch never pushes, merges, or deploys",
     RunState.BLOCKED: "inspect the last event and make the required human decision",
     RunState.ESCALATED: "inspect the last event and resolve the safety escalation",
@@ -27,7 +29,12 @@ NEXT_ACTION: dict[RunState, str] = {
 }
 
 
-def describe_status(manifest: RunManifest, events: list[dict]) -> str:
+def describe_status(
+    manifest: RunManifest,
+    events: list[dict],
+    checkpoint: dict | None = None,
+    resume_blocker: str | None = None,
+) -> str:
     lines = [
         f"Run:    {manifest.run_id}",
         f"Tier:   {manifest.tier}",
@@ -35,6 +42,40 @@ def describe_status(manifest: RunManifest, events: list[dict]) -> str:
     ]
     if manifest.git.branch:
         lines.append(f"Branch: {manifest.git.branch}")
+    if checkpoint is not None:
+        lines.append(f"Next role: {checkpoint.get('next_stage', 'unknown')}")
+    if manifest.pause is not None:
+        lines.append(f"Provider: {manifest.pause.provider}")
+        lines.append(f"Usage: {manifest.pause.limit_kind}")
+        lines.append(
+            f"Retry: {manifest.pause.next_attempt_at.isoformat()}"
+            if manifest.pause.next_attempt_at
+            else "Retry: manual"
+        )
+        if manifest.auto_resume and manifest.pause.account_id is None:
+            lines.append("Account: unverified; current login will be used")
+        if manifest.status is RunState.PAUSED_INTERRUPTED:
+            lines.append("Manual action: inspect partial work, then resume explicitly")
+    elif manifest.auto_resume:
+        lines.append("Usage: unknown (no saved quota signal)")
+    if manifest.cloud_session is not None:
+        lines.append(
+            f"Cloud: {manifest.cloud_session.provider} {manifest.cloud_session.session_id}"
+        )
+        if manifest.cloud_session.provider == "codex":
+            lines.append("Codex Cloud auto-resume unavailable")
+        elif manifest.cloud_session.provider == "claude":
+            lines.append(
+                "Claude Cloud auto-resume unavailable pending live session and worktree test"
+            )
+        if manifest.cloud_session.last_state in {"missing", "archived", "action_required"}:
+            lines.append(
+                "Manual action: inspect the cloud session and resume from intact artifacts"
+            )
+    elif manifest.status is RunState.AWAITING_APPROVAL:
+        lines.append("Manual action: link the intact cloud session before approval")
+    if resume_blocker:
+        lines.append(f"Resume: refused: {resume_blocker}")
     if events:
         last = events[-1]
         detail = last.get("detail") or last.get("outcome") or ""

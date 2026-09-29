@@ -15,24 +15,54 @@ TERMINAL_STATES = frozenset(
     {RunState.COMPLETE_LOCAL, RunState.ESCALATED, RunState.FAILED, RunState.CANCELLED}
 )
 _ALWAYS = frozenset({RunState.ESCALATED, RunState.FAILED, RunState.CANCELLED})
+_PAUSE = frozenset({RunState.PAUSED_USAGE, RunState.PAUSED_INTERRUPTED})
 LEGAL_TRANSITIONS: dict[RunState, frozenset[RunState]] = {
-    RunState.CREATED: _ALWAYS | {RunState.CLASSIFIED},
-    RunState.CLASSIFIED: _ALWAYS | {RunState.PLANNED, RunState.EXECUTING},
-    RunState.PLANNED: _ALWAYS | {RunState.PLAN_REVIEWED},
-    RunState.PLAN_REVIEWED: _ALWAYS | {RunState.PLAN_FINALIZED, RunState.PLANNED, RunState.BLOCKED},
+    RunState.CREATED: _ALWAYS | _PAUSE | {RunState.CLASSIFIED},
+    RunState.CLASSIFIED: _ALWAYS | _PAUSE | {RunState.PLANNED, RunState.EXECUTING},
+    RunState.PLANNED: _ALWAYS | _PAUSE | {RunState.PLAN_REVIEWED},
+    RunState.PLAN_REVIEWED: _ALWAYS
+    | _PAUSE
+    | {RunState.PLAN_FINALIZED, RunState.PLANNED, RunState.BLOCKED},
     RunState.PLAN_FINALIZED: _ALWAYS
+    | _PAUSE
     | {RunState.AWAITING_APPROVAL, RunState.EXECUTING, RunState.BLOCKED},
     RunState.AWAITING_APPROVAL: _ALWAYS | {RunState.APPROVED, RunState.BLOCKED},
-    RunState.APPROVED: _ALWAYS | {RunState.EXECUTING, RunState.BLOCKED},
-    RunState.EXECUTING: _ALWAYS | {RunState.VALIDATING, RunState.BLOCKED},
+    RunState.APPROVED: _ALWAYS | _PAUSE | {RunState.EXECUTING, RunState.BLOCKED},
+    RunState.EXECUTING: _ALWAYS | _PAUSE | {RunState.VALIDATING, RunState.BLOCKED},
     # FINAL_VERIFICATION is reachable directly because the trivial tier's stage path
     # omits implementation review; independent verification still runs.
     RunState.VALIDATING: _ALWAYS
+    | _PAUSE
     | {RunState.IMPLEMENTATION_REVIEW, RunState.FINAL_VERIFICATION, RunState.BLOCKED},
     RunState.IMPLEMENTATION_REVIEW: _ALWAYS
+    | _PAUSE
     | {RunState.REMEDIATION, RunState.FINAL_VERIFICATION, RunState.BLOCKED},
-    RunState.REMEDIATION: _ALWAYS | {RunState.VALIDATING},
-    RunState.FINAL_VERIFICATION: _ALWAYS | {RunState.COMPLETE_LOCAL},
+    RunState.REMEDIATION: _ALWAYS | _PAUSE | {RunState.VALIDATING},
+    RunState.FINAL_VERIFICATION: _ALWAYS | _PAUSE | {RunState.COMPLETE_LOCAL},
+    RunState.PAUSED_USAGE: _ALWAYS
+    | {
+        RunState.CLASSIFIED,
+        RunState.PLANNED,
+        RunState.PLAN_REVIEWED,
+        RunState.PLAN_FINALIZED,
+        RunState.EXECUTING,
+        RunState.VALIDATING,
+        RunState.IMPLEMENTATION_REVIEW,
+        RunState.REMEDIATION,
+        RunState.FINAL_VERIFICATION,
+    },
+    RunState.PAUSED_INTERRUPTED: _ALWAYS
+    | {
+        RunState.CLASSIFIED,
+        RunState.PLANNED,
+        RunState.PLAN_REVIEWED,
+        RunState.PLAN_FINALIZED,
+        RunState.EXECUTING,
+        RunState.VALIDATING,
+        RunState.IMPLEMENTATION_REVIEW,
+        RunState.REMEDIATION,
+        RunState.FINAL_VERIFICATION,
+    },
     RunState.BLOCKED: _ALWAYS | {RunState.REMEDIATION},
     RunState.COMPLETE_LOCAL: frozenset(),
     RunState.ESCALATED: frozenset(),

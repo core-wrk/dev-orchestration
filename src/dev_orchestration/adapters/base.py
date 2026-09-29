@@ -4,14 +4,19 @@ Workflow code invokes roles through this protocol and never sees provider
 command syntax. Adding a provider means adding an adapter, nothing else.
 """
 
+from __future__ import annotations
+
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from dev_orchestration.context.assembler import PROMPT_BUDGET_BYTES, PromptBudgetError
 from dev_orchestration.context.packet import ContextPacket
+
+if TYPE_CHECKING:
+    from dev_orchestration.adapters.usage import UsageObservation
 
 
 @dataclass(frozen=True)
@@ -42,6 +47,16 @@ class AgentTimeoutError(RuntimeError):
         self.provider = provider
 
 
+class AgentInterruptedError(RuntimeError):
+    """The provider process was terminated by an operating-system signal."""
+
+    def __init__(self, role: str, provider: str, signal_number: int) -> None:
+        super().__init__(f"role {role!r} provider {provider!r} exited on signal {signal_number}")
+        self.role = role
+        self.provider = provider
+        self.signal_number = signal_number
+
+
 @dataclass(frozen=True)
 class AgentResult:
     provider: str
@@ -52,6 +67,7 @@ class AgentResult:
     completed_at: datetime
     usage: dict | None = None
     stderr: str = ""
+    diagnostic: dict | None = None
 
 
 def agent_result_record(result: AgentResult) -> dict:
@@ -65,6 +81,7 @@ def agent_result_record(result: AgentResult) -> dict:
         "started_at": result.started_at.isoformat(),
         "completed_at": result.completed_at.isoformat(),
         "usage": result.usage,
+        "diagnostic": result.diagnostic,
     }
 
 
@@ -105,6 +122,7 @@ class AgentAdapter(Protocol):
     def healthcheck(self) -> AdapterStatus: ...
     def run(self, request: AgentRequest) -> AgentResult: ...
     def supports(self, capability: str) -> bool: ...
+    def observe_usage(self) -> UsageObservation: ...
 
 
 class FakeAdapter:
@@ -145,3 +163,8 @@ class FakeAdapter:
 
     def supports(self, capability: str) -> bool:
         return capability in self._capabilities
+
+    def observe_usage(self) -> UsageObservation:
+        from dev_orchestration.adapters.usage import UsageObservation
+
+        return UsageObservation(provider="fake")

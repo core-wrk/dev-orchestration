@@ -1,5 +1,7 @@
 """Typer entry point. Commands register here; logic lives in modules."""
 
+import shlex
+from datetime import UTC, datetime
 from pathlib import Path
 
 import typer
@@ -7,7 +9,12 @@ import yaml
 
 from dev_orchestration import doctor as doctor_module
 from dev_orchestration.adapters.registry import ReadOnlyRoleUnsupportedError, default_registry
-from dev_orchestration.artifacts.store import NoApprovedPlanError, RunStore
+from dev_orchestration.artifacts.store import (
+    CheckpointError,
+    NoApprovedPlanError,
+    RunClaimError,
+    RunStore,
+)
 from dev_orchestration.config.models import DeniedCommandError, GlobalConfig, ProjectConfig
 from dev_orchestration.config.resolver import ProtectedRuleViolation
 from dev_orchestration.context.assembler import ContextContractError
@@ -26,10 +33,28 @@ from dev_orchestration.init_repo import (
 )
 from dev_orchestration.roles.loader import MissingTemplateError
 from dev_orchestration.workflow.bootstrap import BootstrapIntegrityError
+from dev_orchestration.workflow.cloud import (
+    CloudDelivery,
+    link_cloud_session,
+)
 from dev_orchestration.workflow.engine import Engine, IllegalTransitionError
 from dev_orchestration.workflow.invoke import AgentInvocationError, SchemaEscalation
+from dev_orchestration.workflow.legacy import LegacyRecoveryError
+from dev_orchestration.workflow.recovery import (
+    ResumeRefused,
+    approve_run,
+    resume_blocker,
+    resume_due,
+    resume_run,
+)
 from dev_orchestration.workflow.reporting import describe_status, list_runs, read_events
 from dev_orchestration.workflow.runner import cleanup_worktree_if_unproductive, execute_run
+from dev_orchestration.workflow.scheduler import (
+    SchedulerError,
+    SchedulerQueue,
+    disable_launchd,
+    enable_launchd,
+)
 from dev_orchestration.workflow.scope_check import ScopeViolation
 from dev_orchestration.workflow.stages import RemediationExhausted
 from dev_orchestration.workflow.tiers import TierDowngradeError, UnsupportedTierError
@@ -57,6 +82,11 @@ EXPECTED_ERRORS = (
     NoApprovedPlanError,
     MissingTemplateError,
     ReadOnlyRoleUnsupportedError,
+    CheckpointError,
+    RunClaimError,
+    ResumeRefused,
+    LegacyRecoveryError,
+    SchedulerError,
 )
 
 app = typer.Typer(
@@ -64,6 +94,10 @@ app = typer.Typer(
     add_completion=False,
     help="Local-first orchestration for AI-assisted development.",
 )
+scheduler_app = typer.Typer(no_args_is_help=True, help="Manage usage-window wakeups.")
+app.add_typer(scheduler_app, name="scheduler")
+cloud_app = typer.Typer(no_args_is_help=True, help="Link a saved run to a provider cloud session.")
+app.add_typer(cloud_app, name="cloud")
 
 
 @app.callback(invoke_without_command=True)
@@ -146,6 +180,9 @@ def run(
         "--criterion",
         help="An acceptance criterion final verification must judge; repeat for several",
     ),
+    auto_resume: bool = typer.Option(
+        False, "--auto-resume", help="Resume after confirmed usage resets"
+    ),
 ) -> None:
     """Execute one local run. It never pushes, merges, or deploys."""
     criteria = list(criterion or [])
@@ -180,6 +217,7 @@ def run(
             tier_override=override,
             downgrade_reason=downgrade_reason,
             external_plan=plan_file,
+            auto_resume=auto_resume,
         )
     except EXPECTED_ERRORS as exc:
         typer.echo(str(exc), err=True)
@@ -189,6 +227,105 @@ def run(
         typer.echo(outcome.reason, err=True)
     if outcome.final_state is not RunState.COMPLETE_LOCAL:
         raise typer.Exit(1)
+
+
+@app.command()
+def approve(
+    run_id: str = typer.Argument(..., help="Cloud run ID awaiting human approval"),
+    checkout: Path | None = typer.Option(  # noqa: B008
+        None, "--checkout", help="Restored cloud worktree path"
+    ),
+) -> None:
+    """Approve the saved plan for a linked cloud run; resume separately in that session."""
+    try:
+        repo = discover_repo(Path.cwd())
+        config = _project_config(repo)
+        digest = approve_run(
+            repo,
+            config,
+            default_registry(config, _global_config()),
+            run_id,
+            restored_worktree=checkout.resolve() if checkout is not None else None,
+        )
+    except EXPECTED_ERRORS as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(f"{run_id}: approved saved plan")
+    checkout_arg = (
+        f" --checkout {shlex.quote(str(checkout.resolve()))}" if checkout is not None else ""
+    )
+    typer.echo(
+        f"In the linked cloud checkout, run: dev-orch resume {run_id} "
+        f"--checkpoint-digest {digest}{checkout_arg}"
+    )
+
+
+@app.command()
+def resume(
+    run_id: str = typer.Argument(..., help="Saved run ID"),
+    adopt_worktree: bool = typer.Option(
+        False, "--adopt-worktree", help="Accept inspected, in-scope partial edits after a crash"
+    ),
+    auto_resume: bool = typer.Option(
+        False, "--auto-resume", help="Opt in to later usage-window wakeups"
+    ),
+    checkout: Path | None = typer.Option(  # noqa: B008
+        None, "--checkout", help="Restored cloud checkout path"
+    ),
+    checkpoint_digest: str | None = typer.Option(
+        None, "--checkpoint-digest", help="Expected SHA-256 of the saved checkpoint"
+    ),
+) -> None:
+    """Continue the first unfinished stage of an interrupted run."""
+    try:
+        repo = discover_repo(Path.cwd())
+        config = _project_config(repo)
+        registry = default_registry(config, _global_config())
+        outcome = resume_run(
+            repo,
+            config,
+            registry,
+            run_id,
+            adopt_worktree=adopt_worktree,
+            auto_resume=True if auto_resume else None,
+            restored_worktree=checkout.resolve() if checkout is not None else None,
+            expected_checkpoint_digest=checkpoint_digest,
+        )
+    except EXPECTED_ERRORS as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(f"{outcome.run_id}: {outcome.final_state}")
+    if outcome.reason:
+        typer.echo(outcome.reason, err=True)
+    if outcome.final_state is not RunState.COMPLETE_LOCAL:
+        raise typer.Exit(1)
+
+
+@cloud_app.command("link")
+def cloud_link(
+    run_id: str = typer.Argument(...),
+    provider: str = typer.Option(..., "--provider"),
+    session_id: str = typer.Option(..., "--session-id"),
+    environment_id: str = typer.Option(..., "--environment-id"),
+    checkout: Path | None = typer.Option(  # noqa: B008
+        None, "--checkout", help="Restored cloud worktree path"
+    ),
+) -> None:
+    """Link an intact paused run to an existing cloud session."""
+    try:
+        repo = discover_repo(Path.cwd())
+        session = link_cloud_session(
+            repo,
+            run_id,
+            provider,
+            session_id,
+            environment_id,
+            restored_worktree=checkout.resolve() if checkout is not None else None,
+        )
+    except EXPECTED_ERRORS as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(f"{run_id}: linked {session.provider} session {session.session_id}")
 
 
 @app.command()
@@ -203,12 +340,21 @@ def status(run_id: str | None = typer.Argument(None, help="Run id to inspect")) 
         store_root = repo.root / ".ai" / "runs" / selected
         if not (store_root / "manifest.json").is_file():
             raise NoSuchRunError(f"run {selected!r} does not exist")
-        from dev_orchestration.domain.run import RunManifest
 
-        manifest = RunManifest.model_validate_json(
-            (store_root / "manifest.json").read_text(encoding="utf-8")
+        store = RunStore(repo.root, selected)
+        manifest = store.read_manifest()
+        blocker = None
+        if manifest.status in {RunState.PAUSED_USAGE, RunState.PAUSED_INTERRUPTED}:
+            try:
+                config = _project_config(repo)
+                blocker = resume_blocker(
+                    repo, config, default_registry(config, _global_config()), selected
+                )
+            except EXPECTED_ERRORS as exc:
+                blocker = str(exc)
+        typer.echo(
+            describe_status(manifest, read_events(store_root), store.latest_checkpoint(), blocker)
         )
-        typer.echo(describe_status(manifest, read_events(store_root)))
     except EXPECTED_ERRORS + (NoSuchRunError,) as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(1) from exc
@@ -231,15 +377,25 @@ def cancel(
             raise NoSuchRunError(f"run {run_id!r} does not exist")
         engine = Engine(store)
         provider_stopped = store.stop_active_provider()
-        outcome = engine.cancel(reason)
-        try:
-            config = _project_config(repo)
-            worktree_root = Path(_global_config().worktree_root).expanduser()
-            worktree = worktree_path(worktree_root, config.project.name, run_id)
-        except GitCommandError:
-            pass  # no project.yaml (yet, or ever) -- cancellation itself still stands
-        else:
-            cleanup_worktree_if_unproductive(engine, repo, worktree)
+        with store.claim(wait_seconds=10 if provider_stopped else 0):
+            outcome = engine.cancel(reason)
+            try:
+                SchedulerQueue().cancel(repo.root, run_id)
+            except OSError as exc:
+                store.append_event({"event": "scheduler_cancel_failed", "detail": str(exc)})
+                typer.echo(
+                    f"{run_id}: cancelled, but scheduled wakeup removal failed: {exc}",
+                    err=True,
+                )
+                raise typer.Exit(1) from exc
+            try:
+                config = _project_config(repo)
+                worktree_root = Path(_global_config().worktree_root).expanduser()
+                worktree = worktree_path(worktree_root, config.project.name, run_id)
+            except GitCommandError:
+                pass  # no project.yaml (yet, or ever) -- cancellation itself still stands
+            else:
+                cleanup_worktree_if_unproductive(engine, repo, worktree)
         suffix = " (active provider terminated)" if provider_stopped else ""
         typer.echo(f"{run_id}: {outcome.status}{suffix}")
     except EXPECTED_ERRORS + (NoSuchRunError,) as exc:
@@ -260,3 +416,69 @@ def runs() -> None:
     except EXPECTED_ERRORS + (NoSuchRunError,) as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(1) from exc
+
+
+@scheduler_app.command("enable")
+def scheduler_enable() -> None:
+    """Install the current user's once-per-minute launchd wakeup."""
+    try:
+        path = enable_launchd()
+    except SchedulerError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(f"scheduler enabled: {path}")
+
+
+@scheduler_app.command("disable")
+def scheduler_disable() -> None:
+    """Stop future wakeups while retaining saved runs and due times."""
+    disable_launchd()
+    typer.echo("scheduler disabled")
+
+
+@scheduler_app.command("tick", hidden=True)
+def scheduler_tick() -> None:
+    """Process due entries through the same claimed resume path as a hosted driver."""
+    queue = SchedulerQueue()
+    for entry in queue.due():
+        repo_root = Path(entry["repository"])
+        run_id = entry["run_id"]
+        try:
+            repo = discover_repo(repo_root)
+            config = _project_config(repo)
+            registry = default_registry(config, _global_config())
+            outcome = resume_due(repo, config, registry, run_id, scheduler_queue=queue)
+            if isinstance(outcome, CloudDelivery):
+                typer.echo(
+                    f"{run_id}: cloud delivery {'queued' if outcome.accepted else 'rejected'}"
+                )
+            else:
+                typer.echo(f"{run_id}: {outcome.final_state}")
+                if outcome.final_state is not RunState.PAUSED_USAGE:
+                    queue.cancel(repo.root, run_id)
+        except RunClaimError:
+            typer.echo(f"{run_id}: another wakeup owns this run")
+        except EXPECTED_ERRORS as exc:
+            typer.echo(f"{run_id}: automatic resume stopped: {exc}", err=True)
+            store = RunStore(repo_root, run_id)
+            if (store.root / "manifest.json").is_file():
+                try:
+                    with store.claim():
+                        manifest = store.read_manifest()
+                        if (
+                            manifest.status is RunState.PAUSED_USAGE
+                            and manifest.auto_resume
+                            and manifest.pause is not None
+                            and manifest.pause.next_attempt_at is not None
+                            and manifest.pause.next_attempt_at > datetime.now(UTC)
+                        ):
+                            queue.register(repo_root, run_id, manifest.pause.next_attempt_at)
+                            continue
+                        if manifest.status is RunState.PAUSED_USAGE:
+                            store.update_manifest(auto_resume=False)
+                            store.append_event({"event": "auto_resume_stopped", "detail": str(exc)})
+                        queue.cancel(repo_root, run_id)
+                except RunClaimError:
+                    typer.echo(f"{run_id}: another wakeup owns this run")
+            else:
+                queue.cancel(repo_root, run_id)

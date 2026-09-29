@@ -4,19 +4,22 @@ Durable decision artifacts live here and are committed with the code they
 explain. Plan versions are immutable once written.
 """
 
+import fcntl
 import hashlib
 import json
 import os
 import re
 import signal
+import subprocess
 import time
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
 from dev_orchestration.artifacts.events import append_event
 from dev_orchestration.domain.run import RunManifest
 
-SUBDIRECTORIES = ("planning", "execution", "review", "verification", "approval")
+SUBDIRECTORIES = ("planning", "execution", "review", "verification", "approval", "checkpoints")
 
 
 class PlanOverwriteError(RuntimeError):
@@ -25,6 +28,14 @@ class PlanOverwriteError(RuntimeError):
 
 class NoApprovedPlanError(RuntimeError):
     """Execution was attempted before an immutable plan was approved."""
+
+
+class RunClaimError(RuntimeError):
+    """Another process owns the run."""
+
+
+class CheckpointError(RuntimeError):
+    """Recovery evidence is missing or changed."""
 
 
 def slugify(text: str) -> str:
@@ -40,6 +51,14 @@ def new_run_id(workflow: str, slug: str, now: datetime | None = None) -> str:
     return f"{stamp}_{workflow}_{slug}"
 
 
+def _sync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 class RunStore:
     def __init__(self, repo_root: Path, run_id: str) -> None:
         self.repo_root = repo_root
@@ -52,9 +71,14 @@ class RunStore:
         self._write_manifest(manifest)
 
     def _write_manifest(self, manifest: RunManifest) -> None:
-        (self.root / "manifest.json").write_text(
-            manifest.model_dump_json(indent=2) + "\n", encoding="utf-8"
-        )
+        target = self.root / "manifest.json"
+        temporary = self.root / f".manifest-{os.getpid()}.tmp"
+        with temporary.open("w", encoding="utf-8") as handle:
+            handle.write(manifest.model_dump_json(indent=2) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, target)
+        _sync_directory(self.root)
 
     def read_manifest(self) -> RunManifest:
         return RunManifest.model_validate_json(
@@ -65,6 +89,106 @@ class RunStore:
         manifest = self.read_manifest().model_copy(update=fields)
         self._write_manifest(manifest)
         return manifest
+
+    @contextmanager
+    def claim(self, *, wait_seconds: float = 0):
+        """Hold one cross-process run claim across all recovery decisions and work."""
+        self.root.mkdir(parents=True, exist_ok=True)
+        with (self.root / "claim.lock").open("a+b") as handle:
+            deadline = time.monotonic() + wait_seconds
+            while True:
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError as exc:
+                    if time.monotonic() >= deadline:
+                        raise RunClaimError(f"run {self.run_id} is already active") from exc
+                    time.sleep(0.1)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+    def checkpoint(
+        self,
+        *,
+        next_stage: str,
+        artifacts: list[str],
+        worktree: dict,
+        inputs: dict[str, str],
+        cycle: int = 0,
+        attempt: int = 1,
+    ) -> dict:
+        """Publish immutable evidence before advancing the manifest pointer."""
+        previous = self.latest_checkpoint()
+        sequence = previous["sequence"] + 1 if previous else 1
+        all_artifacts = set(previous["artifacts"]) if previous else set()
+        all_artifacts.update(artifacts)
+        hashes = {}
+        for name in sorted(all_artifacts):
+            target = self.root / name
+            with target.open("rb") as handle:
+                hashes[name] = hashlib.sha256(handle.read()).hexdigest()
+                os.fsync(handle.fileno())
+            _sync_directory(target.parent)
+        receipt = {
+            "sequence": sequence,
+            "next_stage": next_stage,
+            "cycle": cycle,
+            "attempt": attempt,
+            "artifacts": hashes,
+            "worktree": worktree,
+            "inputs": inputs,
+            "recorded_at": datetime.now(UTC).isoformat(),
+        }
+        name = f"checkpoints/{sequence:04d}.json"
+        self.write_json_artifact(name, receipt, immutable=True)
+        self.update_manifest(checkpoint=name)
+        return receipt
+
+    def latest_checkpoint(self) -> dict | None:
+        name = self.read_manifest().checkpoint
+        if name is None:
+            return None
+        if not re.fullmatch(r"checkpoints/\d{4,}\.json", name):
+            raise CheckpointError("invalid checkpoint path in manifest")
+        path = self.root / name
+        if not path.is_file():
+            raise CheckpointError(f"checkpoint {name} is missing")
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def verify_checkpoint(self) -> dict:
+        receipt = self.latest_checkpoint()
+        if receipt is None:
+            raise CheckpointError("run has no recovery checkpoint")
+        for name, digest in receipt["artifacts"].items():
+            if Path(name).is_absolute() or ".." in Path(name).parts:
+                raise CheckpointError(f"invalid checkpoint artifact {name}")
+            target = self.root / name
+            if not target.is_file() or hashlib.sha256(target.read_bytes()).hexdigest() != digest:
+                raise CheckpointError(f"checkpoint artifact {name} changed or is missing")
+        # An output created just before a crash has no completed-stage receipt.
+        # Refuse it explicitly so directory-based version lookup cannot select it.
+        completed = set(receipt["artifacts"])
+        output_patterns = (
+            "planning/plan-v*.md",
+            "planning/approved-plan.md",
+            "planning/task-contract.md",
+            "review/plan-review-v*.json",
+            "review/implementation-review-v*.json",
+            "execution/worker-result.json",
+            "execution/validation-v*.json",
+            "execution/remediation-v*.json",
+            "verification/final-verification.json",
+        )
+        for pattern in output_patterns:
+            for path in self.root.glob(pattern):
+                name = path.relative_to(self.root).as_posix()
+                if name not in completed:
+                    raise CheckpointError(
+                        f"unreceipted stage output {name}; inspect the interrupted attempt"
+                    )
+        return receipt
 
     def write_plan_version(self, content: str) -> Path:
         planning = self.root / "planning"
@@ -153,6 +277,11 @@ class RunStore:
         mode = "x" if immutable else "w"
         with target.open(mode, encoding="utf-8") as handle:
             handle.write(content)
+            if immutable:
+                handle.flush()
+                os.fsync(handle.fileno())
+        if immutable:
+            _sync_directory(target.parent)
         return target
 
     def write_json_artifact(self, relative: str, value: object, *, immutable: bool = False) -> Path:
@@ -195,6 +324,7 @@ class RunStore:
             "pid": pid,
             "process_group": pid,
             "started_at": datetime.now(UTC).isoformat(),
+            "process_birth": _process_birth(pid),
         }
         self.write_json_artifact("execution/active-provider.json", value)
         self.append_event({"event": "provider_started", **value})
@@ -211,6 +341,12 @@ class RunStore:
         pid = value.get("pid")
         pgid = value.get("process_group")
         if not isinstance(pid, int) or not isinstance(pgid, int):
+            self.clear_active_provider()
+            return False
+        birth = value.get("process_birth")
+        if birth is None:
+            raise CheckpointError("provider process start time is missing; cannot terminate safely")
+        if birth != _process_birth(pid):
             self.clear_active_provider()
             return False
         try:
@@ -233,3 +369,38 @@ class RunStore:
             return False
         finally:
             self.clear_active_provider()
+
+    def active_provider_alive(self) -> bool:
+        if not self.active_provider_path.is_file():
+            return False
+        value = json.loads(self.active_provider_path.read_text(encoding="utf-8"))
+        pid = value.get("pid")
+        if not isinstance(pid, int):
+            raise CheckpointError("active provider record has no valid PID")
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            self.clear_active_provider()
+            return False
+        except PermissionError:
+            return True
+        birth = value.get("process_birth")
+        if birth is not None and birth != _process_birth(pid):
+            self.clear_active_provider()
+            return False
+        return True
+
+
+def _process_birth(pid: int) -> str | None:
+    """OS process start string, used with PID to detect recycled process IDs."""
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "lstart="],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return result.stdout.strip() or None if result.returncode == 0 else None

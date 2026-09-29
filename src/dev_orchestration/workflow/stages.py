@@ -32,7 +32,9 @@ def _request(registry: RoleRegistry, role: str, store: RunStore, packet, cwd: Pa
         prompt=load_role_prompt(role),
         cwd=cwd,
         context=packet,
-        on_process_started=lambda pid: store.record_active_provider(role, "codex", pid),
+        on_process_started=lambda pid: store.record_active_provider(
+            role, registry.binding_for(role).adapter, pid
+        ),
         on_process_finished=store.clear_active_provider,
     )
 

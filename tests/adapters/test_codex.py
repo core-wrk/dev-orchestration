@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from dev_orchestration.adapters.base import AgentRequest, AgentTimeoutError
+from dev_orchestration.adapters.base import AgentInterruptedError, AgentRequest, AgentTimeoutError
 from dev_orchestration.adapters.codex import (
     CODEX_BUNDLE_PATH,
     CodexAdapter,
@@ -234,6 +234,30 @@ def test_run_turns_a_timeout_into_a_named_stage_error(monkeypatch):
         CodexAdapter(binary=Path("/bin/codex")).run(
             AgentRequest(role="planner", prompt="p", cwd=Path("/w"), timeout_seconds=42)
         )
+
+
+def test_run_reports_process_signal_as_interruption(monkeypatch):
+    _capture_subprocess_run(monkeypatch, returncode=-9)
+    with pytest.raises(AgentInterruptedError, match="planner.*signal 9"):
+        CodexAdapter(binary=Path("/bin/codex")).run(
+            AgentRequest(role="planner", prompt="p", cwd=Path("/w"))
+        )
+
+
+def test_automatic_recovery_requires_chatgpt_login(monkeypatch):
+    adapter = CodexAdapter(binary=Path("/bin/codex"))
+    monkeypatch.setattr(
+        adapter,
+        "_probe",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0, "Logged in using ChatGPT", ""),
+    )
+    assert adapter.authenticated() is True
+    monkeypatch.setattr(
+        adapter,
+        "_probe",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0, "Logged in using API key", ""),
+    )
+    assert adapter.authenticated() is False
 
 
 def test_run_falls_back_to_raw_stdout_when_nothing_parses(monkeypatch):

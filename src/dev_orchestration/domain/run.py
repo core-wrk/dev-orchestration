@@ -21,8 +21,36 @@ class RoleBinding(BaseModel):
     resolved_version: str | None = None
 
 
+class PauseRecord(BaseModel):
+    provider: str
+    role: str
+    limit_kind: str = "unknown"
+    observed_at: datetime
+    reset_at: datetime | None = None
+    next_attempt_at: datetime | None = None
+    retry_count: int = 0
+    diagnostic: str = ""
+    worktree_digest: str | None = None
+    snapshot_artifact: str | None = None
+    account_id: str | None = None
+    raw_diagnostic_ref: str | None = None
+
+
+class CloudSession(BaseModel):
+    provider: str
+    session_id: str
+    repository: str
+    branch: str
+    environment_id: str
+    last_state: str = "unknown"
+    origin: str = "linked"
+    continuation_verified: bool = False
+    last_delivery_digest: str | None = None
+    last_delivery_at: datetime | None = None
+
+
 class RunManifest(BaseModel):
-    schema_version: str = "1.0"
+    schema_version: str = "1.1"
     run_id: str
     repository: str
     workflow: str
@@ -51,3 +79,10 @@ class RunManifest(BaseModel):
     created_at: datetime | None = None
     completed_at: datetime | None = None
     terminal_reason: str | None = None
+    checkpoint: str | None = None
+    auto_resume: bool = False
+    pause: PauseRecord | None = None
+    cloud_session: CloudSession | None = None
+    linked_source_run: str | None = None
+    external_plan_artifact: str | None = None
+    stage_attempts: dict[str, int] = Field(default_factory=dict)

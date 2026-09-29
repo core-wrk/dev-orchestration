@@ -98,6 +98,10 @@ class GitRepo:
     def current_commit(self) -> str:
         return self.run_git("rev-parse", "HEAD")
 
+    def remote_url(self) -> str:
+        """Read the origin identity without changing any repository configuration."""
+        return self.run_git("config", "--get", "remote.origin.url")
+
     def create_branch(self, name: str) -> None:
         self.run_git("checkout", "-q", "-b", name)
 

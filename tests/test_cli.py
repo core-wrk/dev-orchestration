@@ -1,4 +1,5 @@
 import subprocess
+from datetime import UTC, datetime, timedelta
 
 import yaml
 from typer.testing import CliRunner
@@ -7,6 +8,7 @@ from dev_orchestration.artifacts.store import RunStore
 from dev_orchestration.cli import app
 from dev_orchestration.domain.enums import ProjectClass, RunState, Tier
 from dev_orchestration.domain.run import RunManifest
+from dev_orchestration.workflow.scheduler import SchedulerQueue
 
 
 def test_help_exits_zero():
@@ -26,6 +28,10 @@ def test_cancel_command_moves_a_non_terminal_run_to_cancelled(tmp_path, monkeypa
             tier=Tier.STANDARD,
             project_class=ProjectClass.INTERNAL_UTILITY,
         )
+    )
+    monkeypatch.setattr(
+        "dev_orchestration.cli.SchedulerQueue",
+        lambda: SchedulerQueue(tmp_path / "queue.json"),
     )
     monkeypatch.chdir(tmp_path)
 
@@ -56,6 +62,10 @@ def test_cancel_command_terminates_a_recorded_provider(tmp_path, monkeypatch):
     monkeypatch.setattr(
         RunStore, "stop_active_provider", lambda _self: stopped.append(True) or True
     )
+    monkeypatch.setattr(
+        "dev_orchestration.cli.SchedulerQueue",
+        lambda: SchedulerQueue(tmp_path / "queue.json"),
+    )
     monkeypatch.chdir(tmp_path)
 
     result = CliRunner().invoke(app, ["cancel", "run-1"])
@@ -63,6 +73,53 @@ def test_cancel_command_terminates_a_recorded_provider(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     assert stopped == [True]
     assert "active provider terminated" in result.output
+
+
+def test_cancel_removes_stale_due_entry_even_if_opt_in_is_off(tmp_path, monkeypatch):
+    _init_git_repo(tmp_path)
+    store = RunStore(tmp_path, "run-1")
+    store.initialize(
+        RunManifest(
+            run_id="run-1",
+            repository="demo",
+            workflow="standard",
+            tier=Tier.STANDARD,
+            project_class=ProjectClass.INTERNAL_UTILITY,
+            auto_resume=False,
+        )
+    )
+    queue = SchedulerQueue(tmp_path / "queue.json")
+    queue.register(tmp_path, "run-1", datetime.now(UTC) - timedelta(minutes=1))
+    monkeypatch.setattr("dev_orchestration.cli.SchedulerQueue", lambda: queue)
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(app, ["cancel", "run-1"])
+    assert result.exit_code == 0, result.output
+    assert queue.due() == []
+
+
+def test_cancel_reports_queue_cleanup_failure_after_cancelling_run(tmp_path, monkeypatch):
+    _init_git_repo(tmp_path)
+    store = RunStore(tmp_path, "run-1")
+    store.initialize(
+        RunManifest(
+            run_id="run-1",
+            repository="demo",
+            workflow="standard",
+            tier=Tier.STANDARD,
+            project_class=ProjectClass.INTERNAL_UTILITY,
+        )
+    )
+
+    class UnwritableQueue:
+        def cancel(self, _repo, _run_id):
+            raise PermissionError("queue is read-only")
+
+    monkeypatch.setattr("dev_orchestration.cli.SchedulerQueue", UnwritableQueue)
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(app, ["cancel", "run-1"])
+    assert result.exit_code == 1
+    assert "cancelled, but scheduled wakeup removal failed" in result.output
+    assert store.read_manifest().status is RunState.CANCELLED
 
 
 def _init_git_repo(root):
