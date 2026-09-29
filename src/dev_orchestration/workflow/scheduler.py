@@ -75,6 +75,34 @@ class SchedulerQueue:
             ]
 
 
+def adopt_login_shell_path() -> None:
+    """launchd starts jobs with PATH=/usr/bin:/bin:...; recover the user's real PATH.
+
+    Read at every tick rather than baked into the plist, so node/nvm upgrades
+    never leave a stale path behind. Interactive mode (-i) is needed because
+    nvm is usually initialised in the rc file, not the login profile.
+    """
+    shell = os.environ.get("SHELL") or "/bin/zsh"
+    marker = "__DEV_ORCH_PATH__"
+    try:
+        proc = subprocess.run(
+            [shell, "-lic", f'printf "{marker}%s{marker}" "$PATH"'],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+            stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return
+    parts = proc.stdout.split(marker)
+    if len(parts) < 3 or not parts[1]:
+        return
+    current = os.environ.get("PATH", "").split(os.pathsep)
+    extra = [entry for entry in parts[1].split(os.pathsep) if entry and entry not in current]
+    os.environ["PATH"] = os.pathsep.join([*extra, *current])
+
+
 def enable_launchd(plist: Path = LAUNCH_AGENT) -> Path:
     binary = shutil.which("dev-orch")
     if binary is None:

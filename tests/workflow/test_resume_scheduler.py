@@ -1,3 +1,4 @@
+import os
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -15,6 +16,7 @@ from dev_orchestration.workflow.runner import execute_run
 from dev_orchestration.workflow.scheduler import (
     SchedulerError,
     SchedulerQueue,
+    adopt_login_shell_path,
     disable_launchd,
     enable_launchd,
 )
@@ -266,3 +268,16 @@ def test_missing_authentication_refuses_due_wakeup_before_provider_call(tmp_path
             scheduler_queue=queue,
         )
     assert adapter.seen == []
+
+
+def test_scheduler_adopts_login_shell_path(monkeypatch):
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *_a, **_k: subprocess.CompletedProcess(
+            [], 0, "noise__DEV_ORCH_PATH__/nvm/bin:/usr/bin__DEV_ORCH_PATH__", ""
+        ),
+    )
+    adopt_login_shell_path()
+    assert os.environ["PATH"] == "/nvm/bin:/usr/bin:/bin"

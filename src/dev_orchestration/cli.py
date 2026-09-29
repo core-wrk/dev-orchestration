@@ -52,6 +52,7 @@ from dev_orchestration.workflow.runner import cleanup_worktree_if_unproductive, 
 from dev_orchestration.workflow.scheduler import (
     SchedulerError,
     SchedulerQueue,
+    adopt_login_shell_path,
     disable_launchd,
     enable_launchd,
 )
@@ -440,7 +441,10 @@ def scheduler_disable() -> None:
 def scheduler_tick() -> None:
     """Process due entries through the same claimed resume path as a hosted driver."""
     queue = SchedulerQueue()
-    for entry in queue.due():
+    due = queue.due()
+    if due:
+        adopt_login_shell_path()
+    for entry in due:
         repo_root = Path(entry["repository"])
         run_id = entry["run_id"]
         try:

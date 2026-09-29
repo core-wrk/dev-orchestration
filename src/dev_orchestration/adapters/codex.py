@@ -150,7 +150,8 @@ class CodexAdapter:
             proc = self._probe("login", "status", timeout=15)
         except (OSError, subprocess.SubprocessError):
             return False
-        return proc.returncode == 0 and "ChatGPT" in proc.stdout
+        # `codex login status` reports on stderr, so stdout alone is always empty.
+        return proc.returncode == 0 and "ChatGPT" in proc.stdout + proc.stderr
 
     def _read_account_snapshot(self) -> tuple[dict, dict | None]:
         """Use the documented read-only app-server methods; never read token files."""

@@ -274,6 +274,18 @@ def test_automatic_recovery_requires_chatgpt_login(monkeypatch):
     assert adapter.authenticated() is False
 
 
+def test_login_status_reported_on_stderr_counts(monkeypatch):
+    adapter = CodexAdapter(binary=Path("/bin/codex"))
+    monkeypatch.setattr(
+        adapter,
+        "_probe",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            [], 0, "", "Logged in using ChatGPT\n"
+        ),
+    )
+    assert adapter.authenticated() is True
+
+
 def test_run_falls_back_to_raw_stdout_when_nothing_parses(monkeypatch):
     _capture_subprocess_run(monkeypatch, stdout="not json at all\n")
     adapter = CodexAdapter(binary=Path("/bin/codex"))
