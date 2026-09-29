@@ -4,7 +4,7 @@ import pytest
 
 from dev_orchestration.adapters.base import FakeAdapter
 from dev_orchestration.adapters.claude import ClaudeAdapter
-from dev_orchestration.adapters.codex import CodexAdapter
+from dev_orchestration.adapters.codex import MODEL_ALIASES, CodexAdapter
 from dev_orchestration.adapters.registry import (
     DEFAULT_ROLES,
     READ_ONLY_ROLES,
@@ -28,13 +28,13 @@ def registry():
 
 def test_default_roles_match_the_specification():
     expected = {
-        "classifier": ("codex", "gpt-6-luna", "high"),
+        "classifier": ("codex", "luna", "high"),
         "planner": ("claude", "claude-opus-5-5", "medium"),
-        "plan_reviewer": ("codex", "gpt-6-sol", "high"),
+        "plan_reviewer": ("codex", "sol", "high"),
         "plan_reconciler": ("claude", "claude-sonnet-5-5", "high"),
-        "implementation_worker": ("codex", "gpt-6-luna", "high"),
+        "implementation_worker": ("codex", "luna", "high"),
         "implementation_reviewer": ("claude", "claude-opus-5-5", "high"),
-        "verifier": ("codex", "gpt-6-luna", "high"),
+        "verifier": ("codex", "luna", "high"),
     }
     assert {
         role: (binding.adapter, binding.model, binding.reasoning)
@@ -81,7 +81,8 @@ def test_the_read_only_restriction_survives_into_the_emitted_command():
         if DEFAULT_ROLES[role].adapter == "codex":
             argv = codex.build_exec_command(request)
             assert argv[argv.index("-s") + 1] == "read-only"
-            assert argv[argv.index("-m") + 1] == DEFAULT_ROLES[role].model
+            expected_model = MODEL_ALIASES.get(DEFAULT_ROLES[role].model, DEFAULT_ROLES[role].model)
+            assert argv[argv.index("-m") + 1] == expected_model
         else:
             argv = ClaudeAdapter().build_command(request)
             assert argv[argv.index("--tools") + 1] == "Read,Grep,Glob"
@@ -94,7 +95,7 @@ def test_the_read_only_restriction_survives_into_the_emitted_command():
 
 def test_build_request_carries_the_configured_model(registry):
     request = registry.build_request("implementation_worker", prompt="build", cwd=Path("/w"))
-    assert request.model_alias == "gpt-6-luna"
+    assert request.model_alias == "luna"
     assert request.role == "implementation_worker"
 
 

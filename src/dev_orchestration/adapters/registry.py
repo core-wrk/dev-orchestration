@@ -28,18 +28,18 @@ DEFAULT_ROLES: dict[str, RoleConfig] = {
     # allowedTools restriction: classification in particular should never
     # need anywhere near that long.
     "classifier": RoleConfig(
-        adapter="codex", model="gpt-6-luna", reasoning="high", timeout_seconds=600
+        adapter="codex", model="luna", reasoning="high", timeout_seconds=600
     ),
     "planner": RoleConfig(adapter="claude", model="claude-opus-5-5", reasoning="medium"),
-    "plan_reviewer": RoleConfig(adapter="codex", model="gpt-6-sol", reasoning="high"),
+    "plan_reviewer": RoleConfig(adapter="codex", model="sol", reasoning="high"),
     "plan_reconciler": RoleConfig(adapter="claude", model="claude-sonnet-5-5", reasoning="high"),
     "implementation_worker": RoleConfig(
-        adapter="codex", model="gpt-6-luna", reasoning="high", timeout_seconds=1800
+        adapter="codex", model="luna", reasoning="high", timeout_seconds=1800
     ),
     "implementation_reviewer": RoleConfig(
         adapter="claude", model="claude-opus-5-5", reasoning="high"
     ),
-    "verifier": RoleConfig(adapter="codex", model="gpt-6-luna", reasoning="high"),
+    "verifier": RoleConfig(adapter="codex", model="luna", reasoning="high"),
 }
 
 
