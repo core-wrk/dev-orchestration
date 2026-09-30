@@ -79,6 +79,7 @@ def _smoke_test(venv: Path) -> None:
     _run(
         [
             str(venv / "bin" / "python"),
+            "-I",
             "-c",
             "from dev_orchestration.roles.loader import ROLE_TEMPLATES, load_role_prompt;"
             "[load_role_prompt(r) for r in ROLE_TEMPLATES]",
@@ -108,7 +109,11 @@ def _replace_link(link: Path, target: Path) -> None:
 
 def _prune(releases: Path, current: Path) -> None:
     others = sorted(
-        (p for p in releases.iterdir() if p.is_dir() and not p.name.startswith(".") and p != current),
+        (
+            p
+            for p in releases.iterdir()
+            if p.is_dir() and not p.name.startswith(".") and p != current
+        ),
         key=lambda p: p.stat().st_mtime,
         reverse=True,
     )

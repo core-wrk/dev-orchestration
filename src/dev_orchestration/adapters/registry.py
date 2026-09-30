@@ -27,9 +27,7 @@ DEFAULT_ROLES: dict[str, RoleConfig] = {
     # The 600s timeout is a second, cheap line of defense on top of the
     # allowedTools restriction: classification in particular should never
     # need anywhere near that long.
-    "classifier": RoleConfig(
-        adapter="codex", model="luna", reasoning="high", timeout_seconds=600
-    ),
+    "classifier": RoleConfig(adapter="codex", model="luna", reasoning="high", timeout_seconds=600),
     "planner": RoleConfig(adapter="claude", model="claude-opus-5-5", reasoning="medium"),
     "plan_reviewer": RoleConfig(adapter="codex", model="sol", reasoning="high"),
     "plan_reconciler": RoleConfig(adapter="claude", model="claude-sonnet-5-5", reasoning="high"),

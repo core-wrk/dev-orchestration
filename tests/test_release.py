@@ -13,7 +13,7 @@ def test_promote_builds_self_contained_release(tmp_path):
 
     venv = releases / commit / "venv"
     where = subprocess.run(
-        [venv / "bin" / "python", "-c", "import dev_orchestration as d; print(d.__file__)"],
+        [venv / "bin" / "python", "-I", "-c", "import dev_orchestration as d; print(d.__file__)"],
         capture_output=True,
         text=True,
         check=True,
