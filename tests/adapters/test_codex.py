@@ -65,7 +65,7 @@ def test_exec_command_uses_verified_flags():
     assert "--ignore-user-config" in cmd
     assert cmd[cmd.index("-C") + 1] == "/work"
     assert cmd[cmd.index("-s") + 1] == "workspace-write"
-    assert cmd[cmd.index("-m") + 1] == "gpt-5.6-sol"
+    assert cmd[cmd.index("-m") + 1] == "gpt-6.1-sol"
     assert cmd[cmd.index("--output-schema") + 1] == "/schemas/plan.json"
     assert cmd[-1] == "write a plan"
 
@@ -81,7 +81,7 @@ def test_luna_alias_resolves_to_the_worker_model():
     cmd = adapter.build_exec_command(
         AgentRequest(role="implementation_worker", prompt="p", cwd=Path("/w"), model_alias="luna")
     )
-    assert cmd[cmd.index("-m") + 1] == "gpt-5.6-luna"
+    assert cmd[cmd.index("-m") + 1] == "gpt-6-luna"
 
 
 def test_read_only_request_uses_read_only_sandbox():
@@ -219,7 +219,7 @@ def test_run_maps_agent_result_fields_correctly(monkeypatch):
     after = datetime.now(UTC)
 
     assert result.provider == "codex"
-    assert result.model == "gpt-5.6-sol"
+    assert result.model == "gpt-6.1-sol"
     assert result.exit_code == 7
     assert result.output == {"verdict": "PASS"}
     assert result.started_at.tzinfo is not None

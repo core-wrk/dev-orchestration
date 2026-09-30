@@ -31,7 +31,7 @@ from dev_orchestration.adapters.usage import UsageObservation, parse_codex_snaps
 
 CODEX_BUNDLE_PATH = Path("/Applications/ChatGPT.app/Contents/Resources/codex")
 
-MODEL_ALIASES = {"sol": "gpt-5.6-sol", "luna": "gpt-5.6-luna"}
+MODEL_ALIASES = {"sol": "gpt-6.1-sol", "luna": "gpt-6-luna"}
 
 DEFAULT_TIMEOUT_SECONDS = 1800
 
