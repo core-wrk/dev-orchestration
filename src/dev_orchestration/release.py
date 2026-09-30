@@ -10,7 +10,6 @@ import shutil
 import subprocess
 import sys
 import tarfile
-import tempfile
 from pathlib import Path
 
 RELEASES_DIR = Path.home() / ".dev-orchestration" / "releases"
@@ -38,16 +37,18 @@ def source_checkout() -> Path:
 def promote(repo: Path, releases: Path = RELEASES_DIR, bin_dir: Path = BIN_DIR) -> str:
     commit = _run(["git", "-C", str(repo), "rev-parse", "--short=12", "HEAD"]).strip()
     release = releases / commit
-    if not (release / "venv").is_dir():
-        _build(repo, commit, releases)
+    if not (release / COMMIT_FILE).is_file():
+        _build(repo, commit, release)
     _activate(releases, release, bin_dir, repo)
     _prune(releases, release)
     return commit
 
 
-def _build(repo: Path, commit: str, releases: Path) -> None:
-    releases.mkdir(parents=True, exist_ok=True)
-    work = Path(tempfile.mkdtemp(prefix=f".build-{commit}-", dir=releases))
+def _build(repo: Path, commit: str, work: Path) -> None:
+    # Built in place: a venv hard-codes its own path, so it cannot be moved afterwards.
+    # The COMMIT file is written last and marks the release as complete.
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir(parents=True)
     try:
         source = work / "src"
         source.mkdir()
@@ -68,7 +69,6 @@ def _build(repo: Path, commit: str, releases: Path) -> None:
         archive.unlink()
         constraints.unlink()
         (work / COMMIT_FILE).write_text(commit + "\n", encoding="utf-8")
-        work.rename(releases / commit)
     except BaseException:
         shutil.rmtree(work, ignore_errors=True)
         raise
@@ -81,8 +81,10 @@ def _smoke_test(venv: Path) -> None:
             str(venv / "bin" / "python"),
             "-I",
             "-c",
-            "from dev_orchestration.roles.loader import ROLE_TEMPLATES, load_role_prompt;"
-            "[load_role_prompt(r) for r in ROLE_TEMPLATES]",
+            (
+                "from dev_orchestration.roles.loader import ROLE_TEMPLATES, load_role_prompt;"
+                "[load_role_prompt(r) for r in ROLE_TEMPLATES]"
+            ),
         ],
         cwd=venv.parent,
     )
@@ -122,7 +124,7 @@ def _prune(releases: Path, current: Path) -> None:
 
 
 def _run(cmd: list[str], cwd: Path | None = None) -> str:
-    result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+    result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, check=False)
     if result.returncode != 0:
         raise PromoteError(f"{' '.join(cmd[:4])} failed:\n{result.stderr.strip()}")
     return result.stdout
