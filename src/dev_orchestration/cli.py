@@ -9,6 +9,7 @@ import typer
 import yaml
 
 from dev_orchestration import doctor as doctor_module
+from dev_orchestration import release
 from dev_orchestration.adapters.registry import ReadOnlyRoleUnsupportedError, default_registry
 from dev_orchestration.artifacts.store import (
     CheckpointError,
@@ -108,9 +109,34 @@ cloud_app = typer.Typer(no_args_is_help=True, help="Link a saved run to a provid
 app.add_typer(cloud_app, name="cloud")
 
 
+def _show_version(value: bool) -> None:
+    if value:
+        typer.echo(release.installed_commit())
+        raise typer.Exit()
+
+
 @app.callback(invoke_without_command=True)
-def main() -> None:
+def main(
+    version: bool = typer.Option(
+        False,
+        "--version",
+        callback=_show_version,
+        is_eager=True,
+        help="Show the commit this dev-orch was promoted from.",
+    ),
+) -> None:
     """Local-first orchestration for AI-assisted development."""
+
+
+@app.command()
+def promote() -> None:
+    """Freeze the latest commit as the dev-orch other repos and the scheduler use."""
+    try:
+        commit = release.promote(release.source_checkout())
+    except release.PromoteError as exc:
+        typer.echo(f"promote failed: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(f"dev-orch now runs commit {commit}")
 
 
 @app.command()
