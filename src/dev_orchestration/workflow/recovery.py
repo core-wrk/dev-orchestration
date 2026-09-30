@@ -200,16 +200,29 @@ def _check_run(
             )
         store.write_json_artifact("execution/adopted-worktree.json", current, immutable=True)
         store.append_event({"event": "worktree_adopted", "digest": current["digest"]})
-    runtime = resolve_runtime_context(
-        store.repo_root, project_config, manifest.active_profiles, fence
-    )
-    if (
-        runtime.included != manifest.context_included
-        or runtime.excluded != manifest.context_excluded
-        or runtime.conflicts != manifest.context_conflicts
-        or runtime.minimum_tier != manifest.minimum_tier
-    ):
-        raise ResumeRefused("resolved context changed")
+    # Context is first resolved after classification; a run that paused before
+    # then has none saved, so there is nothing to compare against.
+    if receipt["next_stage"] != "classifier":
+        runtime = resolve_runtime_context(
+            store.repo_root, project_config, manifest.active_profiles, fence
+        )
+        if (
+            runtime.included != manifest.context_included
+            or runtime.excluded != manifest.context_excluded
+            or runtime.conflicts != manifest.context_conflicts
+            or runtime.minimum_tier != manifest.minimum_tier
+        ):
+            changes = [
+                f"{name}: saved {saved!r}, now {now!r}"
+                for name, saved, now in (
+                    ("included", manifest.context_included, runtime.included),
+                    ("excluded", manifest.context_excluded, runtime.excluded),
+                    ("conflicts", manifest.context_conflicts, runtime.conflicts),
+                    ("minimum_tier", manifest.minimum_tier, runtime.minimum_tier),
+                )
+                if saved != now
+            ]
+            raise ResumeRefused("resolved context changed; " + "; ".join(changes))
     if resolve_run_policy(manifest.config_layers) != manifest.resolved_config:
         raise ResumeRefused("protected policy changed")
     if manifest.approval_required and not for_approval:

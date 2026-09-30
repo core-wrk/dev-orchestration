@@ -459,3 +459,26 @@ def test_legacy_dirty_worktree_requires_explicit_adoption(tmp_path):
         resume_run(git, CONFIG, registry(Scripted()), first.run_id)
     resumed = resume_run(git, CONFIG, registry(Scripted()), first.run_id, adopt_worktree=True)
     assert resumed.final_state is RunState.COMPLETE_LOCAL
+
+
+def test_pause_before_classification_resumes_despite_persistent_context(tmp_path):
+    class ClassifierTimeout(Scripted):
+        def run(self, request):
+            if request.role == "classifier" and not self.seen:
+                self.seen.append("classifier")
+                raise AgentTimeoutError(request.role, 7, self.name)
+            return super().run(request)
+
+    git = repo(tmp_path)
+    (git.root / "AGENTS.md").write_text("rules\n")
+    subprocess.run(["git", "-C", str(git.root), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(git.root), "commit", "-q", "-m", "ctx"], check=True)
+    config = CONFIG.model_copy(
+        update={"context": CONFIG.context.model_copy(update={"persistent": ["AGENTS.md"]})}
+    )
+    first = execute_run(
+        git, config, registry(ClassifierTimeout()), "change app", tmp_path / "wt", CRITERIA
+    )
+    assert first.final_state is RunState.PAUSED_INTERRUPTED
+    resumed = resume_run(git, config, registry(Scripted()), first.run_id)
+    assert resumed.final_state is RunState.COMPLETE_LOCAL
