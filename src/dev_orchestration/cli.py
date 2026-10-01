@@ -498,6 +498,7 @@ def retry(
             downgrade_reason=old.downgrade_reason,
             external_plan=plan_path,
             retry_of=run_id,
+            retry_source=source,
             continue_patch=continue_patch,
             retry_resolution_reason=review_escalation_reason,
         )

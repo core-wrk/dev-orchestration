@@ -31,6 +31,15 @@ from dev_orchestration.workflow.bootstrap import (
 from dev_orchestration.workflow.checkpoints import record_stage
 from dev_orchestration.workflow.engine import Engine, IllegalTransitionError
 from dev_orchestration.workflow.invoke import AgentInvocationError, SchemaEscalation
+from dev_orchestration.workflow.retry_feedback import (
+    ARTIFACT as PRIOR_FAILURES_ARTIFACT,
+)
+from dev_orchestration.workflow.retry_feedback import (
+    build_snapshot as build_prior_failures_snapshot,
+)
+from dev_orchestration.workflow.retry_feedback import (
+    compare_validation,
+)
 from dev_orchestration.workflow.scheduler import SchedulerQueue
 from dev_orchestration.workflow.scope_check import (
     ScopeViolation,
@@ -127,6 +136,11 @@ def _save_validation(store: RunStore, outcomes: list[ValidationOutcome], cycle: 
             "outcomes": records,
         }
     )
+    prior_path = store.root / PRIOR_FAILURES_ARTIFACT
+    if store.read_manifest().retry_of is not None and prior_path.is_file():
+        prior = json.loads(prior_path.read_text(encoding="utf-8"))
+        for item in compare_validation(prior, store):
+            store.append_event({"event": "validation_failure_repeated", **item})
     return artifact
 
 
@@ -456,6 +470,7 @@ def execute_run(
     auto_resume: bool = False,
     scheduler_queue: SchedulerQueue | None = None,
     retry_of: str | None = None,
+    retry_source: RunStore | None = None,
     continue_patch: Path | None = None,
     retry_resolution_reason: str | None = None,
 ) -> RunOutcome:
@@ -469,6 +484,11 @@ def execute_run(
         )
     if tier_override is not None:
         stages_for(tier_override)
+    if retry_of is not None and retry_source is not None:
+        if retry_source.run_id != retry_of:
+            raise ContextContractError("retry evidence source does not match retry_of")
+        if retry_source.repo_root.resolve() != repo.root.resolve():
+            raise ContextContractError("retry evidence source belongs to a different repository")
     store, worktree = bootstrap_run(
         repo, project_config, request_text, Tier.STANDARD, worktree_root
     )
@@ -568,6 +588,40 @@ def execute_run(
             available_profiles=project_config.profiles.available,
             config_layers=[project_config.model_dump(mode="json")],
         )
+        if retry_of is not None:
+            if retry_source is not None:
+                feedback = build_prior_failures_snapshot(
+                    retry_source,
+                    repo.root,
+                    include_prompt=project_config.context.include_prior_artifacts != "none",
+                )
+            else:
+                include_prior = project_config.context.include_prior_artifacts != "none"
+                feedback = {
+                    "source_run_id": retry_of,
+                    "source_artifacts": [],
+                    "validation_artifacts": [],
+                    "validation_signatures": [],
+                    "validation": [],
+                    "remediations": [],
+                    "latest_review": None,
+                    "attempted_repair_count": 0,
+                    "evidence_unavailable": True,
+                    "prompt_excluded": not include_prior,
+                    "omission_notice": False,
+                    "prompt_text": (
+                        f"Historical evidence from source run {retry_of}. "
+                        "Evidence unavailable: legacy source record was not supplied."
+                        if include_prior
+                        else "Prompt history excluded by context.include_prior_artifacts=none; "
+                        f"source run {retry_of} remains linked for operator diagnostics."
+                    ),
+                }
+            store.write_json_artifact(PRIOR_FAILURES_ARTIFACT, feedback, immutable=True)
+            if feedback["evidence_unavailable"]:
+                store.append_event({"event": "prior_failures_unavailable", "source_run": retry_of})
+            if feedback["prompt_excluded"]:
+                store.append_event({"event": "prior_failures_excluded", "source_run": retry_of})
         store.write_text_artifact("request.md", request_text + "\n", immutable=True)
         store.write_json_artifact("acceptance-criteria.json", acceptance_criteria, immutable=True)
         if external_plan is not None:

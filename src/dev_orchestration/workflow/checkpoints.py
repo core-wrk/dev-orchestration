@@ -66,6 +66,9 @@ def input_hashes(store: RunStore, registry: RoleRegistry) -> dict[str, str]:
         if not path.is_file():
             raise CheckpointError(f"run input {name} is missing")
         values[name] = _digest(path.read_bytes())
+    prior_failures = store.root / "execution/prior-failures.json"
+    if prior_failures.is_file():
+        values["execution/prior-failures.json"] = _digest(prior_failures.read_bytes())
     classification_inputs = store.root / "classification-inputs.json"
     if classification_inputs.is_file():
         values["classification-inputs.json"] = _digest(classification_inputs.read_bytes())
@@ -127,6 +130,9 @@ def record_stage(
     base = store.read_manifest().git.base_commit
     if not base:
         raise CheckpointError("run has no recorded base commit")
+    prior = store.root / "execution/prior-failures.json"
+    if prior.is_file() and "execution/prior-failures.json" not in artifacts:
+        artifacts = [*artifacts, "execution/prior-failures.json"]
     return store.checkpoint(
         next_stage=next_stage,
         artifacts=artifacts,

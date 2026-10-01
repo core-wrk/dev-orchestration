@@ -131,6 +131,24 @@ def test_execution_is_pinned_to_worktree_and_excludes_review_findings(store, tmp
         )
 
 
+def test_execution_receives_saved_prior_failure_snapshot(store, tmp_path):
+    store.write_json_artifact(
+        "execution/prior-failures.json",
+        {
+            "prompt_excluded": False,
+            "prompt_text": "Historical evidence from source run old: pytest failed",
+        },
+        immutable=True,
+    )
+    adapter = Scripted(["done"])
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    execute(registry(adapter, "implementation_worker"), "# approved", [], [], worktree, store)
+    packet = adapter.requests[0].context
+    assert Category.PRIOR_FAILURES in packet.labels()
+    assert "pytest failed" in packet.render()
+
+
 def test_implementation_review_uses_validation_evidence_and_stable_ids(store):
     adapter = Scripted([{"outcome": "PASS", "findings": []}])
     result = review_implementation(

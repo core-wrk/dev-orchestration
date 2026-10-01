@@ -77,6 +77,24 @@ def describe_status(
     if resume_blocker:
         lines.append(f"Resume: refused: {resume_blocker}")
     if events:
+        if any(event.get("event") == "prior_failures_unavailable" for event in events):
+            lines.append(
+                f"Prior failures: source evidence unavailable; source: {manifest.retry_of}"
+            )
+        if any(event.get("event") == "prior_failures_excluded" for event in events):
+            lines.append(
+                f"Prior failures: prompt history excluded by policy; source: {manifest.retry_of}"
+            )
+        repeated = [
+            event for event in events if event.get("event") == "validation_failure_repeated"
+        ]
+        for event in repeated:
+            source_paths = ", ".join(event.get("source_artifacts", [])) or "unknown source evidence"
+            child_path = event.get("child_artifact", "unknown child evidence")
+            lines.append(
+                f"Notice: validation failure repeated for {event.get('name', 'command')}; "
+                f"source: {source_paths}; child: {child_path}"
+            )
         last = events[-1]
         detail = last.get("detail") or last.get("outcome") or ""
         lines.append(f"Last:   {last.get('event', 'unknown')} {detail}".rstrip())

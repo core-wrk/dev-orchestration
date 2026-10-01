@@ -24,6 +24,7 @@ from dev_orchestration.domain.findings import (
 )
 from dev_orchestration.roles.loader import load_role_prompt
 from dev_orchestration.workflow.invoke import AgentInvocationError, invoke_structured
+from dev_orchestration.workflow.retry_feedback import context_ref as prior_failures_context
 from dev_orchestration.workflow.validation import ValidationOutcome
 
 
@@ -38,6 +39,11 @@ def _request(registry: RoleRegistry, role: str, store: RunStore, packet, cwd: Pa
         ),
         on_process_finished=store.clear_active_provider,
     )
+
+
+def _prior_failures(store: RunStore) -> list[ContextRef]:
+    item = prior_failures_context(store)
+    return [item] if item is not None else []
 
 
 def _raw_text(output: dict | str) -> str:
@@ -292,6 +298,7 @@ def execute(
             *(profile_constraints or []),
             *([scope_fence] if scope_fence is not None else []),
             ContextRef(label=Category.WORKTREE, path=None, content=str(worktree)),
+            *_prior_failures(store),
         ],
     )
     request = _request(registry, "implementation_worker", store, packet, worktree)
@@ -334,6 +341,7 @@ def review_implementation(
                 content=validation_evidence,
             ),
             *profile_constraints,
+            *_prior_failures(store),
         ],
     )
     request = _request(
@@ -389,6 +397,7 @@ def remediate(
             ),
             ContextRef(label=Category.APPROVED_PLAN, path=None, content=approved_plan),
             ContextRef(label=Category.CURRENT_STATE, path=None, content=current_state),
+            *_prior_failures(store),
         ],
     )
     request = _request(registry, "implementation_worker", store, packet, worktree)
@@ -424,6 +433,7 @@ def repair_validation(
             ContextRef(label=Category.APPROVED_PLAN, path=None, content=approved_plan),
             ContextRef(label=Category.DIFF, path=None, content=diff),
             ContextRef(label=Category.VALIDATION_EVIDENCE, path=None, content=evidence),
+            *_prior_failures(store),
         ],
     )
     request = _request(registry, "implementation_worker", store, packet, worktree)

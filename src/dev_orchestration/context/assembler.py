@@ -38,6 +38,7 @@ class Category(StrEnum):
     UNRESOLVED_FINDINGS = "unresolved_findings"
     BUILDER_NARRATION = "builder_narration"
     CONTEXT_NOTES = "context_notes"
+    PRIOR_FAILURES = "prior_failures"
 
 
 STAGE_CONTRACTS: dict[str, frozenset[Category]] = {
@@ -74,6 +75,7 @@ STAGE_CONTRACTS: dict[str, frozenset[Category]] = {
             Category.SCOPE_FENCE,
             Category.WORKTREE,
             Category.CONTEXT_NOTES,
+            Category.PRIOR_FAILURES,
         }
     ),
     "validation": frozenset({Category.COMMANDS, Category.WORKTREE, Category.CONTEXT_NOTES}),
@@ -84,6 +86,7 @@ STAGE_CONTRACTS: dict[str, frozenset[Category]] = {
             Category.VALIDATION_EVIDENCE,
             Category.PROFILE_CONSTRAINTS,
             Category.CONTEXT_NOTES,
+            Category.PRIOR_FAILURES,
         }
     ),
     "remediation": frozenset(
@@ -94,6 +97,7 @@ STAGE_CONTRACTS: dict[str, frozenset[Category]] = {
             Category.DIFF,
             Category.VALIDATION_EVIDENCE,
             Category.CONTEXT_NOTES,
+            Category.PRIOR_FAILURES,
         }
     ),
     "final_verification": frozenset(
@@ -123,6 +127,7 @@ TRUNCATABLE: frozenset[Category] = frozenset(
         Category.CURRENT_STATE,
         Category.VALIDATION_EVIDENCE,
         Category.REFERENCES,
+        Category.PRIOR_FAILURES,
     }
 )
 

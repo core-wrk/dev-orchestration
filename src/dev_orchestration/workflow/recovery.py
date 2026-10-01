@@ -25,6 +25,7 @@ from dev_orchestration.workflow.bootstrap import (
 from dev_orchestration.workflow.checkpoints import input_hashes, record_stage
 from dev_orchestration.workflow.engine import Engine
 from dev_orchestration.workflow.legacy import recover_legacy
+from dev_orchestration.workflow.retry_feedback import context_ref as prior_failures_context
 from dev_orchestration.workflow.runner import (
     CONTINUED_CHANGE_ARTIFACT,
     RunOutcome,
@@ -446,6 +447,10 @@ def resume_run(
             adopt_worktree=adopt_worktree,
             now=now or datetime.now(UTC),
         )
+        if manifest.retry_of is not None:
+            # Parse the immutable child snapshot only after checkpoint hashing has
+            # verified it; resumed stages never consult the mutable source run.
+            prior_failures_context(store)
         if auto_resume is not None and not automatic:
             store.update_manifest(auto_resume=auto_resume)
             manifest = store.read_manifest()

@@ -18,7 +18,8 @@ from dev_orchestration.adapters.base import (
 from dev_orchestration.adapters.registry import RoleRegistry
 from dev_orchestration.artifacts.store import RunStore
 from dev_orchestration.config.models import ProjectConfig, RoleConfig
-from dev_orchestration.domain.enums import RunState
+from dev_orchestration.domain.enums import ProjectClass, RunState, Tier
+from dev_orchestration.domain.run import RunManifest
 from dev_orchestration.git.repo import GitRepo
 from dev_orchestration.workflow.checkpoints import input_hashes
 from dev_orchestration.workflow.cloud import link_cloud_session
@@ -122,6 +123,47 @@ def test_timeout_resumes_worker_without_repeating_plan(tmp_path):
     assert resumed.final_state is RunState.COMPLETE_LOCAL
     assert adapter.seen == ["implementation_worker", "implementation_reviewer", "verifier"]
     assert json.loads((first.store_root / "manifest.json").read_text())["git"]["final_commit"]
+
+
+def test_tampered_prior_failure_snapshot_refuses_before_provider(tmp_path):
+    git = repo(tmp_path)
+    source = RunStore(git.root, "source-run")
+    source.initialize(
+        RunManifest(
+            run_id="source-run",
+            repository=str(git.root),
+            workflow="standard",
+            tier=Tier.STANDARD,
+            project_class=ProjectClass.INTERNAL_UTILITY,
+            status=RunState.FAILED,
+            terminal_cause="validation_failed",
+        )
+    )
+
+    class PausedWorker(Scripted):
+        def run(self, request):
+            if request.role == "implementation_worker":
+                self.seen.append(request.role)
+                raise AgentTimeoutError(request.role, 7, self.name)
+            return super().run(request)
+
+    first = execute_run(
+        git,
+        CONFIG,
+        registry(PausedWorker()),
+        "change app",
+        tmp_path / "wt",
+        CRITERIA,
+        retry_of="source-run",
+        retry_source=source,
+    )
+    feedback = first.store_root / "execution/prior-failures.json"
+    assert feedback.is_file()
+    feedback.write_text("{}", encoding="utf-8")
+    adapter = Scripted()
+    with pytest.raises(ResumeRefused, match="changed or is missing"):
+        resume_run(git, CONFIG, registry(adapter), first.run_id)
+    assert adapter.seen == []
 
 
 def _continued_patch(tmp_path, content=None):

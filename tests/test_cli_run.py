@@ -33,6 +33,7 @@ ROLES = (
 class ScriptedAdapter:
     def __init__(self, tier="standard", profiles=None):
         self.seen = []
+        self.requests = []
         self.tier = tier
         self.profiles = profiles or []
 
@@ -44,6 +45,7 @@ class ScriptedAdapter:
 
     def run(self, request):
         self.seen.append(request.role)
+        self.requests.append(request)
         if request.role == "implementation_worker":
             (request.cwd / "src" / "app.py").write_text("x = 2\n")
         if request.role == "verifier":
@@ -133,6 +135,53 @@ def test_status_never_prints_raw_json(tmp_path, monkeypatch):
     monkeypatch.chdir(root)
     result = CliRunner().invoke(app, ["status"])
     assert '{"' not in result.output and "schema_version" not in result.output
+
+
+def test_status_shows_repeated_validation_evidence_paths(tmp_path, monkeypatch):
+    root = repo(tmp_path)
+    run = store(root, "20260829-101500_standard_retry", RunState.FAILED)
+    run.append_event(
+        {
+            "event": "validation_failure_repeated",
+            "name": "unit",
+            "source_artifacts": ["execution/validation-v1.json"],
+            "child_artifact": "execution/validation-v2.json",
+        }
+    )
+    monkeypatch.chdir(root)
+    result = CliRunner().invoke(app, ["status", run.run_id])
+    assert result.exit_code == 0
+    assert "Notice: validation failure repeated" in result.output
+    assert "execution/validation-v1.json" in result.output
+    assert "execution/validation-v2.json" in result.output
+
+
+def test_status_shows_policy_excluded_retry_history(tmp_path, monkeypatch):
+    root = repo(tmp_path)
+    run = store(root, "20260829-101500_standard_retry", RunState.FAILED)
+    run.update_manifest(retry_of="20260829-100000_standard_source")
+    run.append_event(
+        {"event": "prior_failures_excluded", "source_run": "20260829-100000_standard_source"}
+    )
+    monkeypatch.chdir(root)
+    result = CliRunner().invoke(app, ["status", run.run_id])
+    assert result.exit_code == 0
+    assert "prompt history excluded by policy" in result.output
+    assert "20260829-100000_standard_source" in result.output
+
+
+def test_status_shows_unavailable_legacy_retry_evidence(tmp_path, monkeypatch):
+    root = repo(tmp_path)
+    run = store(root, "20260829-101500_standard_retry", RunState.FAILED)
+    run.update_manifest(retry_of="20260829-100000_standard_source")
+    run.append_event(
+        {"event": "prior_failures_unavailable", "source_run": "20260829-100000_standard_source"}
+    )
+    monkeypatch.chdir(root)
+    result = CliRunner().invoke(app, ["status", run.run_id])
+    assert result.exit_code == 0
+    assert "source evidence unavailable" in result.output
+    assert "20260829-100000_standard_source" in result.output
 
 
 def test_every_run_state_has_next_action():
@@ -534,6 +583,9 @@ def test_retry_fresh_reimplements_even_when_a_change_was_saved(tmp_path, monkeyp
     result = CliRunner().invoke(app, ["retry", "20260829-101500_standard_dead", "--fresh"])
     assert result.exit_code == 0, result.output
     assert "implementation_worker" in adapter.seen
+    worker_request = next(item for item in adapter.requests if item.role == "implementation_worker")
+    assert "Historical evidence from source run" in worker_request.context.render()
+    assert "Evidence unavailable" in worker_request.context.render()
 
 
 def test_retry_escalates_when_the_saved_change_no_longer_applies(tmp_path, monkeypatch):
