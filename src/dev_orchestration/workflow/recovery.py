@@ -35,10 +35,10 @@ from dev_orchestration.workflow.runner import (
     _outcome,
     _run_validation_stage,
     _run_worktree_stage,
+    _save_validation,
     _task_contract,
     _terminal,
     _tier_rank,
-    _validation_json,
 )
 from dev_orchestration.workflow.scheduler import SchedulerQueue
 from dev_orchestration.workflow.scope_check import cleanup_ephemeral_paths, enforce_fence
@@ -50,6 +50,7 @@ from dev_orchestration.workflow.stages import (
     plan,
     reconcile,
     remediate,
+    repair_validation,
     review_implementation,
     review_plan,
     verify,
@@ -70,6 +71,7 @@ _STAGE_STATE = {
     "plan_finalization": RunState.PLAN_REVIEWED,
     "implementation_worker": RunState.EXECUTING,
     "validation": RunState.VALIDATING,
+    "validation_repair": RunState.REMEDIATION,
     "implementation_reviewer": RunState.IMPLEMENTATION_REVIEW,
     "remediation": RunState.REMEDIATION,
     "verifier": RunState.FINAL_VERIFICATION,
@@ -742,17 +744,48 @@ def resume_run(
                         repo.root,
                         tuple(project_config.validation_links),
                     )
-                    artifact = f"execution/validation-v{cycle + 1}.json"
-                    store.write_json_artifact(artifact, _validation_json(outcomes), immutable=True)
+                    artifact = _save_validation(store, outcomes, cycle)
                     if not all_passed(outcomes):
-                        _terminal(engine, RunState.FAILED, "required validation failed")
-                        return _outcome(engine, repo=repo, worktree=worktree)
+                        if current.validation_repairs_reserved >= 1:
+                            _terminal(
+                                engine,
+                                RunState.FAILED,
+                                "required validation failed after repair",
+                                "validation_failed",
+                            )
+                            return _outcome(engine, repo=repo, worktree=worktree)
+                        store.update_manifest(validation_repairs_reserved=1)
+                        checkpoint("validation_repair", [artifact], cycle)
+                        stage = "validation_repair"
+                        continue
                     stage = (
                         "implementation_reviewer"
                         if _implementation_review_required(current.tier, project_config.validation)
                         else "verifier"
                     )
                     checkpoint(stage, [artifact])
+                elif stage == "validation_repair":
+                    outcomes = _validation(store, cycle)
+                    if all_passed(outcomes):
+                        raise ResumeRefused("validation repair checkpoint has no failed checks")
+                    current = store.read_manifest()
+                    if current.validation_repairs_reserved != 1:
+                        raise ResumeRefused("validation repair was not reserved")
+                    _run_worktree_stage(
+                        worktree_repo,
+                        base,
+                        fence,
+                        lambda outcomes=outcomes: repair_validation(
+                            registry,
+                            _approved(store),
+                            worktree_repo.change_diff(base),
+                            outcomes,
+                            worktree,
+                            store,
+                        ),
+                    )
+                    checkpoint("validation", ["execution/validation-repair-v1.json"], cycle)
+                    stage = "validation"
                 elif stage == "implementation_reviewer":
                     store.update_manifest(status=RunState.IMPLEMENTATION_REVIEW)
                     outcomes = _validation(store, cycle)
@@ -957,7 +990,10 @@ def resume_run(
 
 
 def _validation(store: RunStore, cycle: int) -> list[ValidationOutcome]:
-    path = store.root / f"execution/validation-v{cycle + 1}.json"
+    artifact = store.read_manifest().validation_artifact or (
+        f"execution/validation-v{cycle + 1}.json"
+    )
+    path = store.root / artifact
     if not path.is_file():
         raise ResumeRefused(f"validation artifact {path.name} is missing")
     return [ValidationOutcome.model_validate(item) for item in json.loads(path.read_text())]

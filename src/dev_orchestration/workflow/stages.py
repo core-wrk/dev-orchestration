@@ -24,6 +24,7 @@ from dev_orchestration.domain.findings import (
 )
 from dev_orchestration.roles.loader import load_role_prompt
 from dev_orchestration.workflow.invoke import AgentInvocationError, invoke_structured
+from dev_orchestration.workflow.validation import ValidationOutcome
 
 
 def _request(registry: RoleRegistry, role: str, store: RunStore, packet, cwd: Path):
@@ -397,6 +398,46 @@ def remediate(
         raise AgentInvocationError(provider_failure_reason("remediation worker", result))
     store.append_event(
         {"event": "remediated", "cycle": cycle, "finding_ids": [f.id for f in blocking]}
+    )
+    return result
+
+
+def repair_validation(
+    registry: RoleRegistry,
+    approved_plan: str,
+    diff: str,
+    outcomes: list[ValidationOutcome],
+    worktree: Path,
+    store: RunStore,
+) -> AgentResult:
+    """Give the worker the failed command evidence for the run's sole repair."""
+    failed = [outcome for outcome in outcomes if not outcome.passed]
+    evidence = "\n\n".join(
+        f"{outcome.name}: exit {outcome.exit_code}\n"
+        f"stdout:\n{outcome.stdout_tail}\n"
+        f"stderr:\n{outcome.stderr_tail}"
+        for outcome in failed
+    )
+    packet = assemble(
+        "remediation",
+        [
+            ContextRef(label=Category.APPROVED_PLAN, path=None, content=approved_plan),
+            ContextRef(label=Category.DIFF, path=None, content=diff),
+            ContextRef(label=Category.VALIDATION_EVIDENCE, path=None, content=evidence),
+        ],
+    )
+    request = _request(registry, "implementation_worker", store, packet, worktree)
+    result = registry.adapter_for("implementation_worker").run(request)
+    store.write_json_artifact(
+        "execution/validation-repair-v1.json", _agent_result_json(result), immutable=True
+    )
+    if result.exit_code != 0:
+        raise AgentInvocationError(provider_failure_reason("validation repair worker", result))
+    store.append_event(
+        {
+            "event": "validation_repaired",
+            "failed_commands": [outcome.name for outcome in failed],
+        }
     )
     return result
 

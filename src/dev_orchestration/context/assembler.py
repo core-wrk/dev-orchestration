@@ -91,6 +91,8 @@ STAGE_CONTRACTS: dict[str, frozenset[Category]] = {
             Category.BLOCKING_FINDINGS,
             Category.APPROVED_PLAN,
             Category.CURRENT_STATE,
+            Category.DIFF,
+            Category.VALIDATION_EVIDENCE,
             Category.CONTEXT_NOTES,
         }
     ),

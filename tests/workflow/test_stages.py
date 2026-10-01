@@ -20,10 +20,12 @@ from dev_orchestration.workflow.stages import (
     plan,
     reconcile,
     remediate,
+    repair_validation,
     review_implementation,
     review_plan,
     verify,
 )
+from dev_orchestration.workflow.validation import ValidationOutcome
 
 
 class Scripted:
@@ -178,6 +180,35 @@ def test_remediation_is_limited_to_two_cycles(store, tmp_path):
             store,
             cycle=MAX_REMEDIATION_CYCLES + 1,
         )
+
+
+def test_validation_repair_receives_command_output_without_fake_findings(store, tmp_path):
+    adapter = Scripted(["fixed"])
+    outcome = ValidationOutcome(
+        name="unit",
+        command="pytest",
+        exit_code=2,
+        passed=False,
+        stdout_tail="assertion failed",
+        stderr_tail="traceback",
+    )
+    repair_validation(
+        registry(adapter, "implementation_worker"),
+        "# approved contract",
+        "src/app.py changed",
+        [outcome],
+        tmp_path,
+        store,
+    )
+    packet = adapter.requests[0].context
+    assert Category.APPROVED_PLAN in packet.labels()
+    assert Category.DIFF in packet.labels()
+    assert Category.VALIDATION_EVIDENCE in packet.labels()
+    rendered = packet.render()
+    assert "unit: exit 2" in rendered
+    assert "assertion failed" in rendered and "traceback" in rendered
+    assert Category.BLOCKING_FINDINGS not in packet.labels()
+    assert (store.root / "execution/validation-repair-v1.json").is_file()
 
 
 def test_verification_passes_every_criterion_to_the_model(store):

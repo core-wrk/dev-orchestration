@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from dev_orchestration.artifacts.store import (
+    CheckpointError,
     PlanOverwriteError,
     RunStore,
     new_run_id,
@@ -69,6 +70,13 @@ def test_events_append_one_json_object_per_line(store):
     assert len(lines) == 2
     assert json.loads(lines[1])["sha"] == "abc123"
     assert "ts" in json.loads(lines[0])
+
+
+def test_unreceipted_validation_repair_output_blocks_recovery(store):
+    store.checkpoint(next_stage="validation", artifacts=[], worktree={}, inputs={})
+    store.write_json_artifact("execution/validation-repair-v1.json", {"exit_code": 0})
+    with pytest.raises(CheckpointError, match="validation-repair-v1.json"):
+        store.verify_checkpoint()
 
 
 def test_version_gap_finds_max_not_len(store):

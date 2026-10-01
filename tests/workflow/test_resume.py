@@ -19,6 +19,7 @@ from dev_orchestration.artifacts.store import RunStore
 from dev_orchestration.config.models import ProjectConfig, RoleConfig
 from dev_orchestration.domain.enums import RunState
 from dev_orchestration.git.repo import GitRepo
+from dev_orchestration.workflow.checkpoints import input_hashes
 from dev_orchestration.workflow.legacy import LegacyRecoveryError
 from dev_orchestration.workflow.recovery import ResumeRefused, resume_run
 from dev_orchestration.workflow.runner import execute_run
@@ -119,6 +120,93 @@ def test_timeout_resumes_worker_without_repeating_plan(tmp_path):
     assert resumed.final_state is RunState.COMPLETE_LOCAL
     assert adapter.seen == ["implementation_worker", "implementation_reviewer", "verifier"]
     assert json.loads((first.store_root / "manifest.json").read_text())["git"]["final_commit"]
+
+
+def test_old_manifest_keeps_hashes_and_resumes_with_cycle_validation_artifact(tmp_path):
+    class PausedReviewer(Scripted):
+        def run(self, request):
+            if request.role == "implementation_reviewer":
+                self.seen.append(request.role)
+                raise AgentTimeoutError(request.role, 7, self.name)
+            return super().run(request)
+
+    git = repo(tmp_path)
+    first = execute_run(
+        git,
+        CONFIG,
+        registry(PausedReviewer()),
+        "change app",
+        tmp_path / "wt",
+        CRITERIA,
+    )
+    assert first.final_state is RunState.PAUSED_INTERRUPTED
+    store = RunStore(git.root, first.run_id)
+    original_hashes = input_hashes(store, registry(Scripted()))
+    raw = json.loads((store.root / "manifest.json").read_text())
+    raw.pop("validation_repairs_reserved")
+    raw.pop("validation_artifact")
+    (store.root / "manifest.json").write_text(json.dumps(raw))
+    assert input_hashes(store, registry(Scripted())) == original_hashes
+
+    changed = CONFIG.model_dump(mode="json")
+    changed["validation"]["unit"]["command"] = "false"
+    with pytest.raises(ResumeRefused, match="changed|input"):
+        resume_run(git, ProjectConfig.model_validate(changed), registry(Scripted()), first.run_id)
+
+    adapter = Scripted()
+    resumed = resume_run(git, CONFIG, registry(adapter), first.run_id)
+    assert resumed.final_state is RunState.COMPLETE_LOCAL
+    assert adapter.seen == ["implementation_reviewer", "verifier"]
+    assert (store.root / "execution/validation-v1.json").is_file()
+
+
+def test_pause_during_validation_repair_resumes_reserved_attempt(tmp_path):
+    class PauseRepair(Scripted):
+        worker_calls = 0
+
+        def run(self, request):
+            if request.role == "implementation_worker":
+                self.seen.append(request.role)
+                self.worker_calls += 1
+                (request.cwd / "src" / "app.py").write_text("x = 2\n")
+                if self.worker_calls == 2:
+                    raise AgentTimeoutError(request.role, 7, self.name)
+                now = datetime.now(UTC)
+                return AgentResult(self.name, None, 0, "done", now, now)
+            return super().run(request)
+
+    class FinishRepair(Scripted):
+        def run(self, request):
+            if request.role == "implementation_worker":
+                self.seen.append(request.role)
+                (request.cwd / "src" / "app.py").write_text("x = 9\n")
+                now = datetime.now(UTC)
+                return AgentResult(self.name, None, 0, "done", now, now)
+            return super().run(request)
+
+    git = repo(tmp_path)
+    config_data = CONFIG.model_dump(mode="json")
+    config_data["validation"]["unit"]["command"] = "test \"$(cat src/app.py)\" = 'x = 9'"
+    config = ProjectConfig.model_validate(config_data)
+    first = execute_run(
+        git,
+        config,
+        registry(PauseRepair()),
+        "change app",
+        tmp_path / "wt",
+        CRITERIA,
+    )
+    assert first.final_state is RunState.PAUSED_INTERRUPTED
+    store = RunStore(git.root, first.run_id)
+    assert store.latest_checkpoint()["next_stage"] == "validation_repair"
+    assert store.read_manifest().validation_repairs_reserved == 1
+
+    adapter = FinishRepair()
+    resumed = resume_run(git, config, registry(adapter), first.run_id)
+    assert resumed.final_state is RunState.COMPLETE_LOCAL
+    assert adapter.seen == ["implementation_worker", "implementation_reviewer", "verifier"]
+    assert store.read_manifest().validation_repairs_reserved == 1
+    assert (store.root / "execution/validation-repair-v1.json").is_file()
 
 
 def test_signalled_worker_preserves_partial_diff_and_retries_same_stage(tmp_path):
@@ -517,3 +605,61 @@ def test_pause_before_classification_refuses_changed_selected_spec_before_provid
     with pytest.raises(ResumeRefused, match="input changed"):
         resume_run(git, config, registry(resumed_adapter), first.run_id)
     assert resumed_adapter.seen == []
+
+
+def test_pause_after_validation_repair_revalidates_without_rerunning_worker(tmp_path, monkeypatch):
+    import dev_orchestration.workflow.runner as runner_module
+
+    class RepairingWorker(Scripted):
+        worker_calls = 0
+
+        def run(self, request):
+            if request.role == "implementation_worker":
+                self.seen.append(request.role)
+                self.worker_calls += 1
+                value = "x = 1\n" if self.worker_calls == 1 else "x = 9\n"
+                (request.cwd / "src" / "app.py").write_text(value)
+                now = datetime.now(UTC)
+                return AgentResult(self.name, None, 0, "done", now, now)
+            return super().run(request)
+
+    actual_record_stage = runner_module.record_stage
+
+    def crash_after_repair_receipt(*args, **kwargs):
+        result = actual_record_stage(*args, **kwargs)
+        if (
+            kwargs["next_stage"] == "validation"
+            and "execution/validation-repair-v1.json" in kwargs["artifacts"]
+        ):
+            raise SystemExit(9)
+        return result
+
+    git = repo(tmp_path)
+    config_data = CONFIG.model_dump(mode="json")
+    config_data["validation"]["unit"]["command"] = "test \"$(cat src/app.py)\" = 'x = 9'"
+    config = ProjectConfig.model_validate(config_data)
+    first_adapter = RepairingWorker()
+    monkeypatch.setattr(runner_module, "record_stage", crash_after_repair_receipt)
+    with pytest.raises(SystemExit):
+        execute_run(
+            git,
+            config,
+            registry(first_adapter),
+            "repair app",
+            tmp_path / "wt",
+            CRITERIA,
+        )
+    assert first_adapter.worker_calls == 2
+
+    run_id = next((git.root / ".ai/runs").iterdir()).name
+    store = RunStore(git.root, run_id)
+    assert store.latest_checkpoint()["next_stage"] == "validation"
+    assert "execution/validation-repair-v1.json" in store.latest_checkpoint()["artifacts"]
+    monkeypatch.setattr(runner_module, "record_stage", actual_record_stage)
+
+    resumed_adapter = RepairingWorker()
+    resumed = resume_run(git, config, registry(resumed_adapter), run_id)
+    assert resumed.final_state is RunState.COMPLETE_LOCAL
+    assert "implementation_worker" not in resumed_adapter.seen
+    assert resumed_adapter.seen == ["implementation_reviewer", "verifier"]
+    assert (store.root / "execution/validation-v2.json").is_file()

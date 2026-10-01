@@ -57,3 +57,11 @@ def test_every_non_terminal_state_can_escalate():
     for state, allowed in LEGAL_TRANSITIONS.items():
         if state not in TERMINAL_STATES:
             assert RunState.ESCALATED in allowed
+
+
+def test_validation_can_enter_remediation_for_repair(engine):
+    engine.transition(RunState.CLASSIFIED)
+    engine.transition(RunState.EXECUTING)
+    engine.transition(RunState.VALIDATING)
+    engine.transition(RunState.REMEDIATION)
+    assert engine.state is RunState.REMEDIATION

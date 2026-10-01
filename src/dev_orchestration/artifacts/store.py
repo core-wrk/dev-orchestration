@@ -178,6 +178,7 @@ class RunStore:
             "review/implementation-review-v*.json",
             "execution/worker-result.json",
             "execution/validation-v*.json",
+            "execution/validation-repair-v*.json",
             "execution/remediation-v*.json",
             "verification/final-verification.json",
         )

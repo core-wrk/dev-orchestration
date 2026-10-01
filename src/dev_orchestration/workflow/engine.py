@@ -33,7 +33,12 @@ LEGAL_TRANSITIONS: dict[RunState, frozenset[RunState]] = {
     # omits implementation review; independent verification still runs.
     RunState.VALIDATING: _ALWAYS
     | _PAUSE
-    | {RunState.IMPLEMENTATION_REVIEW, RunState.FINAL_VERIFICATION, RunState.BLOCKED},
+    | {
+        RunState.IMPLEMENTATION_REVIEW,
+        RunState.REMEDIATION,
+        RunState.FINAL_VERIFICATION,
+        RunState.BLOCKED,
+    },
     RunState.IMPLEMENTATION_REVIEW: _ALWAYS
     | _PAUSE
     | {RunState.REMEDIATION, RunState.FINAL_VERIFICATION, RunState.BLOCKED},

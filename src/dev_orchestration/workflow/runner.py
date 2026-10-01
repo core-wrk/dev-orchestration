@@ -10,6 +10,7 @@ from pydantic import BaseModel
 from dev_orchestration.adapters.base import AgentInterruptedError, AgentTimeoutError
 from dev_orchestration.adapters.registry import ReadOnlyRoleUnsupportedError, RoleRegistry
 from dev_orchestration.adapters.usage import UsageAwareAdapter, UsageLimitError, next_attempt
+from dev_orchestration.artifacts.store import CheckpointError, RunStore
 from dev_orchestration.config.models import ProjectConfig, ValidationCommand
 from dev_orchestration.config.resolver import PROTECTED_DEFAULTS
 from dev_orchestration.context.assembler import Category, ContextContractError
@@ -46,6 +47,7 @@ from dev_orchestration.workflow.stages import (
     plan,
     reconcile,
     remediate,
+    repair_validation,
     review_implementation,
     review_plan,
     verify,
@@ -97,6 +99,34 @@ def _evidence(outcomes: list[ValidationOutcome]) -> str:
 
 def _validation_json(outcomes: list[ValidationOutcome]) -> list[dict]:
     return [outcome.model_dump(mode="json") for outcome in outcomes]
+
+
+def _save_validation(store: RunStore, outcomes: list[ValidationOutcome], cycle: int = 0) -> str:
+    versions = []
+    for path in (store.root / "execution").glob("validation-v*.json"):
+        try:
+            versions.append(int(path.stem.rsplit("-v", 1)[1]))
+        except ValueError:
+            continue
+    artifact = f"execution/validation-v{max(versions, default=0) + 1}.json"
+    records = _validation_json(outcomes)
+    store.write_json_artifact(artifact, records, immutable=True)
+    store.update_manifest(validation_artifact=artifact)
+    store.append_event(
+        {
+            "event": "validated",
+            "cycle": cycle,
+            "passed": all_passed(outcomes),
+            "required_commands": [outcome.name for outcome in outcomes],
+            "detail": (
+                "No required validation commands were resolved for this tier."
+                if not outcomes
+                else ""
+            ),
+            "outcomes": records,
+        }
+    )
+    return artifact
 
 
 def _approval_required(
@@ -439,6 +469,50 @@ def execute_run(
                 cycle=cycle,
             )
 
+        def repair_failed_validation(
+            outcomes: list[ValidationOutcome], cycle: int, next_stage: str
+        ) -> tuple[list[ValidationOutcome], bool]:
+            if all_passed(outcomes):
+                artifact = store.read_manifest().validation_artifact
+                if artifact is None:
+                    raise CheckpointError("passed validation has no saved artifact pointer")
+                receipt(next_stage, [artifact], cycle)
+                return outcomes, False
+            if store.read_manifest().validation_repairs_reserved >= 1:
+                return outcomes, True
+            store.update_manifest(validation_repairs_reserved=1)
+            failed_artifact = store.read_manifest().validation_artifact
+            if failed_artifact is None:
+                raise CheckpointError("failed validation has no saved artifact pointer")
+            receipt("validation_repair", [failed_artifact], cycle)
+            engine.transition(RunState.REMEDIATION)
+            _run_worktree_stage(
+                worktree_repo,
+                base_commit,
+                fence,
+                lambda: repair_validation(
+                    registry,
+                    approved,
+                    worktree_repo.change_diff(base_commit),
+                    outcomes,
+                    worktree,
+                    store,
+                ),
+            )
+            receipt("validation", ["execution/validation-repair-v1.json"], cycle)
+            engine.transition(RunState.VALIDATING)
+            repaired = _run_validation_stage(
+                worktree_repo,
+                base_commit,
+                fence,
+                lambda: run_validations(project_config.validation, effective_tier, worktree),
+                repo.root,
+                tuple(project_config.validation_links),
+            )
+            artifact = _save_validation(store, repaired, cycle)
+            receipt(next_stage, [artifact], cycle)
+            return repaired, not all_passed(repaired)
+
         store.update_manifest(
             acceptance_criteria=acceptance_criteria,
             acceptance_criteria_source=acceptance_criteria_source,
@@ -766,37 +840,20 @@ def execute_run(
             repo.root,
             tuple(project_config.validation_links),
         )
-        store.write_json_artifact(
-            "execution/validation-v1.json", _validation_json(outcomes), immutable=True
-        )
-        store.append_event(
-            {
-                "event": "validated",
-                "passed": all_passed(outcomes),
-                "required_commands": [outcome.name for outcome in outcomes],
-                "detail": (
-                    "No required validation commands were resolved for this tier."
-                    if not outcomes
-                    else ""
-                ),
-                "outcomes": _validation_json(outcomes),
-            }
-        )
-        receipt(
+        review_next = (
             "implementation_reviewer"
             if _implementation_review_required(effective_tier, project_config.validation)
-            else "verifier",
-            ["execution/validation-v1.json"],
+            else "verifier"
         )
-        # A continued change is expected to fail some checks; the review/remediation loop
-        # exists to fix exactly that, so it is not terminal there.
-        validation_failed_on_continuation = (
-            continue_patch is not None
-            and not all_passed(outcomes)
-            and _implementation_review_required(effective_tier, project_config.validation)
-        )
-        if not all_passed(outcomes) and not validation_failed_on_continuation:
-            _terminal(engine, RunState.FAILED, "required validation failed")
+        _save_validation(store, outcomes)
+        outcomes, repair_failed = repair_failed_validation(outcomes, 0, review_next)
+        if repair_failed:
+            _terminal(
+                engine,
+                RunState.FAILED,
+                "required validation failed after repair",
+                "validation_failed",
+            )
             return _outcome(engine, repo=repo, worktree=worktree)
 
         diff = worktree_repo.change_diff(base_commit)
@@ -831,13 +888,6 @@ def execute_run(
                     "reason": "tier stage path omits implementation review",
                 }
             )
-        if (
-            validation_failed_on_continuation
-            and implementation_review is not None
-            and not implementation_review.blocking_ids()
-        ):
-            _terminal(engine, RunState.FAILED, "required validation failed")
-            return _outcome(engine, repo=repo, worktree=worktree)
         cycle = 1
         while implementation_review is not None and implementation_review.blocking_ids():
             if implementation_review.outcome in {Outcome.BLOCKED, Outcome.ESCALATE}:
@@ -881,26 +931,16 @@ def execute_run(
                 repo.root,
                 tuple(project_config.validation_links),
             )
-            store.write_json_artifact(
-                f"execution/validation-v{cycle + 1}.json",
-                _validation_json(outcomes),
-                immutable=True,
+            _save_validation(store, outcomes, cycle)
+            outcomes, repair_failed = repair_failed_validation(
+                outcomes, cycle, "implementation_reviewer"
             )
-            store.append_event(
-                {
-                    "event": "validated",
-                    "cycle": cycle,
-                    "passed": all_passed(outcomes),
-                    "outcomes": _validation_json(outcomes),
-                }
-            )
-            receipt("implementation_reviewer", [f"execution/validation-v{cycle + 1}.json"], cycle)
-            if not all_passed(outcomes):
+            if repair_failed:
                 _terminal(
                     engine,
                     RunState.FAILED,
-                    "required validation failed after remediation",
-                    "validation_failed_after_remediation",
+                    "required validation failed after repair",
+                    "validation_failed",
                 )
                 return _outcome(engine, repo=repo, worktree=worktree)
             diff = worktree_repo.change_diff(base_commit)

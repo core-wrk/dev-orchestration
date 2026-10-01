@@ -9,7 +9,7 @@ from dev_orchestration.adapters.base import AdapterStatus, AgentResult, AgentTim
 from dev_orchestration.adapters.registry import RoleRegistry
 from dev_orchestration.artifacts.store import RunStore
 from dev_orchestration.config.models import ProjectConfig, RoleConfig
-from dev_orchestration.context.assembler import ContextContractError
+from dev_orchestration.context.assembler import Category, ContextContractError
 from dev_orchestration.domain.enums import RunState, Tier
 from dev_orchestration.domain.run import RunManifest
 from dev_orchestration.git.repo import GitRepo
@@ -438,15 +438,118 @@ def test_failing_validation_cannot_complete_local(tmp_path):
         CONFIG.model_dump(mode="json")
         | {"validation": {"unit": {"command": "exit 3", "required_for": ["standard"]}}}
     )
-    outcome = execute_run(
-        git, config, registry(Scripted(script())), "bad", tmp_path / "wt", CRITERIA
-    )
+    adapter = Scripted(script())
+    outcome = execute_run(git, config, registry(adapter), "bad", tmp_path / "wt", CRITERIA)
     assert outcome.final_state is RunState.FAILED
     assert "validation" in outcome.reason
+    assert outcome.store_root.joinpath("execution/validation-repair-v1.json").is_file()
     data = json.loads(
         next((outcome.store_root / "execution").glob("validation-v1.json")).read_text()
     )
     assert data[0]["exit_code"] == 3
+    assert not any(event["event"] == "implementation_reviewed" for event in events(outcome))
+    assert "verifier" not in adapter.seen
+    assert not (outcome.store_root / "verification/final-verification.json").exists()
+    assert not (outcome.store_root / "execution/execution-summary.json").exists()
+    assert json.loads((outcome.store_root / "manifest.json").read_text())["terminal_cause"] == (
+        "validation_failed"
+    )
+
+
+def test_failed_validation_gets_one_repair_then_uses_normal_review_path(tmp_path):
+    class RepairingWorker(Scripted):
+        worker_calls = 0
+
+        def run(self, request):
+            result = super().run(request)
+            if request.role == "implementation_worker":
+                self.worker_calls += 1
+                if self.worker_calls == 1:
+                    (request.cwd / "src" / "app.py").write_text("x = 1\n")
+            return result
+
+    git = repo(tmp_path)
+    config = ProjectConfig.model_validate(
+        CONFIG.model_dump(mode="json")
+        | {
+            "validation": {
+                "unit": {
+                    "command": "test \"$(cat src/app.py)\" = 'x = 2'",
+                    "required_for": ["standard"],
+                }
+            }
+        }
+    )
+    adapter = RepairingWorker(script())
+    outcome = execute_run(
+        git, config, registry(adapter), "repair the flag", tmp_path / "wt", CRITERIA
+    )
+    assert outcome.final_state is RunState.COMPLETE_LOCAL
+    assert adapter.worker_calls == 2
+    assert adapter.seen.count("planner") == 1
+    assert adapter.seen[-2:] == ["implementation_reviewer", "verifier"]
+    assert (outcome.store_root / "execution/validation-repair-v1.json").is_file()
+    assert (outcome.store_root / "execution/validation-v2.json").is_file()
+    manifest = json.loads((outcome.store_root / "manifest.json").read_text())
+    assert manifest["validation_repairs_reserved"] == 1
+    assert manifest["validation_artifact"] == "execution/validation-v2.json"
+
+
+def test_review_remediation_cannot_reserve_a_second_validation_repair(tmp_path):
+    class ReviewThenBreak(Scripted):
+        def __init__(self, scripts):
+            super().__init__(scripts)
+            self.worker_calls = 0
+
+        def run(self, request):
+            if request.role == "implementation_worker":
+                self.worker_calls += 1
+                self.seen.append(request.role)
+                if Category.BLOCKING_FINDINGS in request.context.labels():
+                    (request.cwd / "src" / "app.py").write_text("x = 1\n")
+                else:
+                    (request.cwd / "src" / "app.py").write_text(
+                        "x = 2\n" if self.worker_calls == 2 else "x = 1\n"
+                    )
+                payloads = self.script[request.role]
+                payload = payloads.pop(0) if len(payloads) > 1 else payloads[0]
+                now = datetime.now(UTC)
+                return AgentResult("fake", None, 0, payload, now, now)
+            if request.role == "implementation_reviewer":
+                self.seen.append(request.role)
+                now = datetime.now(UTC)
+                return AgentResult(
+                    "fake",
+                    None,
+                    0,
+                    BLOCKING if self.seen.count(request.role) == 1 else PASS,
+                    now,
+                    now,
+                )
+            return super().run(request)
+
+    git = repo(tmp_path)
+    config = ProjectConfig.model_validate(
+        CONFIG.model_dump(mode="json")
+        | {
+            "validation": {
+                "unit": {
+                    "command": "test \"$(cat src/app.py)\" = 'x = 2'",
+                    "required_for": ["standard"],
+                }
+            }
+        }
+    )
+    adapter = ReviewThenBreak(script())
+    outcome = execute_run(
+        git, config, registry(adapter), "repair then remediate", tmp_path / "wt", CRITERIA
+    )
+    assert outcome.final_state is RunState.FAILED
+    assert adapter.worker_calls == 3
+    assert adapter.seen.count("implementation_reviewer") == 1
+    assert (outcome.store_root / "execution/validation-repair-v1.json").is_file()
+    assert not (outcome.store_root / "execution/validation-repair-v2.json").exists()
+    assert "verifier" not in adapter.seen
 
 
 def test_unignored_validation_cache_is_cleaned_and_does_not_trip_the_fence(tmp_path):
@@ -869,3 +972,92 @@ def test_trivial_keeps_review_when_no_validation_runs_at_that_tier(tmp_path):
     names = [event["event"] for event in events(outcome)]
     assert "implementation_reviewed" in names
     assert "implementation_review_skipped" not in names
+
+
+def test_validation_repair_runs_for_continued_patch(tmp_path):
+    class RepairingWorker(Scripted):
+        def run(self, request):
+            if request.role == "implementation_worker":
+                self.seen.append(request.role)
+                self.requests.append(request)
+                (request.cwd / "src" / "app.py").write_text("x = 2\n")
+                now = datetime.now(UTC)
+                return AgentResult("fake", None, 0, "repaired", now, now)
+            return super().run(request)
+
+    git = repo(tmp_path)
+    config = ProjectConfig.model_validate(
+        CONFIG.model_dump(mode="json")
+        | {
+            "validation": {
+                "unit": {
+                    "command": "test \"$(cat src/app.py)\" = 'x = 2'",
+                    "required_for": ["standard"],
+                }
+            }
+        }
+    )
+    plan_path = tmp_path / "approved-plan.md"
+    plan_path.write_text("# Approved plan\n")
+    patch_path = tmp_path / "saved.patch"
+    patch_path.write_text(
+        "diff --git a/src/app.py b/src/app.py\n"
+        "--- a/src/app.py\n"
+        "+++ b/src/app.py\n"
+        "@@ -1 +1 @@\n"
+        "-x = 1\n"
+        "+x = 0\n"
+    )
+    adapter = RepairingWorker(script())
+    outcome = execute_run(
+        git,
+        config,
+        registry(adapter),
+        "continue the saved change",
+        tmp_path / "wt",
+        CRITERIA,
+        external_plan=plan_path,
+        retry_of="20260930-010000_standard_source",
+        continue_patch=patch_path,
+    )
+    assert outcome.final_state is RunState.COMPLETE_LOCAL
+    assert adapter.seen.count("implementation_worker") == 1
+    assert "planner" not in adapter.seen
+    assert "change_continued" in {event["event"] for event in events(outcome)}
+    assert (outcome.store_root / "execution/validation-repair-v1.json").is_file()
+    assert adapter.seen[-2:] == ["implementation_reviewer", "verifier"]
+
+
+def test_trivial_run_repairs_validation_without_adding_implementation_review(tmp_path):
+    class RepairingWorker(Scripted):
+        worker_calls = 0
+
+        def run(self, request):
+            result = super().run(request)
+            if request.role == "implementation_worker":
+                self.worker_calls += 1
+                value = "x = 1\n" if self.worker_calls == 1 else "x = 2\n"
+                (request.cwd / "src" / "app.py").write_text(value)
+            return result
+
+    git = repo(tmp_path)
+    config = ProjectConfig.model_validate(
+        CONFIG.model_dump(mode="json")
+        | {
+            "validation": {
+                "unit": {
+                    "command": "test \"$(cat src/app.py)\" = 'x = 2'",
+                    "required_for": ["trivial"],
+                }
+            }
+        }
+    )
+    adapter = RepairingWorker(script(tier="trivial"))
+    outcome = execute_run(
+        git, config, registry(adapter), "repair the flag", tmp_path / "wt", CRITERIA
+    )
+    assert outcome.final_state is RunState.COMPLETE_LOCAL
+    assert adapter.worker_calls == 2
+    assert "implementation_reviewer" not in adapter.seen
+    assert adapter.seen[-1] == "verifier"
+    assert (outcome.store_root / "execution/validation-v2.json").is_file()

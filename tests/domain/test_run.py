@@ -26,3 +26,21 @@ def test_manifest_starts_in_created_state():
     assert manifest.status is RunState.CREATED
     assert manifest.git == GitBlock()
     assert manifest.plan_origin == "generated"
+    assert manifest.validation_repairs_reserved == 0
+    assert manifest.validation_artifact is None
+
+
+def test_old_manifest_loads_with_empty_validation_progress():
+    manifest = RunManifest(
+        run_id="old",
+        repository="r",
+        workflow="standard",
+        tier=Tier.STANDARD,
+        project_class=ProjectClass.INTERNAL_UTILITY,
+    )
+    saved = manifest.model_dump(mode="json")
+    saved.pop("validation_repairs_reserved")
+    saved.pop("validation_artifact")
+    restored = RunManifest.model_validate(saved)
+    assert restored.validation_repairs_reserved == 0
+    assert restored.validation_artifact is None
