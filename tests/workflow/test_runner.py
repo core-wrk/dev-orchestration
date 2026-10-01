@@ -1061,3 +1061,30 @@ def test_trivial_run_repairs_validation_without_adding_implementation_review(tmp
     assert "implementation_reviewer" not in adapter.seen
     assert adapter.seen[-1] == "verifier"
     assert (outcome.store_root / "execution/validation-v2.json").is_file()
+
+
+@pytest.mark.parametrize(
+    "review",
+    [
+        {"outcome": "ESCALATE", "findings": []},
+        {
+            "outcome": "ESCALATE",
+            "findings": [
+                {
+                    "id": "F001",
+                    "severity": "blocking",
+                    "summary": "needs human decision",
+                    "evidence_required": "resolution of review boundary",
+                }
+            ],
+        },
+    ],
+)
+def test_direct_implementation_escalation_is_retryable_and_skips_verifier(tmp_path, review):
+    git = repo(tmp_path)
+    adapter = Scripted(script(review=review))
+    outcome = execute_run(git, CONFIG, registry(adapter), "change app", tmp_path / "wt", CRITERIA)
+    manifest = RunStore(git.root, outcome.run_id).read_manifest()
+    assert outcome.final_state is RunState.ESCALATED
+    assert manifest.terminal_cause == "implementation_review_escalated"
+    assert "verifier" not in adapter.seen

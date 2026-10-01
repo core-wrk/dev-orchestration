@@ -79,6 +79,62 @@ def test_unreceipted_validation_repair_output_blocks_recovery(store):
         store.verify_checkpoint()
 
 
+def test_checkpoint_refuses_changed_carried_forward_artifact(store):
+    store.write_text_artifact("execution/continued-change.patch", "original", immutable=True)
+    store.checkpoint(
+        next_stage="classifier",
+        artifacts=["execution/continued-change.patch"],
+        worktree={},
+        inputs={},
+    )
+    (store.root / "execution/continued-change.patch").write_text("edited")
+    with pytest.raises(CheckpointError, match="continued-change.patch"):
+        store.checkpoint(next_stage="planner", artifacts=[], worktree={}, inputs={})
+
+
+def test_checkpoint_allows_relisted_artifact_to_be_recorded_again(store):
+    store.write_text_artifact("execution/continued-change.patch", "original", immutable=True)
+    store.checkpoint(
+        next_stage="classifier",
+        artifacts=["execution/continued-change.patch"],
+        worktree={},
+        inputs={},
+    )
+    (store.root / "execution/continued-change.patch").write_text("edited")
+    receipt = store.checkpoint(
+        next_stage="planner",
+        artifacts=["execution/continued-change.patch"],
+        worktree={},
+        inputs={},
+    )
+    assert receipt["artifacts"]["execution/continued-change.patch"]
+
+
+def test_untouched_carried_artifact_keeps_its_first_hash(store):
+    store.write_text_artifact("execution/continued-change.patch", "original", immutable=True)
+    first = store.checkpoint(
+        next_stage="classifier",
+        artifacts=["execution/continued-change.patch"],
+        worktree={},
+        inputs={},
+    )
+    store.checkpoint(next_stage="planner", artifacts=[], worktree={}, inputs={})
+    latest = store.checkpoint(next_stage="plan_reviewer", artifacts=[], worktree={}, inputs={})
+    assert (
+        latest["artifacts"]["execution/continued-change.patch"]
+        == first["artifacts"]["execution/continued-change.patch"]
+    )
+
+
+def test_unreceipted_continued_change_blocks_recovery(store):
+    store.checkpoint(next_stage="classifier", artifacts=[], worktree={}, inputs={})
+    store.write_text_artifact("execution/continued-change.patch", "inserted")
+    with pytest.raises(
+        CheckpointError, match="unreceipted stage output execution/continued-change.patch"
+    ):
+        store.verify_checkpoint()
+
+
 def test_version_gap_finds_max_not_len(store):
     """Version numbering is max(existing)+1, not len(existing)+1.
 

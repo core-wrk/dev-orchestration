@@ -1,5 +1,6 @@
 """Drive one local run through the M2 workflow and its safety gates."""
 
+import hashlib
 import json
 import subprocess
 from datetime import UTC, datetime
@@ -281,8 +282,40 @@ def cleanup_worktree_if_unproductive(engine: Engine, repo: GitRepo, worktree: Pa
 # can continue from it instead of re-implementing.
 CHANGE_PATCH_ARTIFACT = "execution/final-change.patch"
 _PATCH_WORTHY_CAUSES = frozenset(
-    {"implementation_review_exhausted", "validation_failed_after_remediation"}
+    {
+        "implementation_review_exhausted",
+        "implementation_review_escalated",
+        "validation_failed",
+        "validation_failed_after_remediation",
+    }
 )
+
+
+CONTINUED_CHANGE_ARTIFACT = "execution/continued-change.patch"
+
+
+def apply_continued_change(
+    store: RunStore, worktree_repo: GitRepo, base_commit: str, fence: ScopeFence
+) -> bool:
+    """Apply a saved continuation only after verifying its checkpointed bytes."""
+    patch_path = store.root / CONTINUED_CHANGE_ARTIFACT
+    if not patch_path.is_file():
+        return False
+    receipt = store.verify_checkpoint()
+    expected = receipt["artifacts"].get(CONTINUED_CHANGE_ARTIFACT)
+    patch_bytes = patch_path.read_bytes()
+    if expected is None or hashlib.sha256(patch_bytes).hexdigest() != expected:
+        raise CheckpointError(
+            f"checkpoint artifact {CONTINUED_CHANGE_ARTIFACT} changed or is missing"
+        )
+    patch_text = patch_bytes.decode("utf-8")
+    _run_worktree_stage(
+        worktree_repo,
+        base_commit,
+        fence,
+        lambda: worktree_repo.apply_patch(patch_text),
+    )
+    return True
 
 
 def _save_change_patch(engine: Engine, worktree: Path) -> None:
@@ -424,6 +457,7 @@ def execute_run(
     scheduler_queue: SchedulerQueue | None = None,
     retry_of: str | None = None,
     continue_patch: Path | None = None,
+    retry_resolution_reason: str | None = None,
 ) -> RunOutcome:
     """Execute a run; every started run is returned in a terminal state."""
     if not request_text.strip():
@@ -458,6 +492,16 @@ def execute_run(
             },
         )
         store.update_manifest(auto_resume=auto_resume)
+        if retry_resolution_reason:
+            store.append_event(
+                {"event": "retry_resolution_reason", "detail": retry_resolution_reason}
+            )
+        if continue_patch is not None:
+            store.write_text_artifact(
+                CONTINUED_CHANGE_ARTIFACT,
+                continue_patch.read_text(encoding="utf-8"),
+                immutable=True,
+            )
 
         def receipt(next_stage: str, artifacts: list[str], cycle: int = 0) -> None:
             record_stage(
@@ -545,7 +589,10 @@ def execute_run(
         raise
 
     try:
-        receipt("classifier", ["request.md", "acceptance-criteria.json", "roles.json"])
+        classifier_artifacts = ["request.md", "acceptance-criteria.json", "roles.json"]
+        if continue_patch is not None:
+            classifier_artifacts.append(CONTINUED_CHANGE_ARTIFACT)
+        receipt("classifier", classifier_artifacts)
         classification = classify(
             registry,
             request_text,
@@ -792,17 +839,10 @@ def execute_run(
 
         engine.transition(RunState.EXECUTING)
         if continue_patch is not None:
-            patch_text = continue_patch.read_text(encoding="utf-8")
-            store.write_text_artifact(
-                "execution/continued-change.patch", patch_text, immutable=True
-            )
             try:
-                _run_worktree_stage(
-                    worktree_repo,
-                    base_commit,
-                    fence,
-                    lambda: worktree_repo.apply_patch(patch_text),
-                )
+                applied = apply_continued_change(store, worktree_repo, base_commit, fence)
+                if not applied:
+                    raise CheckpointError("continued change patch is missing")
             except GitCommandError as exc:
                 _terminal(
                     engine,
@@ -812,7 +852,7 @@ def execute_run(
                 )
                 return _outcome(engine, repo=repo, worktree=worktree)
             store.append_event({"event": "change_continued", "source_run": retry_of})
-            receipt("validation", ["execution/continued-change.patch"])
+            receipt("validation", [CONTINUED_CHANGE_ARTIFACT])
         else:
             _run_worktree_stage(
                 worktree_repo,
@@ -897,7 +937,12 @@ def execute_run(
                     else RunState.ESCALATED
                 )
                 _terminal(
-                    engine, target, "implementation review: " + str(implementation_review.outcome)
+                    engine,
+                    target,
+                    "implementation review: " + str(implementation_review.outcome),
+                    "implementation_review_escalated"
+                    if implementation_review.outcome is Outcome.ESCALATE
+                    else "other",
                 )
                 return _outcome(engine, repo=repo, worktree=worktree)
             engine.transition(RunState.REMEDIATION)
@@ -978,7 +1023,12 @@ def execute_run(
                 else RunState.ESCALATED
             )
             _terminal(
-                engine, target, "implementation review: " + str(implementation_review.outcome)
+                engine,
+                target,
+                "implementation review: " + str(implementation_review.outcome),
+                "implementation_review_escalated"
+                if implementation_review.outcome is Outcome.ESCALATE
+                else "other",
             )
             return _outcome(engine, repo=repo, worktree=worktree)
 

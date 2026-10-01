@@ -127,9 +127,20 @@ class RunStore:
         hashes = {}
         for name in sorted(all_artifacts):
             target = self.root / name
-            with target.open("rb") as handle:
-                hashes[name] = hashlib.sha256(handle.read()).hexdigest()
-                os.fsync(handle.fileno())
+            try:
+                with target.open("rb") as handle:
+                    content = handle.read()
+                    if (
+                        previous
+                        and name in previous["artifacts"]
+                        and name not in artifacts
+                        and hashlib.sha256(content).hexdigest() != previous["artifacts"][name]
+                    ):
+                        raise CheckpointError(f"checkpoint artifact {name} changed or is missing")
+                    hashes[name] = hashlib.sha256(content).hexdigest()
+                    os.fsync(handle.fileno())
+            except FileNotFoundError as exc:
+                raise CheckpointError(f"checkpoint artifact {name} changed or is missing") from exc
             _sync_directory(target.parent)
         receipt = {
             "sequence": sequence,
@@ -180,6 +191,7 @@ class RunStore:
             "execution/validation-v*.json",
             "execution/validation-repair-v*.json",
             "execution/remediation-v*.json",
+            "execution/continued-change.patch",
             "verification/final-verification.json",
         )
         for pattern in output_patterns:

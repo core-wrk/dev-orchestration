@@ -1,5 +1,6 @@
 """Typer entry point. Commands register here; logic lives in modules."""
 
+import hashlib
 import json
 import shlex
 from datetime import UTC, datetime
@@ -394,7 +395,12 @@ def status(run_id: str | None = typer.Argument(None, help="Run id to inspect")) 
         raise typer.Exit(1) from exc
 
 
-_RETRYABLE_CAUSES = {"implementation_review_exhausted", "validation_failed_after_remediation"}
+_RETRYABLE_CAUSES = {
+    "implementation_review_exhausted",
+    "implementation_review_escalated",
+    "validation_failed",
+    "validation_failed_after_remediation",
+}
 
 
 @app.command()
@@ -402,6 +408,11 @@ def retry(
     run_id: str = typer.Argument(..., help="Dead run to relaunch with its approved plan"),
     fresh: bool = typer.Option(
         False, "--fresh", help="Re-implement from scratch instead of continuing the saved change"
+    ),
+    review_escalation_reason: str | None = typer.Option(
+        None,
+        "--review-escalation-reason",
+        help="Resolution explaining why the implementation review escalation can be retried",
     ),
 ) -> None:
     """Relaunch a run that died after its plan was approved, continuing its saved change."""
@@ -411,11 +422,24 @@ def retry(
         if not (source.root / "manifest.json").is_file():
             raise NoSuchRunError(f"run {run_id!r} does not exist")
         old = source.read_manifest()
+        if old.terminal_cause == "implementation_review_escalated":
+            review_files = list((source.root / "review").glob("implementation-review-v*.json"))
+            if review_files:
+                latest_review = max(
+                    review_files, key=lambda path: int(path.stem.rsplit("-v", 1)[1])
+                )
+                review = json.loads(latest_review.read_text(encoding="utf-8"))
+                typer.echo("Saved implementation review findings:")
+                typer.echo(json.dumps(review.get("findings", []), indent=2, sort_keys=True))
+            if not review_escalation_reason or not review_escalation_reason.strip():
+                raise ContextContractError(
+                    "implementation review escalation requires --review-escalation-reason TEXT"
+                )
         if old.terminal_cause not in _RETRYABLE_CAUSES:
             raise ContextContractError(
                 f"run {run_id} ended with cause {old.terminal_cause!r}; only "
                 f"{sorted(_RETRYABLE_CAUSES)} can reuse the approved plan. If the plan "
-                "itself must change, start a new `dev-orch run` (optionally with --plan)."
+                "itself must change, a fresh `dev-orch run` is required (optionally with --plan)."
             )
         if old.retry_of is not None:
             raise ContextContractError(
@@ -423,8 +447,24 @@ def retry(
                 "way; the plan is the likelier problem. Revise it and use `dev-orch run --plan`."
             )
         plan_path = source.root / "planning" / "approved-plan.md"
-        if not plan_path.is_file() or not old.request_text:
-            raise ContextContractError(f"run {run_id} has no approved plan or request to reuse")
+        if old.status not in {
+            RunState.COMPLETE_LOCAL,
+            RunState.CANCELLED,
+            RunState.BLOCKED,
+            RunState.ESCALATED,
+            RunState.FAILED,
+        }:
+            raise ContextContractError(f"run {run_id} is not terminal and cannot be retried")
+        if not plan_path.is_file() or not old.request_text or not old.acceptance_criteria:
+            raise ContextContractError(
+                f"run {run_id} has no approved plan, original request, or acceptance criteria to "
+                "reuse; a fresh `dev-orch run` is required"
+            )
+        if (
+            not old.plan_sha256
+            or hashlib.sha256(plan_path.read_bytes()).hexdigest() != old.plan_sha256
+        ):
+            raise ContextContractError(f"run {run_id} approved plan hash is missing or changed")
         head = repo.current_commit()
         if old.git.base_commit and head != old.git.base_commit:
             typer.echo(
@@ -440,6 +480,11 @@ def retry(
                 err=True,
             )
         config = _project_config(repo)
+        source_scope = old.config_layers[0].get("scope") if old.config_layers else None
+        if source_scope != config.model_dump(mode="json")["scope"]:
+            raise ContextContractError(
+                f"run {run_id} scope is missing or changed; a fresh `dev-orch run` is required"
+            )
         global_config = _global_config()
         outcome = execute_run(
             repo,
@@ -454,6 +499,7 @@ def retry(
             external_plan=plan_path,
             retry_of=run_id,
             continue_patch=continue_patch,
+            retry_resolution_reason=review_escalation_reason,
         )
     except EXPECTED_ERRORS + (NoSuchRunError,) as exc:
         typer.echo(str(exc), err=True)

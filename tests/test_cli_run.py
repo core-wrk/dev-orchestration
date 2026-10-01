@@ -360,10 +360,13 @@ def _dead_run(root, cause, retry_of=None, with_plan=True):
         retry_of=retry_of,
         request_text="add a flag",
         acceptance_criteria=["flag exists"],
+        config_layers=[{"scope": {"include": ["src/"], "exclude": []}}],
     )
     if with_plan:
         (dead.root / "planning").mkdir(exist_ok=True)
-        (dead.root / "planning" / "approved-plan.md").write_text(PLAN)
+        plan = dead.root / "planning" / "approved-plan.md"
+        plan.write_text(PLAN)
+        dead.update_manifest(plan_sha256=hashlib.sha256(plan.read_bytes()).hexdigest())
     return dead
 
 
@@ -404,6 +407,25 @@ def test_retry_refuses_when_the_plan_is_suspect(tmp_path, monkeypatch, cause, re
     assert fragment in result.output
 
 
+def test_retry_refuses_trivial_validation_failure_with_fresh_run_guidance(tmp_path, monkeypatch):
+    root = tmp_path / "trivial"
+    root.mkdir()
+    repo(root)
+    _dead_run(root, "validation_failed", with_plan=False)
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(root), "commit", "-qm", "audit trail"], check=True)
+    adapter = ScriptedAdapter()
+    monkeypatch.setattr(cli_module, "default_registry", lambda *a, **k: registry(adapter))
+    _use_local_worktree(monkeypatch, root)
+    monkeypatch.chdir(root)
+
+    result = CliRunner().invoke(app, ["retry", "20260829-101500_standard_dead"])
+
+    assert result.exit_code == 1
+    assert "fresh `dev-orch run` is required" in result.output
+    assert adapter.seen == []
+
+
 def _saved_change(root, content="x = 3\n"):
     """Make a real patch of a change to src/app.py, then revert the checkout."""
     from dev_orchestration.git.repo import GitRepo
@@ -417,11 +439,11 @@ def _saved_change(root, content="x = 3\n"):
     return patch
 
 
-def _retry_fixture(tmp_path, monkeypatch, patch_text):
+def _retry_fixture(tmp_path, monkeypatch, patch_text, cause="implementation_review_exhausted"):
     root = tmp_path / "continue"
     root.mkdir()
     repo(root)
-    dead = _dead_run(root, "implementation_review_exhausted")
+    dead = _dead_run(root, cause)
     if patch_text is not None:
         dead.write_text_artifact("execution/final-change.patch", patch_text)
     subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
@@ -431,6 +453,53 @@ def _retry_fixture(tmp_path, monkeypatch, patch_text):
     _use_local_worktree(monkeypatch, root)
     monkeypatch.chdir(root)
     return root, adapter
+
+
+def test_retry_review_escalation_requires_and_records_resolution_reason(tmp_path, monkeypatch):
+    root, adapter = _retry_fixture(
+        tmp_path, monkeypatch, None, cause="implementation_review_escalated"
+    )
+    command = CliRunner()
+    refused = command.invoke(app, ["retry", "20260829-101500_standard_dead"])
+    assert refused.exit_code == 1
+    assert "--review-escalation-reason" in refused.output
+    accepted = command.invoke(
+        app,
+        [
+            "retry",
+            "20260829-101500_standard_dead",
+            "--review-escalation-reason",
+            "reviewer concern was resolved",
+        ],
+    )
+    assert accepted.exit_code == 0, accepted.output
+    manifest = _latest_manifest(root)
+    events = (root / ".ai" / "runs" / manifest.run_id / "events.jsonl").read_text()
+    assert "reviewer concern was resolved" in events
+    assert "implementation_worker" in adapter.seen
+
+
+def test_retry_refuses_tampered_approved_plan_before_provider_call(tmp_path, monkeypatch):
+    root, adapter = _retry_fixture(tmp_path, monkeypatch, None)
+    plan = root / ".ai/runs/20260829-101500_standard_dead/planning/approved-plan.md"
+    plan.write_text("tampered plan")
+    result = CliRunner().invoke(app, ["retry", "20260829-101500_standard_dead"])
+    assert result.exit_code == 1
+    assert "approved plan hash is missing or changed" in result.output
+    assert adapter.seen == []
+
+
+def test_retry_refuses_changed_scope_before_provider_call(tmp_path, monkeypatch):
+    root, adapter = _retry_fixture(tmp_path, monkeypatch, None)
+    config_path = root / ".ai/project.yaml"
+    config_path.write_text(
+        'schema_version: "1.0"\nproject:\n  name: demo\n  class: internal_utility\n'
+        'scope:\n  include: ["src/", "docs/"]\n  exclude: []\n'
+    )
+    result = CliRunner().invoke(app, ["retry", "20260829-101500_standard_dead"])
+    assert result.exit_code == 1
+    assert "scope is missing or changed" in result.output
+    assert adapter.seen == []
 
 
 def test_retry_continues_the_saved_change_without_reimplementing(tmp_path, monkeypatch):
@@ -472,12 +541,15 @@ def test_retry_escalates_when_the_saved_change_no_longer_applies(tmp_path, monke
         "diff --git a/src/app.py b/src/app.py\n--- a/src/app.py\n+++ b/src/app.py\n"
         "@@ -1 +1 @@\n-not the current line\n+x = 3\n"
     )
-    _root, adapter = _retry_fixture(tmp_path, monkeypatch, bad)
+    root, adapter = _retry_fixture(tmp_path, monkeypatch, bad)
+    source_patch = root / ".ai/runs/20260829-101500_standard_dead/execution/final-change.patch"
+    source_bytes = source_patch.read_bytes()
     result = CliRunner().invoke(app, ["retry", "20260829-101500_standard_dead"])
     assert result.exit_code == 1
     assert "no longer applies" in result.output
     assert "retry --fresh" in result.output
     assert "implementation_worker" not in adapter.seen
+    assert source_patch.read_bytes() == source_bytes
 
 
 def test_unproductive_death_saves_the_change_as_a_patch(tmp_path):

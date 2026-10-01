@@ -26,6 +26,7 @@ from dev_orchestration.workflow.checkpoints import input_hashes, record_stage
 from dev_orchestration.workflow.engine import Engine
 from dev_orchestration.workflow.legacy import recover_legacy
 from dev_orchestration.workflow.runner import (
+    CONTINUED_CHANGE_ARTIFACT,
     RunOutcome,
     _approval_required,
     _approval_summary,
@@ -39,6 +40,7 @@ from dev_orchestration.workflow.runner import (
     _task_contract,
     _terminal,
     _tier_rank,
+    apply_continued_change,
 )
 from dev_orchestration.workflow.scheduler import SchedulerQueue
 from dev_orchestration.workflow.scope_check import cleanup_ephemeral_paths, enforce_fence
@@ -713,24 +715,51 @@ def resume_run(
                             worktree=worktree,
                         )
                     store.update_manifest(status=RunState.EXECUTING)
-                    _run_worktree_stage(
-                        worktree_repo,
-                        base,
-                        fence,
-                        lambda approved=approved, invariants=invariants, runtime=runtime, scope_context=scope_context: (
-                            execute(
-                                registry,
-                                approved,
-                                invariants,
-                                runtime.references,
-                                worktree,
-                                store,
-                                runtime.profile_constraints,
-                                scope_context,
-                            )
-                        ),
+                    events_path = store.root / "events.jsonl"
+                    continued = (
+                        any(
+                            json.loads(line).get("event") == "change_continued"
+                            for line in events_path.read_text(encoding="utf-8").splitlines()
+                        )
+                        if events_path.is_file()
+                        else False
                     )
-                    checkpoint("validation", ["execution/worker-result.json"])
+                    if (store.root / CONTINUED_CHANGE_ARTIFACT).is_file() and not continued:
+                        try:
+                            applied = apply_continued_change(store, worktree_repo, base, fence)
+                            if not applied:
+                                raise CheckpointError("continued change patch is missing")
+                        except GitCommandError as exc:
+                            _terminal(
+                                engine,
+                                RunState.ESCALATED,
+                                f"the saved change no longer applies to the current repository "
+                                f"({exc}); use `dev-orch retry --fresh` to re-implement",
+                            )
+                            return _outcome(engine, repo=repo, worktree=worktree)
+                        store.append_event(
+                            {"event": "change_continued", "source_run": current.retry_of}
+                        )
+                        checkpoint("validation", [CONTINUED_CHANGE_ARTIFACT])
+                    else:
+                        _run_worktree_stage(
+                            worktree_repo,
+                            base,
+                            fence,
+                            lambda approved=approved, invariants=invariants, runtime=runtime, scope_context=scope_context: (
+                                execute(
+                                    registry,
+                                    approved,
+                                    invariants,
+                                    runtime.references,
+                                    worktree,
+                                    store,
+                                    runtime.profile_constraints,
+                                    scope_context,
+                                )
+                            ),
+                        )
+                        checkpoint("validation", ["execution/worker-result.json"])
                     stage = "validation"
                 elif stage == "validation":
                     store.update_manifest(status=RunState.VALIDATING)
@@ -801,6 +830,21 @@ def resume_run(
                     )
                     cleanup_ephemeral_paths(worktree)
                     require_snapshot(worktree_repo, before)
+                    if reviewed.outcome in {Outcome.BLOCKED, Outcome.ESCALATE}:
+                        target = (
+                            RunState.BLOCKED
+                            if reviewed.outcome is Outcome.BLOCKED
+                            else RunState.ESCALATED
+                        )
+                        _terminal(
+                            engine,
+                            target,
+                            f"implementation review: {reviewed.outcome}",
+                            "implementation_review_escalated"
+                            if reviewed.outcome is Outcome.ESCALATE
+                            else "other",
+                        )
+                        return _outcome(engine, repo=repo, worktree=worktree)
                     stage = "remediation" if reviewed.blocking_ids() else "verifier"
                     checkpoint(
                         stage,
