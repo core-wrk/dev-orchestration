@@ -17,7 +17,11 @@ from dev_orchestration.domain.findings import ReviewResult, Verification
 from dev_orchestration.domain.run import GitBlock, PauseRecord
 from dev_orchestration.git.repo import GitCommandError, GitRepo
 from dev_orchestration.scope import ScopeFence
-from dev_orchestration.workflow.bootstrap import resolve_run_policy, resolve_runtime_context
+from dev_orchestration.workflow.bootstrap import (
+    classification_references_for_run,
+    resolve_run_policy,
+    resolve_runtime_context,
+)
 from dev_orchestration.workflow.checkpoints import input_hashes, record_stage
 from dev_orchestration.workflow.engine import Engine
 from dev_orchestration.workflow.legacy import recover_legacy
@@ -33,6 +37,7 @@ from dev_orchestration.workflow.runner import (
     _run_worktree_stage,
     _task_contract,
     _terminal,
+    _tier_rank,
     _validation_json,
 )
 from dev_orchestration.workflow.scheduler import SchedulerQueue
@@ -49,6 +54,7 @@ from dev_orchestration.workflow.stages import (
     review_plan,
     verify,
 )
+from dev_orchestration.workflow.tiers import specification_minimum_tier
 from dev_orchestration.workflow.validation import ValidationOutcome, all_passed, run_validations
 
 
@@ -151,7 +157,11 @@ def _check_run(
         receipt = store.verify_checkpoint()
     except CheckpointError as exc:
         raise ResumeRefused(str(exc)) from exc
-    if input_hashes(store, registry) != receipt["inputs"]:
+    try:
+        current_inputs = input_hashes(store, registry)
+    except CheckpointError as exc:
+        raise ResumeRefused(f"saved run input changed: {exc}") from exc
+    if current_inputs != receipt["inputs"]:
         raise ResumeRefused("saved request, policy, role binding, or context changed")
     if not manifest.config_layers or manifest.config_layers[0] != project_config.model_dump(
         mode="json"
@@ -488,13 +498,44 @@ def resume_run(
                     ),
                 )
                 if stage == "classifier":
+                    classifier_references = classification_references_for_run(
+                        store,
+                        project_config,
+                        request_text,
+                        fence,
+                        persist_if_missing=False,
+                    )
                     classification = classify(
                         registry,
                         request_text,
                         current.project_class,
                         store,
                         current.available_profiles,
+                        classifier_references,
+                        criteria,
                     )
+                    specification_minimum, specification_reason = specification_minimum_tier(
+                        request_text
+                    )
+                    if specification_minimum is not None and _tier_rank(
+                        classification.tier
+                    ) < _tier_rank(specification_minimum):
+                        classification = classification.model_copy(
+                            update={
+                                "tier": specification_minimum,
+                                "rationale": f"{classification.rationale}; raised to standard because {specification_reason}",
+                            }
+                        )
+                        store.write_json_artifact(
+                            "classification.json", classification.model_dump(mode="json")
+                        )
+                        store.append_event(
+                            {
+                                "event": "classification_tier_raised",
+                                "tier": str(specification_minimum),
+                                "reason": specification_reason,
+                            }
+                        )
                     engine.transition(RunState.CLASSIFIED)
                     runtime = resolve_runtime_context(
                         repo.root, project_config, classification.profiles, fence

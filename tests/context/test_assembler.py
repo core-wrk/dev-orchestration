@@ -5,6 +5,7 @@ from dev_orchestration.context.assembler import (
     STAGE_CONTRACTS,
     Category,
     ContextContractError,
+    PromptBudgetError,
     assemble,
     read_reference,
 )
@@ -41,6 +42,31 @@ def test_a_stage_refuses_a_category_its_contract_excludes(stage, forbidden):
 def test_unknown_stage_fails_closed():
     with pytest.raises(ContextContractError):
         assemble("not_a_stage", [])
+
+
+def test_classification_contract_accepts_selected_references_and_exact_criteria():
+    packet = assemble(
+        "classification",
+        [
+            ref(Category.REQUEST, "implement docs/spec.md"),
+            ref(Category.REPO_CLASS, "internal_utility"),
+            ref(Category.REFERENCES, "selected spec"),
+            ref(Category.ACCEPTANCE_CRITERIA, '["criterion"]'),
+        ],
+    )
+    assert packet.items[-1].content == '["criterion"]'
+
+
+def test_classification_never_truncates_acceptance_criteria():
+    with pytest.raises(PromptBudgetError):
+        assemble(
+            "classification",
+            [
+                ref(Category.REQUEST),
+                ref(Category.REPO_CLASS),
+                ref(Category.ACCEPTANCE_CRITERIA, "x" * 100_000),
+            ],
+        )
 
 
 def test_read_reference_allows_a_declared_path_outside_the_write_fence(tmp_path):

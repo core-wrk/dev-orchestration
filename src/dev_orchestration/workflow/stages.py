@@ -57,6 +57,8 @@ def classify(
     project_class: ProjectClass,
     store: RunStore,
     available_profiles: list[str] | None = None,
+    references: list[ContextRef] | None = None,
+    acceptance_criteria: list[str] | None = None,
 ) -> Classification:
     profiles = available_profiles or []
     repo_context = f"{project_class}\nAvailable profiles: {', '.join(profiles) or '(none)'}"
@@ -65,6 +67,12 @@ def classify(
         [
             ContextRef(label=Category.REQUEST, path=None, content=request_text),
             ContextRef(label=Category.REPO_CLASS, path=None, content=repo_context),
+            *(references or []),
+            ContextRef(
+                label=Category.ACCEPTANCE_CRITERIA,
+                path=None,
+                content=json.dumps(acceptance_criteria or [], ensure_ascii=False),
+            ),
         ],
     )
     request = _request(registry, "classifier", store, packet, store.repo_root)

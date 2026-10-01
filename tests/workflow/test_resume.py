@@ -482,3 +482,38 @@ def test_pause_before_classification_resumes_despite_persistent_context(tmp_path
     assert first.final_state is RunState.PAUSED_INTERRUPTED
     resumed = resume_run(git, config, registry(Scripted()), first.run_id)
     assert resumed.final_state is RunState.COMPLETE_LOCAL
+
+
+def test_pause_before_classification_refuses_changed_selected_spec_before_provider(tmp_path):
+    class ClassifierTimeout(Scripted):
+        def run(self, request):
+            if request.role == "classifier" and not self.seen:
+                self.seen.append("classifier")
+                raise AgentTimeoutError(request.role, 7, self.name)
+            return super().run(request)
+
+    git = repo(tmp_path)
+    spec_dir = git.root / "docs" / "specs"
+    spec_dir.mkdir(parents=True)
+    spec = spec_dir / "feature.md"
+    spec.write_text("version one\n")
+    subprocess.run(["git", "-C", str(git.root), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(git.root), "commit", "-qm", "spec"], check=True)
+    config = ProjectConfig.model_validate(
+        CONFIG.model_dump(mode="json")
+        | {"context": {"persistent": [], "on_demand": {"specifications": "docs/specs"}}}
+    )
+    first = execute_run(
+        git,
+        config,
+        registry(ClassifierTimeout()),
+        "Implement docs/specs/feature.md",
+        tmp_path / "wt",
+        CRITERIA,
+    )
+    assert first.final_state is RunState.PAUSED_INTERRUPTED
+    spec.write_text("version two\n")
+    resumed_adapter = Scripted()
+    with pytest.raises(ResumeRefused, match="input changed"):
+        resume_run(git, config, registry(resumed_adapter), first.run_id)
+    assert resumed_adapter.seen == []

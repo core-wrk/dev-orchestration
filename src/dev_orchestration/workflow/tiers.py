@@ -1,5 +1,7 @@
 """The implemented stage path for each M2 tier."""
 
+import re
+
 from dev_orchestration.domain.enums import Tier
 
 
@@ -9,6 +11,19 @@ class UnsupportedTierError(RuntimeError):
 
 class TierDowngradeError(RuntimeError):
     """An override tried to run under weaker controls than classification."""
+
+
+_SPECIFICATION_REQUEST = re.compile(r"^\s*(?:implement|build|execute)\b", re.IGNORECASE)
+_MARKDOWN_NAME = re.compile(
+    r"(?:^|[\s`(/])/?[A-Za-z0-9_./-]+\.md(?:$|[\s`)\],.;:!?])", re.IGNORECASE
+)
+
+
+def specification_minimum_tier(request_text: str) -> tuple[Tier | None, str | None]:
+    """Keep implementation requests naming Markdown specs on the standard path."""
+    if _SPECIFICATION_REQUEST.search(request_text) and _MARKDOWN_NAME.search(request_text):
+        return Tier.STANDARD, "implementation request names a Markdown specification"
+    return None, None
 
 
 TIER_STAGES: dict[Tier, tuple[str, ...]] = {

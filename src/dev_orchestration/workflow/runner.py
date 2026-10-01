@@ -22,6 +22,7 @@ from dev_orchestration.git.worktree import remove_worktree
 from dev_orchestration.scope import ScopeFence
 from dev_orchestration.workflow.bootstrap import (
     bootstrap_run,
+    classification_references_for_run,
     resolve_run_policy,
     resolve_runtime_context,
 )
@@ -52,6 +53,7 @@ from dev_orchestration.workflow.stages import (
 from dev_orchestration.workflow.tiers import (
     TierDowngradeError,
     UnsupportedTierError,
+    specification_minimum_tier,
     stages_for,
 )
 from dev_orchestration.workflow.validation import (
@@ -457,6 +459,13 @@ def execute_run(
             )
             store.update_manifest(external_plan_artifact=stored_external)
             external_plan = store.root / stored_external
+        classifier_references = classification_references_for_run(
+            store,
+            project_config,
+            request_text,
+            fence,
+            persist_if_missing=True,
+        )
     except BaseException:
         claim.__exit__(None, None, None)
         raise
@@ -469,7 +478,27 @@ def execute_run(
             project_config.project.project_class,
             store,
             project_config.profiles.available,
+            classifier_references,
+            acceptance_criteria,
         )
+        specification_minimum, specification_reason = specification_minimum_tier(request_text)
+        if specification_minimum is not None and _tier_rank(classification.tier) < _tier_rank(
+            specification_minimum
+        ):
+            classification = classification.model_copy(
+                update={
+                    "tier": specification_minimum,
+                    "rationale": f"{classification.rationale}; raised to standard because {specification_reason}",
+                }
+            )
+            store.write_json_artifact("classification.json", classification.model_dump(mode="json"))
+            store.append_event(
+                {
+                    "event": "classification_tier_raised",
+                    "tier": str(specification_minimum),
+                    "reason": specification_reason,
+                }
+            )
         engine.transition(RunState.CLASSIFIED)
         runtime = resolve_runtime_context(repo.root, project_config, classification.profiles, fence)
         config_layers = [

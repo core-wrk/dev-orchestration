@@ -347,6 +347,58 @@ def test_trivial_executor_receives_request_scope_criteria_and_constraints(tmp_pa
     assert (outcome.store_root / "planning" / "task-contract.md").is_file()
 
 
+def test_implementing_declared_spec_gets_standard_path_and_classifier_context(tmp_path):
+    git = repo(tmp_path)
+    (git.root / "docs" / "superpowers" / "specs").mkdir(parents=True)
+    (git.root / "docs" / "superpowers" / "specs" / "feature.md").write_text(
+        "Add the feature behavior.\n"
+    )
+    subprocess.run(["git", "-C", str(git.root), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(git.root), "commit", "-qm", "spec"], check=True)
+    config = ProjectConfig.model_validate(
+        CONFIG.model_dump(mode="json")
+        | {
+            "context": {
+                "persistent": [],
+                "on_demand": {"specifications": "docs/superpowers/specs"},
+            }
+        }
+    )
+    adapter = Scripted(script(tier="trivial"))
+    outcome = execute_run(
+        git,
+        config,
+        registry(adapter),
+        "Implement docs/superpowers/specs/feature.md",
+        tmp_path / "wt",
+        CRITERIA,
+    )
+    manifest = json.loads((outcome.store_root / "manifest.json").read_text())
+    classifier = next(item for item in adapter.requests if item.role == "classifier")
+    rendered = classifier.context.render()
+    assert outcome.final_state is RunState.COMPLETE_LOCAL
+    assert manifest["tier"] == "standard"
+    assert "Add the feature behavior." in rendered
+    assert json.dumps(CRITERIA) in rendered
+    assert "planner" in adapter.seen and "implementation_reviewer" in adapter.seen
+    assert any(event["event"] == "classification_tier_raised" for event in events(outcome))
+
+
+def test_editing_spec_wording_retains_trivial_path(tmp_path):
+    git = repo(tmp_path)
+    adapter = Scripted(script(tier="trivial"))
+    outcome = execute_run(
+        git,
+        CONFIG,
+        registry(adapter),
+        "Correct a sentence in docs/spec.md",
+        tmp_path / "wt",
+        CRITERIA,
+    )
+    assert outcome.final_state is RunState.COMPLETE_LOCAL
+    assert "planner" not in adapter.seen
+
+
 def test_profile_minimum_tier_and_protected_rules_reach_runtime(tmp_path):
     git = repo(tmp_path)
     config = ProjectConfig.model_validate(

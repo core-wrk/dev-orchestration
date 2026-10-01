@@ -9,6 +9,7 @@ from dev_orchestration.scope import ScopeFence
 from dev_orchestration.workflow.bootstrap import (
     ProtectedRuleViolation,
     bootstrap_run,
+    prepare_classification_references,
     resolve_run_policy,
     resolve_runtime_context,
 )
@@ -100,3 +101,74 @@ def test_runtime_profile_minimum_and_context_are_joined(tmp_path):
     assert runtime.minimum_tier is Tier.STANDARD
     assert runtime.invariants[0].label == "invariants"
     assert runtime.profile_constraints[0].label == "profile_constraints"
+
+
+def test_classification_only_reads_explicit_authorized_markdown(tmp_path):
+    (tmp_path / "docs" / "specs").mkdir(parents=True)
+    (tmp_path / "src").mkdir()
+    (tmp_path / "docs" / "specs" / "feature.md").write_text("feature requirements\n")
+    (tmp_path / "src" / "secret.md").write_text("not declared\n")
+    config = ProjectConfig.model_validate(
+        {
+            "project": {"name": "x", "class": "internal_utility"},
+            "context": {"persistent": [], "on_demand": {"specifications": "docs/specs"}},
+            "scope": {"include": ["src/"], "exclude": []},
+        }
+    )
+    refs, artifact = prepare_classification_references(
+        tmp_path,
+        config,
+        "Implement docs/specs/feature.md and ../../src/secret.md",
+        ScopeFence.from_config(config.scope),
+    )
+    assert "feature requirements" in refs[0].content
+    assert refs[1].content.startswith("[rejected:")
+    assert artifact["sources"][0]["sha256"]
+    assert "not declared" not in "\n".join(item.content for item in refs)
+
+
+def test_classification_reference_rejects_escaping_symlink(tmp_path):
+    (tmp_path / "docs" / "specs").mkdir(parents=True)
+    outside = tmp_path.parent / f"{tmp_path.name}-outside.md"
+    outside.write_text("secret\n")
+    (tmp_path / "docs" / "specs" / "escape.md").symlink_to(outside)
+    config = ProjectConfig.model_validate(
+        {
+            "project": {"name": "x", "class": "internal_utility"},
+            "context": {"persistent": [], "on_demand": {"specifications": "docs/specs"}},
+            "scope": {"include": ["**"], "exclude": []},
+        }
+    )
+    refs, _ = prepare_classification_references(
+        tmp_path,
+        config,
+        "Implement docs/specs/escape.md",
+        ScopeFence.from_config(config.scope),
+    )
+    assert refs[0].content.startswith("[rejected:")
+    assert "secret" not in refs[0].content
+    outside.unlink()
+
+
+def test_classification_reference_excerpt_is_bounded_and_identified(tmp_path):
+    (tmp_path / "docs" / "specs").mkdir(parents=True)
+    (tmp_path / "docs" / "specs" / "large.md").write_text("é" * 20_000)
+    config = ProjectConfig.model_validate(
+        {
+            "project": {"name": "x", "class": "internal_utility"},
+            "context": {"persistent": [], "on_demand": {"specifications": "docs/specs"}},
+            "scope": {"include": ["**"], "exclude": []},
+        }
+    )
+    refs, artifact = prepare_classification_references(
+        tmp_path,
+        config,
+        "Implement docs/specs/large.md",
+        ScopeFence.from_config(config.scope),
+    )
+    excerpt = refs[0].content.split("\n", 2)[2].split("\n[truncated", 1)[0]
+    assert len(excerpt.encode("utf-8")) <= 16_000
+    assert "Original bytes: 40000" in refs[0].content
+    assert "SHA-256:" in refs[0].content
+    assert "truncated" in refs[0].content
+    assert artifact["sources"][0]["original_bytes"] == 40_000

@@ -2,7 +2,12 @@ import pytest
 
 from dev_orchestration.context.assembler import STAGE_CONTRACTS
 from dev_orchestration.domain.enums import Tier
-from dev_orchestration.workflow.tiers import TIER_STAGES, UnsupportedTierError, stages_for
+from dev_orchestration.workflow.tiers import (
+    TIER_STAGES,
+    UnsupportedTierError,
+    specification_minimum_tier,
+    stages_for,
+)
 
 
 def test_trivial_skips_planning_and_plan_review():
@@ -48,3 +53,18 @@ def test_trivial_omits_implementation_review_but_keeps_verification():
 def test_standard_and_substantial_keep_implementation_review():
     for tier in (Tier.STANDARD, Tier.SUBSTANTIAL):
         assert "implementation_review" in stages_for(tier)
+
+
+@pytest.mark.parametrize("verb", ["Implement", "build", "EXECUTE"])
+def test_implementation_request_naming_markdown_spec_has_standard_minimum(verb):
+    minimum, reason = specification_minimum_tier(f"{verb} docs/spec.md")
+    assert minimum is Tier.STANDARD
+    assert reason
+
+
+def test_editing_spec_wording_has_no_deterministic_minimum():
+    assert specification_minimum_tier("Correct a sentence in docs/spec.md") == (None, None)
+
+
+def test_project_directory_name_does_not_raise_tier():
+    assert specification_minimum_tier("Implement src/super-project/feature.py") == (None, None)

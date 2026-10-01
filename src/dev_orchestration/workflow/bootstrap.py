@@ -1,9 +1,11 @@
 """Bootstrap a run and join configuration with safe runtime context."""
 
+import hashlib
 import json
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from dev_orchestration.artifacts.store import RunStore, new_run_id, slugify
 from dev_orchestration.config.models import ProjectConfig
@@ -33,6 +35,113 @@ class RuntimeContext:
     excluded: list[str]
     conflicts: list[str]
     minimum_tier: Tier | None
+
+
+CLASSIFICATION_REFERENCE_BUDGET = 16_000
+_MARKDOWN_PATH = re.compile(r"/?[A-Za-z0-9_./-]+\.md")
+
+
+def _request_markdown_paths(request_text: str) -> list[str]:
+    """Extract explicit Markdown paths without discovering repository files."""
+    found: list[str] = []
+    for match in _MARKDOWN_PATH.finditer(request_text):
+        path = match.group(0)
+        # A path inside a URL is not a repository-relative source.
+        prefix = request_text[max(0, request_text.rfind(" ", 0, match.start()) + 1) : match.start()]
+        if "://" in prefix:
+            continue
+        if path not in found:
+            found.append(path)
+    return found
+
+
+def prepare_classification_references(
+    repo_root: Path,
+    project_config: ProjectConfig,
+    request_text: str,
+    fence,
+) -> tuple[list[ContextRef], dict]:
+    """Load only explicit Markdown paths authorized by declared context policy."""
+    candidates = _request_markdown_paths(request_text)
+    persistent = set(project_config.context.persistent)
+    on_demand = tuple(project_config.context.on_demand.values())
+    refs: list[ContextRef] = []
+    sources: list[dict] = []
+    used = 0
+
+    for path in candidates:
+        pure = PurePosixPath(path)
+        authorized = (
+            not pure.is_absolute()
+            and ".." not in pure.parts
+            and (
+                path in persistent
+                or any(
+                    path == root.rstrip("/") or path.startswith(root.rstrip("/") + "/")
+                    for root in on_demand
+                )
+            )
+        )
+        if not authorized:
+            reason = "not authorized by context.persistent or context.on_demand"
+            refs.append(ContextRef(label="references", path=path, content=f"[rejected: {reason}]"))
+            sources.append({"path": path, "status": "rejected", "reason": reason})
+            continue
+        try:
+            reference = read_reference(repo_root, path, fence)
+            raw = (repo_root / path).resolve().read_bytes()
+            decoded = raw.decode("utf-8")
+        except (ContextContractError, OSError, UnicodeError) as exc:
+            reason = str(exc)
+            refs.append(ContextRef(label="references", path=path, content=f"[rejected: {reason}]"))
+            missing = not (repo_root / path).exists()
+            sources.append(
+                {"path": path, "status": "missing" if missing else "rejected", "reason": reason}
+            )
+            continue
+
+        digest = hashlib.sha256(raw).hexdigest()
+        size = len(raw)
+        remaining = max(0, CLASSIFICATION_REFERENCE_BUDGET - used)
+        excerpt = decoded.encode("utf-8")[:remaining].decode("utf-8", errors="ignore")
+        used += len(excerpt.encode("utf-8"))
+        truncated = len(excerpt.encode("utf-8")) < len(decoded.encode("utf-8"))
+        notice = "\n[truncated; original content continues]" if truncated else ""
+        content = f"Original bytes: {size}\nSHA-256: {digest}\n{excerpt}{notice}"
+        refs.append(reference.model_copy(update={"content": content}))
+        sources.append(
+            {"path": path, "status": "included", "sha256": digest, "original_bytes": size}
+        )
+
+    artifact = {
+        "sources": sources,
+        "supplied_references": [item.model_dump(mode="json") for item in refs],
+    }
+    return refs, artifact
+
+
+def classification_references_for_run(
+    store: RunStore,
+    project_config: ProjectConfig,
+    request_text: str,
+    fence,
+    *,
+    persist_if_missing: bool,
+) -> list[ContextRef]:
+    """Reuse the immutable classifier packet when present, including on resume."""
+    artifact_path = store.root / "classification-inputs.json"
+    if artifact_path.is_file():
+        try:
+            artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+            return [ContextRef.model_validate(item) for item in artifact["supplied_references"]]
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise ContextContractError("saved classification inputs are invalid") from exc
+    refs, artifact = prepare_classification_references(
+        store.repo_root, project_config, request_text, fence
+    )
+    if persist_if_missing:
+        store.write_json_artifact("classification-inputs.json", artifact, immutable=True)
+    return refs
 
 
 def _tier_rank(tier: Tier) -> int:

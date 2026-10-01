@@ -15,6 +15,7 @@ from dev_orchestration.workflow.stages import (
     MAX_REMEDIATION_CYCLES,
     FindingIdentityAmbiguity,
     RemediationExhausted,
+    classify,
     execute,
     plan,
     reconcile,
@@ -82,6 +83,22 @@ def test_plan_review_assigns_our_stable_ids(store):
     )
     result = review_plan(registry(adapter, "plan_reviewer"), "brief", "# plan", [], store)
     assert result.findings[0].id == "F001"
+
+
+def test_classifier_receives_selected_specification_and_exact_criteria(store):
+    adapter = Scripted([{"tier": "standard", "rationale": "scope", "profiles": []}])
+    classify(
+        registry(adapter, "classifier"),
+        "Implement docs/spec.md",
+        ProjectClass.INTERNAL_UTILITY,
+        store,
+        ["profile"],
+        [ContextRef(label=Category.REFERENCES, path="docs/spec.md", content="selected text")],
+        ["keep this criterion exactly"],
+    )
+    rendered = adapter.requests[0].context.render()
+    assert "selected text" in rendered
+    assert '["keep this criterion exactly"]' in rendered
 
 
 def test_planning_and_reconciliation_keep_plan_versions(store):

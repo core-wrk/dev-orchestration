@@ -41,7 +41,15 @@ class Category(StrEnum):
 
 
 STAGE_CONTRACTS: dict[str, frozenset[Category]] = {
-    "classification": frozenset({Category.REQUEST, Category.REPO_CLASS, Category.CONTEXT_NOTES}),
+    "classification": frozenset(
+        {
+            Category.REQUEST,
+            Category.REPO_CLASS,
+            Category.REFERENCES,
+            Category.ACCEPTANCE_CRITERIA,
+            Category.CONTEXT_NOTES,
+        }
+    ),
     "planning": frozenset(
         {Category.BRIEF, Category.INVARIANTS, Category.REFERENCES, Category.CONTEXT_NOTES}
     ),

@@ -66,6 +66,32 @@ def input_hashes(store: RunStore, registry: RoleRegistry) -> dict[str, str]:
         if not path.is_file():
             raise CheckpointError(f"run input {name} is missing")
         values[name] = _digest(path.read_bytes())
+    classification_inputs = store.root / "classification-inputs.json"
+    if classification_inputs.is_file():
+        values["classification-inputs.json"] = _digest(classification_inputs.read_bytes())
+        try:
+            saved = json.loads(classification_inputs.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise CheckpointError("saved classification inputs are invalid") from exc
+        for source in saved.get("sources", []):
+            status = source.get("status")
+            if status not in {"included", "missing"}:
+                continue
+            name = source.get("path")
+            if not isinstance(name, str):
+                raise CheckpointError("saved classification source path is invalid")
+            path = _within(store.repo_root, name)
+            if status == "missing":
+                if path.exists():
+                    raise CheckpointError(f"classification source {name} appeared after checkpoint")
+                values[f"classification_source:{name}"] = "missing"
+                continue
+            if not path.is_file():
+                raise CheckpointError(f"classification source {name} is missing")
+            digest = _digest(path.read_bytes())
+            if source.get("sha256") != digest:
+                raise CheckpointError(f"classification source {name} changed after selection")
+            values[f"classification_source:{name}"] = digest
     if manifest.external_plan_artifact:
         path = store.root / manifest.external_plan_artifact
         if not path.is_file():
