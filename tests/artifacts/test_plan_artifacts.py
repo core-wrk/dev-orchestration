@@ -2,7 +2,12 @@ import hashlib
 
 import pytest
 
-from dev_orchestration.artifacts.store import NoApprovedPlanError, PlanOverwriteError, RunStore
+from dev_orchestration.artifacts.store import (
+    CheckpointError,
+    NoApprovedPlanError,
+    PlanOverwriteError,
+    RunStore,
+)
 from dev_orchestration.domain.enums import ProjectClass, Tier
 from dev_orchestration.domain.run import RunManifest
 
@@ -41,10 +46,18 @@ def test_reading_before_approval_fails(store):
 
 def test_external_plan_is_copied_hashed_and_recorded(store, tmp_path):
     source = tmp_path / "external.md"
-    source.write_text("# external\n")
+    source.write_bytes(b"# external\r\n")
     copied, digest = store.import_external_plan(source)
     assert copied.name == "plan-v1.md"
     assert digest == hashlib.sha256(source.read_bytes()).hexdigest()
     manifest = store.read_manifest()
     assert manifest.plan_origin == "external"
     assert manifest.plan_sha256 == digest
+    assert copied.read_bytes() == source.read_bytes()
+
+
+def test_uncheckpointed_plan_review_receipt_is_rejected(store):
+    store.checkpoint(next_stage="classifier", artifacts=[], worktree={}, inputs={})
+    store.write_json_artifact("planning/plan-review-receipt.json", {"receipt": True})
+    with pytest.raises(CheckpointError, match="unreceipted stage output"):
+        store.verify_checkpoint()

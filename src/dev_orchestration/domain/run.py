@@ -87,6 +87,7 @@ class RunManifest(BaseModel):
     cloud_session: CloudSession | None = None
     linked_source_run: str | None = None
     external_plan_artifact: str | None = None
+    plan_review_provenance: dict = Field(default_factory=dict)
     stage_attempts: dict[str, int] = Field(default_factory=dict)
     validation_repairs_reserved: int = 0
     validation_artifact: str | None = None

@@ -198,11 +198,22 @@ def _global_config(path: Path | None = None) -> GlobalConfig:
     return GlobalConfig.model_validate(yaml.safe_load(target.read_text(encoding="utf-8")) or {})
 
 
+def _report_plan_review_reuse(outcome) -> None:
+    for event in read_events(outcome.store_root):
+        if event.get("event") == "plan_review_reused":
+            typer.echo(f"Plan review reused from {event['source_run']}.", err=True)
+        elif event.get("event") == "plan_review_reuse_reason":
+            typer.echo(f"Plan review will run: {event['reason']}.", err=True)
+
+
 @app.command()
 def run(
     request: str = typer.Argument(..., help="What you want done"),
     plan_file: Path | None = typer.Option(  # noqa: B008
-        None, "--plan", help="Import an external plan"
+        None, "--plan", help="Import an external plan; review runs unless prior evidence matches"
+    ),
+    reviewed_plan_from: str | None = typer.Option(
+        None, "--reviewed-plan-from", help="Run ID whose matching plan review may be reused"
     ),
     tier: str | None = typer.Option(None, "--tier", help="Override classification"),
     downgrade_reason: str | None = typer.Option(
@@ -232,6 +243,18 @@ def run(
         )
     try:
         repo = discover_repo(Path.cwd())
+        review_source = None
+        if reviewed_plan_from is not None:
+            if plan_file is None:
+                raise ContextContractError("--reviewed-plan-from requires --plan FILE")
+            review_source = RunStore(repo.root, reviewed_plan_from)
+            if (
+                review_source.root.resolve().parent != (repo.root / ".ai" / "runs").resolve()
+                or not (review_source.root / "manifest.json").is_file()
+            ):
+                raise NoSuchRunError(
+                    f"run {reviewed_plan_from!r} does not exist in this repository"
+                )
         config = _project_config(repo)
         override = None
         if tier is not None:
@@ -252,8 +275,10 @@ def run(
             tier_override=override,
             downgrade_reason=downgrade_reason,
             external_plan=plan_file,
+            reviewed_plan_from=review_source,
             auto_resume=auto_resume,
         )
+        _report_plan_review_reuse(outcome)
     except EXPECTED_ERRORS as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(1) from exc
@@ -419,7 +444,10 @@ def retry(
     try:
         repo = discover_repo(Path.cwd())
         source = RunStore(repo.root, run_id)
-        if not (source.root / "manifest.json").is_file():
+        if (
+            source.root.resolve().parent != (repo.root / ".ai" / "runs").resolve()
+            or not (source.root / "manifest.json").is_file()
+        ):
             raise NoSuchRunError(f"run {run_id!r} does not exist")
         old = source.read_manifest()
         if old.terminal_cause == "implementation_review_escalated":
@@ -497,11 +525,13 @@ def retry(
             tier_override=old.tier_override,
             downgrade_reason=old.downgrade_reason,
             external_plan=plan_path,
+            reviewed_plan_from=source,
             retry_of=run_id,
             retry_source=source,
             continue_patch=continue_patch,
             retry_resolution_reason=review_escalation_reason,
         )
+        _report_plan_review_reuse(outcome)
     except EXPECTED_ERRORS + (NoSuchRunError,) as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(1) from exc

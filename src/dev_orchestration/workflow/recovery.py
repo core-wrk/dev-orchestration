@@ -25,6 +25,12 @@ from dev_orchestration.workflow.bootstrap import (
 from dev_orchestration.workflow.checkpoints import input_hashes, record_stage
 from dev_orchestration.workflow.engine import Engine
 from dev_orchestration.workflow.legacy import recover_legacy
+from dev_orchestration.workflow.plan_reuse import (
+    RECEIPT as PLAN_REVIEW_RECEIPT,
+)
+from dev_orchestration.workflow.plan_reuse import (
+    create_receipt as create_plan_review_receipt,
+)
 from dev_orchestration.workflow.retry_feedback import context_ref as prior_failures_context
 from dev_orchestration.workflow.runner import (
     CONTINUED_CHANGE_ARTIFACT,
@@ -663,13 +669,20 @@ def resume_run(
                         _terminal(engine, target, f"plan review: {reviewed.outcome}")
                         return _outcome(engine, repo=repo, worktree=worktree)
                     store.approve_plan(_latest_plan(store))
+                    final_review = _latest(store, "review", "plan-review")
+                    create_plan_review_receipt(
+                        store, _latest_plan(store), final_review, runtime.profile_constraints
+                    )
                     approval_required = _approval_required(
                         project_config, current.tier, current.active_profiles
                     )
                     store.update_manifest(
                         status=RunState.PLAN_FINALIZED, approval_required=approval_required
                     )
-                    checkpoint("implementation_worker", ["planning/approved-plan.md"])
+                    checkpoint(
+                        "implementation_worker",
+                        ["planning/approved-plan.md", PLAN_REVIEW_RECEIPT],
+                    )
                     stage = "implementation_worker"
                 elif stage == "implementation_worker":
                     if (

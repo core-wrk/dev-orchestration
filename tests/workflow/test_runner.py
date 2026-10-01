@@ -7,7 +7,7 @@ import pytest
 
 from dev_orchestration.adapters.base import AdapterStatus, AgentResult, AgentTimeoutError
 from dev_orchestration.adapters.registry import RoleRegistry
-from dev_orchestration.artifacts.store import RunStore
+from dev_orchestration.artifacts.store import CheckpointError, RunStore
 from dev_orchestration.config.models import ProjectConfig, RoleConfig
 from dev_orchestration.context.assembler import Category, ContextContractError
 from dev_orchestration.domain.enums import RunState, Tier
@@ -771,6 +771,167 @@ def test_external_plan_is_imported_hashed_and_planner_is_skipped(tmp_path):
     manifest = json.loads((outcome.store_root / "manifest.json").read_text())
     assert manifest["plan_origin"] == "external"
     assert manifest["plan_sha256"]
+    assert (outcome.store_root / "planning/plan-review-receipt.json").is_file()
+    assert (
+        "planning/plan-review-receipt.json"
+        in json.loads((outcome.store_root / manifest["checkpoint"]).read_text())["artifacts"]
+    )
+
+
+def test_matching_reviewed_plan_reuses_review_without_provider_calls(tmp_path):
+    git = repo(tmp_path)
+    plan_source = tmp_path / "external.md"
+    plan_source.write_text(PLAN)
+    first = execute_run(
+        git,
+        CONFIG,
+        registry(Scripted(script())),
+        "same request",
+        tmp_path / "wt1",
+        CRITERIA,
+        external_plan=plan_source,
+    )
+    source = RunStore(git.root, first.run_id)
+    adapter = Scripted(script())
+    second = execute_run(
+        git,
+        CONFIG,
+        registry(adapter),
+        "same request",
+        tmp_path / "wt2",
+        CRITERIA,
+        external_plan=source.root / "planning/approved-plan.md",
+        reviewed_plan_from=source,
+    )
+    assert second.final_state is RunState.COMPLETE_LOCAL
+    assert not {"planner", "plan_reviewer", "plan_reconciler"} & set(adapter.seen)
+    manifest = json.loads((second.store_root / "manifest.json").read_text())
+    assert manifest["plan_review_provenance"]["source_receipt"] == json.loads(
+        (source.root / "planning/plan-review-receipt.json").read_text()
+    )
+
+
+def test_same_base_retry_automatically_reuses_completed_plan_review(tmp_path):
+    git = repo(tmp_path)
+    plan_source = tmp_path / "external.md"
+    plan_source.write_text(PLAN)
+    first = execute_run(
+        git,
+        CONFIG,
+        registry(Scripted(script())),
+        "same request",
+        tmp_path / "wt1",
+        CRITERIA,
+        external_plan=plan_source,
+    )
+    source = RunStore(git.root, first.run_id)
+    source_receipt = json.loads((source.root / "planning/plan-review-receipt.json").read_text())
+    adapter = Scripted(script())
+
+    retried = execute_run(
+        git,
+        CONFIG,
+        registry(adapter),
+        "same request",
+        tmp_path / "wt2",
+        CRITERIA,
+        external_plan=source.root / "planning/approved-plan.md",
+        retry_of=first.run_id,
+        retry_source=source,
+    )
+
+    assert retried.final_state is RunState.COMPLETE_LOCAL
+    assert not {"planner", "plan_reviewer", "plan_reconciler"} & set(adapter.seen)
+    manifest = json.loads((retried.store_root / "manifest.json").read_text())
+    assert manifest["plan_review_provenance"]["source_receipt"] == source_receipt
+    assert "plan_review_reused" in {event["event"] for event in events(retried)}
+
+
+def test_reused_plan_review_seeds_finding_ids_for_new_reviews(tmp_path):
+    git = repo(tmp_path)
+    plan_source = tmp_path / "external.md"
+    plan_source.write_text(PLAN)
+    plan_finding = {
+        "outcome": "PASS",
+        "findings": [
+            {"id": "x", "severity": "minor", "summary": "plan note", "file": "src/app.py"}
+        ],
+    }
+    source_adapter = Scripted(script())
+    source_adapter.script["plan_reviewer"] = [plan_finding]
+    first = execute_run(
+        git,
+        CONFIG,
+        registry(source_adapter),
+        "same request",
+        tmp_path / "source",
+        CRITERIA,
+        external_plan=plan_source,
+    )
+    source = RunStore(git.root, first.run_id)
+    implementation_finding = {
+        "outcome": "PASS",
+        "findings": [
+            {
+                "id": "x",
+                "severity": "minor",
+                "summary": "implementation note",
+                "file": "src/app.py",
+            }
+        ],
+    }
+    adapter = Scripted(script(review=implementation_finding))
+    second = execute_run(
+        git,
+        CONFIG,
+        registry(adapter),
+        "same request",
+        tmp_path / "reused",
+        CRITERIA,
+        external_plan=source.root / "planning/approved-plan.md",
+        reviewed_plan_from=source,
+    )
+
+    assert second.final_state is RunState.COMPLETE_LOCAL
+    plan_review = json.loads((second.store_root / "review/plan-review-v1.json").read_text())
+    implementation_review = json.loads(
+        (second.store_root / "review/implementation-review-v1.json").read_text()
+    )
+    assert plan_review["findings"][0]["id"] == "F001"
+    assert implementation_review["findings"][0]["id"] == "F002"
+
+
+def test_invalid_review_source_does_not_bootstrap_a_new_run(tmp_path):
+    git = repo(tmp_path)
+    plan_source = tmp_path / "external.md"
+    plan_source.write_text(PLAN)
+    first = execute_run(
+        git,
+        CONFIG,
+        registry(Scripted(script())),
+        "same request",
+        tmp_path / "source",
+        CRITERIA,
+        external_plan=plan_source,
+    )
+    source = RunStore(git.root, first.run_id)
+    receipt = source.root / "planning/plan-review-receipt.json"
+    receipt.write_text(receipt.read_text() + " ")
+
+    with pytest.raises(CheckpointError, match="changed or is missing"):
+        execute_run(
+            git,
+            CONFIG,
+            registry(Scripted(script())),
+            "same request",
+            tmp_path / "reused",
+            CRITERIA,
+            external_plan=source.root / "planning/approved-plan.md",
+            reviewed_plan_from=source,
+        )
+
+    assert len(list((git.root / ".ai" / "runs").iterdir())) == 1
+    assert not (tmp_path / "reused" / "demo").exists()
 
 
 def test_run_that_changes_nothing_cannot_complete_local(tmp_path):

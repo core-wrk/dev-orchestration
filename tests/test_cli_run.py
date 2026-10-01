@@ -227,6 +227,14 @@ def test_run_refuses_unsupported_tier_without_traceback(tmp_path, monkeypatch):
     )
 
 
+def test_reviewed_plan_source_requires_an_external_plan(tmp_path, monkeypatch):
+    root = repo(tmp_path)
+    monkeypatch.chdir(root)
+    result = CliRunner().invoke(app, ["run", "add a flag", "--reviewed-plan-from", "source"])
+    assert result.exit_code == 1
+    assert "requires --plan FILE" in result.output
+
+
 def test_run_refuses_dirty_repository_and_names_file(tmp_path, monkeypatch):
     root = repo(tmp_path)
     (root / "scratch.txt").write_text("dirty\n")

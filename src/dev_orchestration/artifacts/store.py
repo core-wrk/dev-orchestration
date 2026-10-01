@@ -185,6 +185,7 @@ class RunStore:
             "planning/plan-v*.md",
             "planning/approved-plan.md",
             "planning/task-contract.md",
+            "planning/plan-review-receipt.json",
             "review/plan-review-v*.json",
             "review/implementation-review-v*.json",
             "execution/worker-result.json",
@@ -203,7 +204,7 @@ class RunStore:
                     )
         return receipt
 
-    def write_plan_version(self, content: str) -> Path:
+    def write_plan_version(self, content: str | bytes) -> Path:
         planning = self.root / "planning"
         existing = sorted(planning.glob("plan-v*.md"))
 
@@ -226,8 +227,14 @@ class RunStore:
         # other's plan. "x" makes the check and the create one atomic
         # operation in the filesystem, which is the only place it can be.
         try:
-            with target.open("x", encoding="utf-8") as handle:
-                handle.write(content)
+            if isinstance(content, bytes):
+                with target.open("xb") as handle:
+                    handle.write(content)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            else:
+                with target.open("x", encoding="utf-8") as handle:
+                    handle.write(content)
         except FileExistsError as exc:
             raise PlanOverwriteError(f"{target} already exists; plans are immutable") from exc
         return target
@@ -252,8 +259,10 @@ class RunStore:
             raise PlanOverwriteError(f"plan {version_path} is not a stored plan version")
         target = self.root / "planning" / "approved-plan.md"
         try:
-            with target.open("x", encoding="utf-8") as handle:
-                handle.write(version.read_text(encoding="utf-8"))
+            with target.open("xb") as handle:
+                handle.write(version.read_bytes())
+                handle.flush()
+                os.fsync(handle.fileno())
         except FileExistsError as exc:
             raise PlanOverwriteError(
                 f"{target} already exists; an approved contract is immutable within a run"
@@ -272,7 +281,7 @@ class RunStore:
     def import_external_plan(self, source: Path) -> tuple[Path, str]:
         content = source.read_bytes()
         digest = hashlib.sha256(content).hexdigest()
-        copied = self.write_plan_version(content.decode("utf-8"))
+        copied = self.write_plan_version(content)
         self.update_manifest(plan_origin="external", plan_sha256=digest)
         self.append_event(
             {
@@ -289,6 +298,21 @@ class RunStore:
         target.parent.mkdir(parents=True, exist_ok=True)
         mode = "x" if immutable else "w"
         with target.open(mode, encoding="utf-8") as handle:
+            handle.write(content)
+            if immutable:
+                handle.flush()
+                os.fsync(handle.fileno())
+        if immutable:
+            _sync_directory(target.parent)
+        return target
+
+    def write_bytes_artifact(
+        self, relative: str, content: bytes, *, immutable: bool = False
+    ) -> Path:
+        target = self.root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        mode = "xb" if immutable else "wb"
+        with target.open(mode) as handle:
             handle.write(content)
             if immutable:
                 handle.flush()

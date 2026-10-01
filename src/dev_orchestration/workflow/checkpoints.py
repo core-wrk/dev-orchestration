@@ -53,6 +53,8 @@ def input_hashes(store: RunStore, registry: RoleRegistry) -> dict[str, str]:
             "external_plan_artifact",
         },
     )
+    if manifest.plan_review_provenance:
+        fields["plan_review_provenance"] = manifest.plan_review_provenance
     values = {"manifest_contract": _digest(json.dumps(fields, sort_keys=True).encode())}
     for name in (".ai/project.yaml", *manifest.context_included):
         path = _within(store.repo_root, name)

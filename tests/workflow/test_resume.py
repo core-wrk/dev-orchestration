@@ -125,6 +125,105 @@ def test_timeout_resumes_worker_without_repeating_plan(tmp_path):
     assert json.loads((first.store_root / "manifest.json").read_text())["git"]["final_commit"]
 
 
+def test_resume_finishes_plan_receipt_after_plan_finalization_pause(tmp_path, monkeypatch):
+    git = repo(tmp_path)
+    approve_plan = RunStore.approve_plan
+
+    def interrupt_before_approval(store, version):
+        raise AgentTimeoutError("plan_reviewer", 7, "fake")
+
+    monkeypatch.setattr(RunStore, "approve_plan", interrupt_before_approval)
+    paused = execute_run(git, CONFIG, registry(Scripted()), "change app", tmp_path / "wt", CRITERIA)
+
+    assert paused.final_state is RunState.PAUSED_INTERRUPTED
+    paused_manifest = json.loads((paused.store_root / "manifest.json").read_text())
+    checkpoint = json.loads((paused.store_root / paused_manifest["checkpoint"]).read_text())
+    assert checkpoint["next_stage"] == "plan_finalization"
+    assert not (paused.store_root / "planning/approved-plan.md").exists()
+    assert not (paused.store_root / "planning/plan-review-receipt.json").exists()
+
+    monkeypatch.setattr(RunStore, "approve_plan", approve_plan)
+    adapter = Scripted()
+    resumed = resume_run(git, CONFIG, registry(adapter), paused.run_id, now=datetime.now(UTC))
+
+    assert resumed.final_state is RunState.COMPLETE_LOCAL
+    final_manifest = json.loads((resumed.store_root / "manifest.json").read_text())
+    final_checkpoint = json.loads((resumed.store_root / final_manifest["checkpoint"]).read_text())
+    assert "planning/plan-review-receipt.json" in final_checkpoint["artifacts"]
+    assert not {"planner", "plan_reviewer", "plan_reconciler"} & set(adapter.seen)
+
+
+def test_resume_refuses_changed_plan_review_receipt_before_provider_calls(tmp_path):
+    git = repo(tmp_path)
+    first = execute_run(
+        git,
+        CONFIG,
+        registry(Scripted(timeout_worker=True)),
+        "change app",
+        tmp_path / "wt",
+        CRITERIA,
+    )
+    receipt_path = first.store_root / "planning/plan-review-receipt.json"
+    receipt_path.write_text(receipt_path.read_text() + " ")
+    adapter = Scripted()
+
+    with pytest.raises(ResumeRefused, match="changed or is missing"):
+        resume_run(git, CONFIG, registry(adapter), first.run_id, now=datetime.now(UTC))
+
+    assert adapter.seen == []
+
+
+def test_resume_after_reviewed_plan_reuse_does_not_repeat_plan_review(tmp_path):
+    git = repo(tmp_path)
+    source_run = execute_run(
+        git, CONFIG, registry(Scripted()), "change app", tmp_path / "source", CRITERIA
+    )
+    source = RunStore(git.root, source_run.run_id)
+    paused = execute_run(
+        git,
+        CONFIG,
+        registry(Scripted(timeout_worker=True)),
+        "change app",
+        tmp_path / "reused",
+        CRITERIA,
+        external_plan=source.root / "planning/approved-plan.md",
+        reviewed_plan_from=source,
+    )
+    assert paused.final_state is RunState.PAUSED_INTERRUPTED
+
+    adapter = Scripted()
+    resumed = resume_run(git, CONFIG, registry(adapter), paused.run_id, now=datetime.now(UTC))
+
+    assert resumed.final_state is RunState.COMPLETE_LOCAL
+    assert not {"planner", "plan_reviewer", "plan_reconciler"} & set(adapter.seen)
+
+
+def test_tampered_copied_plan_receipt_after_reuse_refuses_before_provider_calls(tmp_path):
+    git = repo(tmp_path)
+    source_run = execute_run(
+        git, CONFIG, registry(Scripted()), "change app", tmp_path / "source", CRITERIA
+    )
+    source = RunStore(git.root, source_run.run_id)
+    paused = execute_run(
+        git,
+        CONFIG,
+        registry(Scripted(timeout_worker=True)),
+        "change app",
+        tmp_path / "reused",
+        CRITERIA,
+        external_plan=source.root / "planning/approved-plan.md",
+        reviewed_plan_from=source,
+    )
+    receipt_path = paused.store_root / "planning/plan-review-receipt.json"
+    receipt_path.write_text(receipt_path.read_text() + " ")
+    adapter = Scripted()
+
+    with pytest.raises(ResumeRefused, match="changed or is missing"):
+        resume_run(git, CONFIG, registry(adapter), paused.run_id, now=datetime.now(UTC))
+
+    assert adapter.seen == []
+
+
 def test_tampered_prior_failure_snapshot_refuses_before_provider(tmp_path):
     git = repo(tmp_path)
     source = RunStore(git.root, "source-run")

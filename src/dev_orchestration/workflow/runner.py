@@ -31,6 +31,18 @@ from dev_orchestration.workflow.bootstrap import (
 from dev_orchestration.workflow.checkpoints import record_stage
 from dev_orchestration.workflow.engine import Engine, IllegalTransitionError
 from dev_orchestration.workflow.invoke import AgentInvocationError, SchemaEscalation
+from dev_orchestration.workflow.plan_reuse import (
+    RECEIPT as PLAN_REVIEW_RECEIPT,
+)
+from dev_orchestration.workflow.plan_reuse import (
+    create_receipt as create_plan_review_receipt,
+)
+from dev_orchestration.workflow.plan_reuse import (
+    match_source as match_plan_review_source,
+)
+from dev_orchestration.workflow.plan_reuse import (
+    validate_source as validate_plan_review_source,
+)
 from dev_orchestration.workflow.retry_feedback import (
     ARTIFACT as PRIOR_FAILURES_ARTIFACT,
 )
@@ -473,6 +485,7 @@ def execute_run(
     retry_source: RunStore | None = None,
     continue_patch: Path | None = None,
     retry_resolution_reason: str | None = None,
+    reviewed_plan_from: RunStore | None = None,
 ) -> RunOutcome:
     """Execute a run; every started run is returned in a terminal state."""
     if not request_text.strip():
@@ -489,6 +502,16 @@ def execute_run(
             raise ContextContractError("retry evidence source does not match retry_of")
         if retry_source.repo_root.resolve() != repo.root.resolve():
             raise ContextContractError("retry evidence source belongs to a different repository")
+    if (
+        reviewed_plan_from is not None
+        and reviewed_plan_from.repo_root.resolve() != repo.root.resolve()
+    ):
+        raise ContextContractError("reviewed plan source belongs to a different repository")
+    reuse_source = reviewed_plan_from or (retry_source if retry_of is not None else None)
+    source_finding_index = {}
+    if reuse_source is not None:
+        validate_plan_review_source(reuse_source)
+        source_finding_index = reuse_source.finding_index()
     store, worktree = bootstrap_run(
         repo, project_config, request_text, Tier.STANDARD, worktree_root
     )
@@ -626,9 +649,7 @@ def execute_run(
         store.write_json_artifact("acceptance-criteria.json", acceptance_criteria, immutable=True)
         if external_plan is not None:
             stored_external = "planning/external-plan-pending.md"
-            store.write_text_artifact(
-                stored_external, external_plan.read_text(encoding="utf-8"), immutable=True
-            )
+            store.write_bytes_artifact(stored_external, external_plan.read_bytes(), immutable=True)
             store.update_manifest(external_plan_artifact=stored_external)
             external_plan = store.root / stored_external
         classifier_references = classification_references_for_run(
@@ -767,40 +788,120 @@ def execute_run(
             ),
         )
         approved: str
+        reused_review_artifact: str | None = None
         if effective_tier in {Tier.STANDARD, Tier.SUBSTANTIAL}:
-            if external_plan is not None:
-                version, digest = store.import_external_plan(external_plan)
-                store.append_event(
-                    {"event": "external_plan_selected", "version": version.name, "sha256": digest}
+            reuse_receipt = None
+            reuse_matches = False
+            reuse_reason = ""
+            if reuse_source is not None and external_plan is not None:
+                candidate_bytes = external_plan.read_bytes()
+                reuse_matches, reuse_reason, reuse_receipt = match_plan_review_source(
+                    reuse_source,
+                    current=store,
+                    plan_bytes=candidate_bytes,
+                    profile_constraints=runtime.profile_constraints,
                 )
+                if not reuse_matches:
+                    store.append_event(
+                        {
+                            "event": "plan_review_reuse_refused",
+                            "source_run": reuse_source.run_id,
+                            "reason": reuse_reason,
+                        }
+                    )
+            if reuse_matches and external_plan is not None:
+                version, _ = store.import_external_plan(external_plan)
+                assert reuse_receipt is not None
+                source_review = reuse_source.root / reuse_receipt["final_review"]["path"]
+                copied_review = "review/plan-review-v1.json"
+                reused_review_artifact = copied_review
+                store.write_bytes_artifact(
+                    copied_review, source_review.read_bytes(), immutable=True
+                )
+                store.record_finding_index(source_finding_index)
+                store.update_manifest(
+                    plan_review_provenance={
+                        "source_run_id": reuse_source.run_id,
+                        "source_receipt": reuse_receipt,
+                    }
+                )
+                store.append_event(
+                    {
+                        "event": "plan_review_reused",
+                        "source_run": reuse_source.run_id,
+                        "receipt": PLAN_REVIEW_RECEIPT,
+                    }
+                )
+                engine.transition(RunState.PLANNED)
+                engine.transition(RunState.PLAN_REVIEWED)
+                store.approve_plan(version)
+                create_plan_review_receipt(
+                    store, version, store.root / copied_review, runtime.profile_constraints
+                )
+                engine.transition(RunState.PLAN_FINALIZED)
+                receipt(
+                    "implementation_worker",
+                    [
+                        f"planning/{version.name}",
+                        "planning/approved-plan.md",
+                        PLAN_REVIEW_RECEIPT,
+                        copied_review,
+                        "review/finding-index.json",
+                    ],
+                )
+                approved = store.approved_plan()
+                approval_artifact = "planning/approved-plan.md"
+                plan_review = None
             else:
-                version = plan(
+                if reuse_source is not None:
+                    store.append_event(
+                        {
+                            "event": "plan_review_reuse_reason",
+                            "source_run": reuse_source.run_id,
+                            "reason": reuse_reason
+                            or "source plan bytes unavailable; review will run",
+                        }
+                    )
+            if external_plan is not None:
+                if not reuse_matches:
+                    version, digest = store.import_external_plan(external_plan)
+                    store.append_event(
+                        {
+                            "event": "external_plan_selected",
+                            "version": version.name,
+                            "sha256": digest,
+                        }
+                    )
+            else:
+                if not reuse_matches:
+                    version = plan(
+                        registry,
+                        request_text,
+                        invariants,
+                        runtime.references,
+                        store,
+                    )
+            if not reuse_matches:
+                engine.transition(RunState.PLANNED)
+                receipt("plan_reviewer", [f"planning/{version.name}"])
+                plan_text = version.read_text(encoding="utf-8")
+                plan_review = review_plan(
                     registry,
                     request_text,
-                    invariants,
-                    runtime.references,
+                    plan_text,
+                    runtime.profile_constraints,
                     store,
                 )
-            engine.transition(RunState.PLANNED)
-            receipt("plan_reviewer", [f"planning/{version.name}"])
-            plan_text = version.read_text(encoding="utf-8")
-            plan_review = review_plan(
-                registry,
-                request_text,
-                plan_text,
-                runtime.profile_constraints,
-                store,
-            )
-            engine.transition(RunState.PLAN_REVIEWED)
-            receipt(
-                "plan_reconciler" if plan_review.blocking_ids() else "plan_finalization",
-                [
-                    f"review/{max((store.root / 'review').glob('plan-review-v*.json')).name}",
-                    "review/finding-index.json",
-                ],
-            )
-            reconciliation_cycles = 0
-            while plan_review.blocking_ids():
+                engine.transition(RunState.PLAN_REVIEWED)
+                receipt(
+                    "plan_reconciler" if plan_review.blocking_ids() else "plan_finalization",
+                    [
+                        f"review/{max((store.root / 'review').glob('plan-review-v*.json')).name}",
+                        "review/finding-index.json",
+                    ],
+                )
+                reconciliation_cycles = 0
+            while not reuse_matches and plan_review.blocking_ids():
                 if plan_review.outcome in {Outcome.BLOCKED, Outcome.ESCALATE}:
                     target = (
                         RunState.BLOCKED
@@ -836,7 +937,7 @@ def execute_run(
                     ],
                     reconciliation_cycles,
                 )
-            if plan_review.outcome in {Outcome.BLOCKED, Outcome.ESCALATE}:
+            if not reuse_matches and plan_review.outcome in {Outcome.BLOCKED, Outcome.ESCALATE}:
                 target = (
                     RunState.BLOCKED
                     if plan_review.outcome is Outcome.BLOCKED
@@ -844,10 +945,22 @@ def execute_run(
                 )
                 _terminal(engine, target, "plan review: " + str(plan_review.outcome))
                 return _outcome(engine, repo=repo, worktree=worktree)
-            store.approve_plan(version)
-            engine.transition(RunState.PLAN_FINALIZED)
-            approved = store.approved_plan()
-            approval_artifact = "planning/approved-plan.md"
+            if not reuse_matches:
+                store.approve_plan(version)
+                final_review = max(
+                    (store.root / "review").glob("plan-review-v*.json"),
+                    key=lambda path: int(path.stem.rsplit("-v", 1)[1]),
+                )
+                create_plan_review_receipt(
+                    store, version, final_review, runtime.profile_constraints
+                )
+                engine.transition(RunState.PLAN_FINALIZED)
+                receipt(
+                    "implementation_worker",
+                    ["planning/approved-plan.md", PLAN_REVIEW_RECEIPT],
+                )
+                approved = store.approved_plan()
+                approval_artifact = "planning/approved-plan.md"
         else:
             approved = _task_contract(request_text, project_config, acceptance_criteria, invariants)
             store.write_text_artifact("planning/task-contract.md", approved, immutable=True)
@@ -873,7 +986,19 @@ def execute_run(
                 ),
                 immutable=True,
             )
-            receipt("implementation_worker", [approval_artifact, "approval/human-approval.md"])
+            receipt(
+                "implementation_worker",
+                [
+                    approval_artifact,
+                    "approval/human-approval.md",
+                    *(
+                        [PLAN_REVIEW_RECEIPT]
+                        if effective_tier in {Tier.STANDARD, Tier.SUBSTANTIAL}
+                        else []
+                    ),
+                    *([reused_review_artifact] if reused_review_artifact else []),
+                ],
+            )
             store.append_event(
                 {
                     "event": "approval_required",
@@ -889,7 +1014,18 @@ def execute_run(
                 worktree=worktree,
             )
 
-        receipt("implementation_worker", [approval_artifact])
+        receipt(
+            "implementation_worker",
+            [
+                approval_artifact,
+                *(
+                    [PLAN_REVIEW_RECEIPT]
+                    if effective_tier in {Tier.STANDARD, Tier.SUBSTANTIAL}
+                    else []
+                ),
+                *([reused_review_artifact] if reused_review_artifact else []),
+            ],
+        )
 
         engine.transition(RunState.EXECUTING)
         if continue_patch is not None:
