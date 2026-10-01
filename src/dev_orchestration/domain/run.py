@@ -79,6 +79,8 @@ class RunManifest(BaseModel):
     created_at: datetime | None = None
     completed_at: datetime | None = None
     terminal_reason: str | None = None
+    terminal_cause: str | None = None
+    retry_of: str | None = None
     checkpoint: str | None = None
     auto_resume: bool = False
     pause: PauseRecord | None = None

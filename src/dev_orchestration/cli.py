@@ -394,6 +394,77 @@ def status(run_id: str | None = typer.Argument(None, help="Run id to inspect")) 
         raise typer.Exit(1) from exc
 
 
+_RETRYABLE_CAUSES = {"implementation_review_exhausted", "validation_failed_after_remediation"}
+
+
+@app.command()
+def retry(
+    run_id: str = typer.Argument(..., help="Dead run to relaunch with its approved plan"),
+    fresh: bool = typer.Option(
+        False, "--fresh", help="Re-implement from scratch instead of continuing the saved change"
+    ),
+) -> None:
+    """Relaunch a run that died after its plan was approved, continuing its saved change."""
+    try:
+        repo = discover_repo(Path.cwd())
+        source = RunStore(repo.root, run_id)
+        if not (source.root / "manifest.json").is_file():
+            raise NoSuchRunError(f"run {run_id!r} does not exist")
+        old = source.read_manifest()
+        if old.terminal_cause not in _RETRYABLE_CAUSES:
+            raise ContextContractError(
+                f"run {run_id} ended with cause {old.terminal_cause!r}; only "
+                f"{sorted(_RETRYABLE_CAUSES)} can reuse the approved plan. If the plan "
+                "itself must change, start a new `dev-orch run` (optionally with --plan)."
+            )
+        if old.retry_of is not None:
+            raise ContextContractError(
+                f"run {run_id} was already a retry of {old.retry_of} and failed the same "
+                "way; the plan is the likelier problem. Revise it and use `dev-orch run --plan`."
+            )
+        plan_path = source.root / "planning" / "approved-plan.md"
+        if not plan_path.is_file() or not old.request_text:
+            raise ContextContractError(f"run {run_id} has no approved plan or request to reuse")
+        head = repo.current_commit()
+        if old.git.base_commit and head != old.git.base_commit:
+            typer.echo(
+                f"Note: the repository moved since {run_id} ({old.git.base_commit[:8]} -> "
+                f"{head[:8]}); the plan will be re-reviewed against the current state.",
+                err=True,
+            )
+        saved_patch = source.root / "execution" / "final-change.patch"
+        continue_patch = saved_patch if saved_patch.is_file() and not fresh else None
+        if continue_patch is None and not fresh:
+            typer.echo(
+                f"No saved change found for {run_id}; re-implementing from the approved plan.",
+                err=True,
+            )
+        config = _project_config(repo)
+        global_config = _global_config()
+        outcome = execute_run(
+            repo,
+            config,
+            default_registry(config, global_config),
+            old.request_text,
+            Path(global_config.worktree_root).expanduser(),
+            acceptance_criteria=list(old.acceptance_criteria),
+            acceptance_criteria_source=old.acceptance_criteria_source,
+            tier_override=old.tier_override,
+            downgrade_reason=old.downgrade_reason,
+            external_plan=plan_path,
+            retry_of=run_id,
+            continue_patch=continue_patch,
+        )
+    except EXPECTED_ERRORS + (NoSuchRunError,) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(f"{outcome.run_id}: {outcome.final_state}")
+    if outcome.reason:
+        typer.echo(outcome.reason, err=True)
+    if outcome.final_state is not RunState.COMPLETE_LOCAL:
+        raise typer.Exit(1)
+
+
 @app.command()
 def cancel(
     run_id: str = typer.Argument(..., help="Run id to cancel"),

@@ -55,7 +55,18 @@ PROHIBITED_VERBS = {
 # site that needs it, and only after checking it cannot reach a remote or
 # discard uncommitted work.
 ALLOWED_VERBS = frozenset(
-    {"add", "checkout", "commit", "config", "diff", "ls-files", "rev-parse", "status", "worktree"}
+    {
+        "add",
+        "apply",
+        "checkout",
+        "commit",
+        "config",
+        "diff",
+        "ls-files",
+        "rev-parse",
+        "status",
+        "worktree",
+    }
 )
 
 # `checkout` is allowed because the framework creates branches with it. The
@@ -100,6 +111,12 @@ def reject_disallowed_invocation(args: tuple[str, ...]) -> None:
             "git checkout with a pathspec or force flag discards uncommitted "
             "changes. dev-orchestration never modifies uncommitted work; it "
             "uses checkout only to create a branch."
+        )
+    if verb == "apply" and args != ("apply", "--binary"):
+        raise ProhibitedOperationError(
+            "dev-orchestration uses git apply only as `apply --binary`, to replay a "
+            "saved run change onto a fresh run worktree; it is all-or-nothing and "
+            "never touches the index"
         )
     if verb == "config" and args != ("config", "--get", "remote.origin.url"):
         raise ProhibitedOperationError(

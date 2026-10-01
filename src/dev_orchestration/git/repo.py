@@ -4,6 +4,7 @@ import hashlib
 import os
 import shutil
 import subprocess
+import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -154,6 +155,53 @@ class GitRepo:
                     f"\n--- untracked: {path} ---\n{target.read_text(encoding='utf-8')}\n"
                 )
         return diff + "".join(untracked)
+
+    def change_patch(self, base_ref: str) -> str:
+        """Return a binary-safe patch of every visible change, untracked files included.
+
+        Built in a throwaway index so the checkout's own index is never touched.
+        """
+        with tempfile.TemporaryDirectory() as scratch:
+            env = {**os.environ, "GIT_INDEX_FILE": str(Path(scratch) / "index")}
+            # The temporary index starts empty, so `add -A` snapshots the whole tree
+            # and the cached diff against base_ref yields exactly the run's changes.
+            for args in (["add", "-A"],):
+                guards.reject_disallowed_invocation(tuple(args))
+                step = subprocess.run(
+                    ["git", "-C", str(self.root), *args],
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=GIT_TIMEOUT_SECONDS,
+                    check=False,
+                )
+                if step.returncode != 0:
+                    raise GitCommandError(f"git {args[0]} failed: {step.stderr.strip()}")
+            proc = subprocess.run(
+                ["git", "-C", str(self.root), "diff", "--cached", "--binary", base_ref],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=GIT_TIMEOUT_SECONDS,
+                check=False,
+            )
+        if proc.returncode != 0:
+            raise GitCommandError(f"git diff --cached failed: {proc.stderr.strip()}")
+        return proc.stdout
+
+    def apply_patch(self, patch: str) -> None:
+        """Apply a patch from change_patch to the working tree only; all or nothing."""
+        guards.reject_disallowed_invocation(("apply", "--binary"))
+        proc = subprocess.run(
+            ["git", "-C", str(self.root), "apply", "--binary"],
+            input=patch,
+            capture_output=True,
+            text=True,
+            timeout=GIT_TIMEOUT_SECONDS,
+            check=False,
+        )
+        if proc.returncode != 0:
+            raise GitCommandError(f"git apply failed: {proc.stderr.strip()}")
 
     def _path_is_tracked(self, path: str) -> bool:
         proc = subprocess.run(

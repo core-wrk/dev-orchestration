@@ -191,10 +191,13 @@ def _terminal(
     engine: Engine,
     state: RunState,
     reason: str,
+    cause: str = "other",
 ) -> None:
     store = engine.store
-    store.update_manifest(terminal_reason=reason)
-    store.append_event({"event": "run_terminal", "state": str(state), "detail": reason})
+    store.update_manifest(terminal_reason=reason, terminal_cause=cause)
+    store.append_event(
+        {"event": "run_terminal", "state": str(state), "detail": reason, "cause": cause}
+    )
     if engine.state not in {
         RunState.COMPLETE_LOCAL,
         RunState.ESCALATED,
@@ -242,6 +245,33 @@ def cleanup_worktree_if_unproductive(engine: Engine, repo: GitRepo, worktree: Pa
     engine.store.append_event({"event": "worktree_removed", "path": str(worktree)})
 
 
+# Causes where the plan was fine and the code was close: the change is kept so a retry
+# can continue from it instead of re-implementing.
+CHANGE_PATCH_ARTIFACT = "execution/final-change.patch"
+_PATCH_WORTHY_CAUSES = frozenset(
+    {"implementation_review_exhausted", "validation_failed_after_remediation"}
+)
+
+
+def _save_change_patch(engine: Engine, worktree: Path) -> None:
+    store = engine.store
+    manifest = store.read_manifest()
+    if (
+        engine.state not in _UNPRODUCTIVE_TERMINAL_STATES
+        or manifest.terminal_cause not in _PATCH_WORTHY_CAUSES
+        or manifest.git.base_commit is None
+        or not worktree.exists()
+    ):
+        return
+    try:
+        patch = GitRepo(worktree).change_patch(manifest.git.base_commit)
+        if patch.strip():
+            store.write_text_artifact(CHANGE_PATCH_ARTIFACT, patch, immutable=True)
+            store.append_event({"event": "change_patch_saved", "artifact": CHANGE_PATCH_ARTIFACT})
+    except (GitCommandError, OSError, UnicodeError) as exc:
+        store.append_event({"event": "change_patch_failed", "detail": str(exc)})
+
+
 def _outcome(
     engine: Engine,
     verification: Verification | None = None,
@@ -251,6 +281,7 @@ def _outcome(
     worktree: Path | None = None,
 ) -> RunOutcome:
     if repo is not None and worktree is not None:
+        _save_change_patch(engine, worktree)
         cleanup_worktree_if_unproductive(engine, repo, worktree)
     manifest = engine.store.read_manifest()
     return RunOutcome(
@@ -359,6 +390,8 @@ def execute_run(
     acceptance_criteria_source: str = "explicit",
     auto_resume: bool = False,
     scheduler_queue: SchedulerQueue | None = None,
+    retry_of: str | None = None,
+    continue_patch: Path | None = None,
 ) -> RunOutcome:
     """Execute a run; every started run is returned in a terminal state."""
     if not request_text.strip():
@@ -373,6 +406,8 @@ def execute_run(
     store, worktree = bootstrap_run(
         repo, project_config, request_text, Tier.STANDARD, worktree_root
     )
+    if retry_of is not None:
+        store.update_manifest(retry_of=retry_of)
     engine = Engine(store)
     fence = ScopeFence.from_config(project_config.scope)
     base_commit = store.read_manifest().git.base_commit
@@ -574,7 +609,8 @@ def execute_run(
                 if reconciliation_cycles > MAX_REMEDIATION_CYCLES:
                     raise RemediationExhausted(
                         f"plan findings {[f.id for f in plan_review.findings]} survived "
-                        f"{MAX_REMEDIATION_CYCLES} reconciliation cycles"
+                        f"{MAX_REMEDIATION_CYCLES} reconciliation cycles",
+                        cause="plan_review_exhausted",
                     )
                 engine.transition(RunState.PLANNED)
                 version = reconcile(registry, plan_text, plan_review.findings, store)
@@ -652,22 +688,45 @@ def execute_run(
         receipt("implementation_worker", [approval_artifact])
 
         engine.transition(RunState.EXECUTING)
-        _run_worktree_stage(
-            worktree_repo,
-            base_commit,
-            fence,
-            lambda: execute(
-                registry,
-                approved,
-                invariants,
-                runtime.references,
-                worktree,
-                store,
-                runtime.profile_constraints,
-                scope_context,
-            ),
-        )
-        receipt("validation", ["execution/worker-result.json"])
+        if continue_patch is not None:
+            patch_text = continue_patch.read_text(encoding="utf-8")
+            store.write_text_artifact(
+                "execution/continued-change.patch", patch_text, immutable=True
+            )
+            try:
+                _run_worktree_stage(
+                    worktree_repo,
+                    base_commit,
+                    fence,
+                    lambda: worktree_repo.apply_patch(patch_text),
+                )
+            except GitCommandError as exc:
+                _terminal(
+                    engine,
+                    RunState.ESCALATED,
+                    f"the saved change from {retry_of} no longer applies to the current "
+                    f"repository ({exc}); use `dev-orch retry --fresh` to re-implement",
+                )
+                return _outcome(engine, repo=repo, worktree=worktree)
+            store.append_event({"event": "change_continued", "source_run": retry_of})
+            receipt("validation", ["execution/continued-change.patch"])
+        else:
+            _run_worktree_stage(
+                worktree_repo,
+                base_commit,
+                fence,
+                lambda: execute(
+                    registry,
+                    approved,
+                    invariants,
+                    runtime.references,
+                    worktree,
+                    store,
+                    runtime.profile_constraints,
+                    scope_context,
+                ),
+            )
+            receipt("validation", ["execution/worker-result.json"])
 
         engine.transition(RunState.VALIDATING)
         outcomes = _run_validation_stage(
@@ -700,7 +759,14 @@ def execute_run(
             else "verifier",
             ["execution/validation-v1.json"],
         )
-        if not all_passed(outcomes):
+        # A continued change is expected to fail some checks; the review/remediation loop
+        # exists to fix exactly that, so it is not terminal there.
+        validation_failed_on_continuation = (
+            continue_patch is not None
+            and not all_passed(outcomes)
+            and _implementation_review_required(effective_tier, project_config.validation)
+        )
+        if not all_passed(outcomes) and not validation_failed_on_continuation:
             _terminal(engine, RunState.FAILED, "required validation failed")
             return _outcome(engine, repo=repo, worktree=worktree)
 
@@ -736,6 +802,13 @@ def execute_run(
                     "reason": "tier stage path omits implementation review",
                 }
             )
+        if (
+            validation_failed_on_continuation
+            and implementation_review is not None
+            and not implementation_review.blocking_ids()
+        ):
+            _terminal(engine, RunState.FAILED, "required validation failed")
+            return _outcome(engine, repo=repo, worktree=worktree)
         cycle = 1
         while implementation_review is not None and implementation_review.blocking_ids():
             if implementation_review.outcome in {Outcome.BLOCKED, Outcome.ESCALATE}:
@@ -794,7 +867,12 @@ def execute_run(
             )
             receipt("implementation_reviewer", [f"execution/validation-v{cycle + 1}.json"], cycle)
             if not all_passed(outcomes):
-                _terminal(engine, RunState.FAILED, "required validation failed after remediation")
+                _terminal(
+                    engine,
+                    RunState.FAILED,
+                    "required validation failed after remediation",
+                    "validation_failed_after_remediation",
+                )
                 return _outcome(engine, repo=repo, worktree=worktree)
             diff = worktree_repo.change_diff(base_commit)
             review_inventory = worktree_repo.change_inventory(base_commit)
@@ -914,7 +992,12 @@ def execute_run(
         ContextContractError,
         ReadOnlyRoleUnsupportedError,
     ) as exc:
-        _terminal(engine, RunState.ESCALATED, str(exc))
+        _terminal(
+            engine,
+            RunState.ESCALATED,
+            str(exc),
+            exc.cause if isinstance(exc, RemediationExhausted) else "other",
+        )
         return _outcome(engine, repo=repo, worktree=worktree)
     except (IllegalTransitionError, UnsupportedTierError, TierDowngradeError) as exc:
         _terminal(engine, RunState.ESCALATED, str(exc))

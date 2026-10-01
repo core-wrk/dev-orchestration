@@ -1,6 +1,7 @@
 import hashlib
 import subprocess
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
@@ -350,3 +351,152 @@ def test_criteria_fall_back_to_the_request_and_say_so(tmp_path, monkeypatch):
     assert manifest.acceptance_criteria == ["add a flag"]
     assert manifest.acceptance_criteria_source == "request_fallback"
     assert "--criterion" in result.output
+
+
+def _dead_run(root, cause, retry_of=None, with_plan=True):
+    dead = store(root, "20260829-101500_standard_dead", RunState.ESCALATED)
+    dead.update_manifest(
+        terminal_cause=cause,
+        retry_of=retry_of,
+        request_text="add a flag",
+        acceptance_criteria=["flag exists"],
+    )
+    if with_plan:
+        (dead.root / "planning").mkdir(exist_ok=True)
+        (dead.root / "planning" / "approved-plan.md").write_text(PLAN)
+    return dead
+
+
+def test_retry_reuses_the_approved_plan_of_an_implementation_stage_death(tmp_path, monkeypatch):
+    root = tmp_path / "retry"
+    root.mkdir()
+    repo(root)
+    _dead_run(root, "implementation_review_exhausted")
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(root), "commit", "-qm", "audit trail"], check=True)
+    adapter = ScriptedAdapter(tier="standard")
+    monkeypatch.setattr(cli_module, "default_registry", lambda *a, **k: registry(adapter))
+    _use_local_worktree(monkeypatch, root)
+    monkeypatch.chdir(root)
+    result = CliRunner().invoke(app, ["retry", "20260829-101500_standard_dead"])
+    assert result.exit_code == 0, result.output
+    manifest = _latest_manifest(root)
+    assert manifest.retry_of == "20260829-101500_standard_dead"
+    assert manifest.plan_origin == "external"
+    assert manifest.acceptance_criteria == ["flag exists"]
+    assert "planner" not in adapter.seen and "plan_reviewer" in adapter.seen
+
+
+@pytest.mark.parametrize(
+    "cause,retry_of,fragment",
+    [
+        ("plan_review_exhausted", None, "plan itself must change"),
+        ("other", None, "plan itself must change"),
+        ("implementation_review_exhausted", "earlier", "already a retry"),
+    ],
+)
+def test_retry_refuses_when_the_plan_is_suspect(tmp_path, monkeypatch, cause, retry_of, fragment):
+    root = repo(tmp_path)
+    _dead_run(root, cause, retry_of)
+    monkeypatch.chdir(root)
+    result = CliRunner().invoke(app, ["retry", "20260829-101500_standard_dead"])
+    assert result.exit_code == 1
+    assert fragment in result.output
+
+
+def _saved_change(root, content="x = 3\n"):
+    """Make a real patch of a change to src/app.py, then revert the checkout."""
+    from dev_orchestration.git.repo import GitRepo
+
+    target = root / "src" / "app.py"
+    target.write_text(content)
+    (root / "src" / "new.py").write_text("y = 1\n")
+    patch = GitRepo(root).change_patch("HEAD")
+    subprocess.run(["git", "-C", str(root), "checkout", "--", "src/app.py"], check=True)
+    (root / "src" / "new.py").unlink()
+    return patch
+
+
+def _retry_fixture(tmp_path, monkeypatch, patch_text):
+    root = tmp_path / "continue"
+    root.mkdir()
+    repo(root)
+    dead = _dead_run(root, "implementation_review_exhausted")
+    if patch_text is not None:
+        dead.write_text_artifact("execution/final-change.patch", patch_text)
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(root), "commit", "-qm", "audit trail"], check=True)
+    adapter = ScriptedAdapter(tier="standard")
+    monkeypatch.setattr(cli_module, "default_registry", lambda *a, **k: registry(adapter))
+    _use_local_worktree(monkeypatch, root)
+    monkeypatch.chdir(root)
+    return root, adapter
+
+
+def test_retry_continues_the_saved_change_without_reimplementing(tmp_path, monkeypatch):
+    root = tmp_path / "src_repo"
+    root.mkdir()
+    repo(root)
+    patch = _saved_change(root)
+    import shutil
+
+    shutil.rmtree(root)
+    root, adapter = _retry_fixture(tmp_path, monkeypatch, patch)
+    result = CliRunner().invoke(app, ["retry", "20260829-101500_standard_dead"])
+    assert result.exit_code == 0, result.output
+    manifest = _latest_manifest(root)
+    assert "implementation_worker" not in adapter.seen
+    events = (root / ".ai" / "runs" / manifest.run_id / "events.jsonl").read_text()
+    assert "change_continued" in events
+    worktree = Path(manifest.git.worktree)
+    assert (worktree / "src" / "app.py").read_text() == "x = 3\n"
+    assert (worktree / "src" / "new.py").read_text() == "y = 1\n"
+
+
+def test_retry_fresh_reimplements_even_when_a_change_was_saved(tmp_path, monkeypatch):
+    root = tmp_path / "src_repo"
+    root.mkdir()
+    repo(root)
+    patch = _saved_change(root)
+    import shutil
+
+    shutil.rmtree(root)
+    root, adapter = _retry_fixture(tmp_path, monkeypatch, patch)
+    result = CliRunner().invoke(app, ["retry", "20260829-101500_standard_dead", "--fresh"])
+    assert result.exit_code == 0, result.output
+    assert "implementation_worker" in adapter.seen
+
+
+def test_retry_escalates_when_the_saved_change_no_longer_applies(tmp_path, monkeypatch):
+    bad = (
+        "diff --git a/src/app.py b/src/app.py\n--- a/src/app.py\n+++ b/src/app.py\n"
+        "@@ -1 +1 @@\n-not the current line\n+x = 3\n"
+    )
+    _root, adapter = _retry_fixture(tmp_path, monkeypatch, bad)
+    result = CliRunner().invoke(app, ["retry", "20260829-101500_standard_dead"])
+    assert result.exit_code == 1
+    assert "no longer applies" in result.output
+    assert "retry --fresh" in result.output
+    assert "implementation_worker" not in adapter.seen
+
+
+def test_unproductive_death_saves_the_change_as_a_patch(tmp_path):
+    from dev_orchestration.domain.run import GitBlock
+    from dev_orchestration.workflow.engine import Engine
+    from dev_orchestration.workflow.runner import CHANGE_PATCH_ARTIFACT, _save_change_patch
+
+    root = repo(tmp_path)
+    base = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+    (root / "src" / "app.py").write_text("x = 9\n")
+    (root / "src" / "added.py").write_text("z = 1\n")
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    run_store = store(runs, "20260829-101500_standard_dead", RunState.ESCALATED)
+    run_store.update_manifest(
+        terminal_cause="implementation_review_exhausted", git=GitBlock(base_commit=base)
+    )
+    _save_change_patch(Engine(run_store), root)
+    saved = (run_store.root / CHANGE_PATCH_ARTIFACT).read_text()
+    assert "+x = 9" in saved and "added.py" in saved

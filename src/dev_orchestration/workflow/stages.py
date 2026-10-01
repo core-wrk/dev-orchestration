@@ -300,6 +300,10 @@ MAX_REMEDIATION_CYCLES = 2
 class RemediationExhausted(RuntimeError):
     """Blocking findings survived the bounded remediation budget."""
 
+    def __init__(self, message: str, cause: str = "implementation_review_exhausted") -> None:
+        super().__init__(message)
+        self.cause = cause
+
 
 def review_implementation(
     registry: RoleRegistry,
