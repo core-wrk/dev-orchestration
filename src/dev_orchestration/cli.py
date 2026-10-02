@@ -57,6 +57,7 @@ from dev_orchestration.workflow.reporting import (
     render_token_usage,
     summarize_token_usage,
 )
+from dev_orchestration.workflow.restart import restart_run, restart_status
 from dev_orchestration.workflow.runner import cleanup_worktree_if_unproductive, execute_run
 from dev_orchestration.workflow.scheduler import (
     SchedulerError,
@@ -412,12 +413,65 @@ def status(run_id: str | None = typer.Argument(None, help="Run id to inspect")) 
                 )
             except EXPECTED_ERRORS as exc:
                 blocker = str(exc)
+        restart_info = None
+        if manifest.status in {RunState.FAILED, RunState.ESCALATED}:
+            try:
+                config = _project_config(repo)
+                restart_info = restart_status(
+                    repo, config, default_registry(config, _global_config()), selected
+                )
+            except EXPECTED_ERRORS as exc:
+                restart_info = f"Restart: unavailable: {exc}"
         typer.echo(
-            describe_status(manifest, read_events(store_root), store.latest_checkpoint(), blocker)
+            describe_status(
+                manifest,
+                read_events(store_root),
+                store.latest_checkpoint(),
+                blocker,
+                restart_info,
+            )
         )
     except EXPECTED_ERRORS + (NoSuchRunError,) as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(1) from exc
+
+
+@app.command()
+def restart(
+    run_id: str = typer.Argument(..., help="Failed or escalated run to restart"),
+    from_stage: str = typer.Option(
+        "validation",
+        "--from",
+        help="Recovery stage: validation, review, verification, or remediation",
+    ),
+    reason: str = typer.Option(..., "--reason", help="Why this recovery attempt is being started"),
+    patch: Path | None = typer.Option(  # noqa: B008
+        None, "--patch", help="Replacement patch against the saved base"
+    ),
+) -> None:
+    """Recheck an existing implementation in a new linked run."""
+    try:
+        repo = discover_repo(Path.cwd())
+        config = _project_config(repo)
+        global_config = _global_config()
+        outcome = restart_run(
+            repo,
+            config,
+            default_registry(config, global_config),
+            run_id,
+            Path(global_config.worktree_root).expanduser(),
+            from_stage=from_stage,
+            reason=reason,
+            patch_path=patch,
+        )
+    except EXPECTED_ERRORS + (NoSuchRunError,) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(f"{outcome.run_id}: {outcome.final_state}")
+    if outcome.reason:
+        typer.echo(outcome.reason, err=True)
+    if outcome.final_state is not RunState.COMPLETE_LOCAL:
+        raise typer.Exit(1)
 
 
 _RETRYABLE_CAUSES = {

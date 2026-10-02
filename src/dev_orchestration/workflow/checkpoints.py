@@ -53,6 +53,14 @@ def input_hashes(store: RunStore, registry: RoleRegistry) -> dict[str, str]:
             "external_plan_artifact",
         },
     )
+    if manifest.restart_mode is not None:
+        fields["restart"] = {
+            "linked_source_run": manifest.linked_source_run,
+            "restart_mode": manifest.restart_mode,
+            "restart_from": manifest.restart_from,
+            "restart_reason": manifest.restart_reason,
+            "restart_code_sha256": manifest.restart_code_sha256,
+        }
     if manifest.plan_review_provenance:
         fields["plan_review_provenance"] = manifest.plan_review_provenance
     values = {"manifest_contract": _digest(json.dumps(fields, sort_keys=True).encode())}

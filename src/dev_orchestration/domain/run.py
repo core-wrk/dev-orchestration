@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -86,6 +87,10 @@ class RunManifest(BaseModel):
     pause: PauseRecord | None = None
     cloud_session: CloudSession | None = None
     linked_source_run: str | None = None
+    restart_mode: Literal["check_only", "remediate"] | None = None
+    restart_from: Literal["validation", "review", "verification", "remediation"] | None = None
+    restart_reason: str | None = None
+    restart_code_sha256: str | None = None
     external_plan_artifact: str | None = None
     plan_review_provenance: dict = Field(default_factory=dict)
     stage_attempts: dict[str, int] = Field(default_factory=dict)

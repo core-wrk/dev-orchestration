@@ -151,9 +151,15 @@ class GitRepo:
         for path in status:
             target = self.root / path
             if target.is_file() and not self._path_is_tracked(path):
-                untracked.append(
-                    f"\n--- untracked: {path} ---\n{target.read_text(encoding='utf-8')}\n"
-                )
+                raw = target.read_bytes()
+                try:
+                    content = raw.decode("utf-8")
+                    untracked.append(f"\n--- untracked: {path} ---\n{content}\n")
+                except UnicodeDecodeError:
+                    digest = hashlib.sha256(raw).hexdigest()
+                    untracked.append(
+                        f"\n--- untracked binary: {path} ({len(raw)} bytes, sha256 {digest}) ---\n"
+                    )
         return diff + "".join(untracked)
 
     def change_patch(self, base_ref: str) -> str:

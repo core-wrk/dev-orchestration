@@ -50,10 +50,15 @@ from dev_orchestration.workflow.runner import (
     apply_continued_change,
 )
 from dev_orchestration.workflow.scheduler import SchedulerQueue
-from dev_orchestration.workflow.scope_check import cleanup_ephemeral_paths, enforce_fence
+from dev_orchestration.workflow.scope_check import (
+    ScopeViolation,
+    cleanup_ephemeral_paths,
+    enforce_fence,
+)
 from dev_orchestration.workflow.snapshot import capture_snapshot, require_snapshot
 from dev_orchestration.workflow.stages import (
     MAX_REMEDIATION_CYCLES,
+    RemediationExhausted,
     classify,
     execute,
     plan,
@@ -264,13 +269,26 @@ def _verify_human_approval(store: RunStore) -> dict:
         raise ResumeRefused("human approval proof is invalid")
     session = manifest.cloud_session
     summary = store.root / "approval/human-approval.md"
+    allowed_approval_runs = {manifest.run_id}
+    ancestor_id = manifest.linked_source_run
+    while ancestor_id and ancestor_id not in allowed_approval_runs:
+        allowed_approval_runs.add(ancestor_id)
+        ancestor = RunStore(store.repo_root, ancestor_id)
+        if ancestor.root.resolve().parent != (store.repo_root / ".ai" / "runs").resolve():
+            raise ResumeRefused("recovery lineage points outside this repository")
+        if not (ancestor.root / "manifest.json").is_file():
+            break
+        ancestor_id = ancestor.read_manifest().linked_source_run
+    if proof.get("run_id") not in allowed_approval_runs:
+        raise ResumeRefused("human approval does not belong to this run or its recovery lineage")
+    try:
+        summary_digest = hashlib.sha256(summary.read_bytes()).hexdigest()
+    except OSError as exc:
+        raise ResumeRefused("human approval summary is missing") from exc
     expected = {
-        "run_id": manifest.run_id,
         "plan_sha256": manifest.plan_sha256,
         "approved_plan_version": manifest.approved_plan_version,
-        "summary_sha256": hashlib.sha256(summary.read_bytes()).hexdigest()
-        if summary.is_file()
-        else None,
+        "summary_sha256": summary_digest,
         "cloud_provider": session.provider if session else None,
         "cloud_session_id": session.session_id if session else None,
         "cloud_environment_id": session.environment_id if session else None,
@@ -793,6 +811,14 @@ def resume_run(
                     )
                     artifact = _save_validation(store, outcomes, cycle)
                     if not all_passed(outcomes):
+                        if current.restart_mode is not None:
+                            _terminal(
+                                engine,
+                                RunState.FAILED,
+                                "required validation failed during restart",
+                                "restart_validation_failed",
+                            )
+                            return _outcome(engine, repo=repo, worktree=worktree)
                         if current.validation_repairs_reserved >= 1:
                             _terminal(
                                 engine,
@@ -875,6 +901,14 @@ def resume_run(
                             "review/finding-index.json",
                         ],
                     )
+                    if current.restart_mode == "check_only" and reviewed.blocking_ids():
+                        _terminal(
+                            engine,
+                            RunState.FAILED,
+                            "implementation review found blocking issues during check-only restart",
+                            "restart_review_findings",
+                        )
+                        return _outcome(engine, repo=repo, worktree=worktree)
                 elif stage == "remediation":
                     reviewed = ReviewResult.model_validate_json(
                         _latest(store, "review", "implementation-review").read_text(
@@ -974,7 +1008,14 @@ def resume_run(
                             & set(reviewed.blocking_ids())
                         )
                     ):
-                        _terminal(engine, RunState.FAILED, "final verification did not pass")
+                        _terminal(
+                            engine,
+                            RunState.FAILED,
+                            "final verification did not pass",
+                            "restart_verification_failed"
+                            if current.restart_mode is not None
+                            else "other",
+                        )
                         return _outcome(engine, verification, repo=repo, worktree=worktree)
                     enforce_fence(worktree_repo, base, fence)
                     changed = worktree_repo.change_inventory(base)
@@ -1046,8 +1087,27 @@ def resume_run(
                     status=RunState.PAUSED_INTERRUPTED,
                 )
             return _outcome(engine, repo=repo, worktree=worktree)
+        except ScopeViolation as exc:
+            if store.read_manifest().restart_mode is None:
+                raise
+            _terminal(engine, RunState.ESCALATED, str(exc), "restart_governance_blocked")
+            return _outcome(engine, repo=repo, worktree=worktree)
+        except RemediationExhausted as exc:
+            if store.read_manifest().restart_mode is None:
+                raise
+            _terminal(engine, RunState.ESCALATED, str(exc), "restart_remediation_exhausted")
+            return _outcome(engine, repo=repo, worktree=worktree)
         except (ContextContractError, CheckpointError, ResumeRefused) as exc:
-            _terminal(engine, RunState.ESCALATED, str(exc))
+            restart_mode = store.read_manifest().restart_mode
+            cause = "other"
+            if restart_mode is not None:
+                detail = str(exc).lower()
+                cause = (
+                    "restart_governance_blocked"
+                    if any(word in detail for word in ("scope", "approval", "policy", "protected"))
+                    else "restart_evidence_invalid"
+                )
+            _terminal(engine, RunState.ESCALATED, str(exc), cause)
             return _outcome(engine, repo=repo, worktree=worktree)
 
 

@@ -34,6 +34,7 @@ def describe_status(
     events: list[dict],
     checkpoint: dict | None = None,
     resume_blocker: str | None = None,
+    restart_info: str | None = None,
 ) -> str:
     lines = [
         f"Run:    {manifest.run_id}",
@@ -76,6 +77,8 @@ def describe_status(
         lines.append("Manual action: link the intact cloud session before approval")
     if resume_blocker:
         lines.append(f"Resume: refused: {resume_blocker}")
+    if restart_info:
+        lines.append(restart_info)
     if events:
         if any(event.get("event") == "prior_failures_unavailable" for event in events):
             lines.append(

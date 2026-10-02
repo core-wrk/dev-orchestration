@@ -632,3 +632,287 @@ def test_unproductive_death_saves_the_change_as_a_patch(tmp_path):
     _save_change_patch(Engine(run_store), root)
     saved = (run_store.root / CHANGE_PATCH_ARTIFACT).read_text()
     assert "+x = 9" in saved and "added.py" in saved
+
+
+def _failed_verification_source(tmp_path, monkeypatch):
+    from dev_orchestration.domain.enums import Outcome
+    from dev_orchestration.git.repo import GitRepo
+    from dev_orchestration.workflow import runner as runner_module
+
+    root = tmp_path / "restart-source"
+    root.mkdir()
+    repo(root)
+    (root / ".gitignore").write_text(".ai/runs/\n")
+    subprocess.run(["git", "-C", str(root), "add", ".gitignore"], check=True)
+    subprocess.run(["git", "-C", str(root), "commit", "-qm", "ignore run artifacts"], check=True)
+    adapter = ScriptedAdapter(tier="standard")
+    config = cli_module._project_config(GitRepo(root))
+    original_verify = runner_module.verify
+    calls = 0
+
+    def fail_first_verification(*args, **kwargs):
+        nonlocal calls
+        result = original_verify(*args, **kwargs)
+        calls += 1
+        if calls == 1:
+            return result.model_copy(update={"outcome": Outcome.CHANGES_REQUIRED})
+        return result
+
+    monkeypatch.setattr(runner_module, "verify", fail_first_verification)
+    outcome = runner_execute_run(
+        GitRepo(root),
+        config,
+        registry(adapter),
+        "add a flag",
+        tmp_path / "worktrees",
+        ["flag exists"],
+    )
+    assert outcome.final_state is RunState.FAILED
+    return root, outcome.run_id, adapter
+
+
+def _restart_cli(monkeypatch, tmp_path, adapter):
+    from dev_orchestration.config.models import GlobalConfig
+
+    monkeypatch.setattr(cli_module, "default_registry", lambda *a, **k: registry(adapter))
+    monkeypatch.setattr(
+        cli_module,
+        "_global_config",
+        lambda *a, **k: GlobalConfig(worktree_root=str(tmp_path / "worktrees")),
+    )
+
+
+def test_restart_cause_other_rechecks_saved_code_without_replanning(tmp_path, monkeypatch):
+    root, source_id, adapter = _failed_verification_source(tmp_path, monkeypatch)
+    source_manifest = RunStore(root, source_id).read_manifest()
+    source_code = Path(source_manifest.git.worktree) / "src" / "app.py"
+    original_content = source_code.read_bytes()
+    adapter.seen.clear()
+    _restart_cli(monkeypatch, tmp_path, adapter)
+    monkeypatch.chdir(root)
+
+    result = CliRunner().invoke(
+        app, ["restart", source_id, "--reason", "the diff is ready for certification"]
+    )
+
+    assert result.exit_code == 0, result.output
+    child = _latest_manifest(root)
+    assert child.linked_source_run == source_id
+    assert child.restart_mode == "check_only"
+    assert child.restart_from == "validation"
+    assert "planner" not in adapter.seen and "implementation_worker" not in adapter.seen
+    assert adapter.seen == ["implementation_reviewer", "verifier"]
+    assert source_code.read_bytes() == original_content
+    assert RunStore(root, source_id).read_manifest().status is RunState.FAILED
+
+
+def test_restart_verification_shortcut_requires_and_reuses_exact_evidence(tmp_path, monkeypatch):
+    root, source_id, adapter = _failed_verification_source(tmp_path, monkeypatch)
+    _restart_cli(monkeypatch, tmp_path, adapter)
+    monkeypatch.chdir(root)
+    adapter.seen.clear()
+
+    result = CliRunner().invoke(
+        app,
+        ["restart", source_id, "--from", "verification", "--reason", "recheck acceptance"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert adapter.seen == ["verifier"]
+    child = _latest_manifest(root)
+    assert child.restart_from == "verification"
+
+
+def test_restart_review_shortcut_runs_only_review_and_verification(tmp_path, monkeypatch):
+    root, source_id, adapter = _failed_verification_source(tmp_path, monkeypatch)
+    _restart_cli(monkeypatch, tmp_path, adapter)
+    monkeypatch.chdir(root)
+    adapter.seen.clear()
+
+    result = CliRunner().invoke(
+        app, ["restart", source_id, "--from", "review", "--reason", "review this diff"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert adapter.seen == ["implementation_reviewer", "verifier"]
+    assert (
+        "restart_evidence_reused"
+        in (root / ".ai" / "runs" / _latest_manifest(root).run_id / "events.jsonl").read_text()
+    )
+
+
+def test_restart_imports_an_explicit_patch_against_the_saved_base(tmp_path, monkeypatch):
+    from dev_orchestration.git.repo import GitRepo
+
+    root, source_id, adapter = _failed_verification_source(tmp_path, monkeypatch)
+    source_manifest = RunStore(root, source_id).read_manifest()
+    patch_file = tmp_path / "replacement.patch"
+    patch_file.write_text(
+        GitRepo(Path(source_manifest.git.worktree)).change_patch(source_manifest.git.base_commit)
+    )
+    _restart_cli(monkeypatch, tmp_path, adapter)
+    monkeypatch.chdir(root)
+    adapter.seen.clear()
+
+    result = CliRunner().invoke(
+        app,
+        ["restart", source_id, "--patch", str(patch_file), "--reason", "use the reviewed patch"],
+    )
+
+    assert result.exit_code == 0, result.output
+    child = _latest_manifest(root)
+    assert (Path(child.git.worktree) / "src" / "app.py").read_text() == "x = 2\n"
+    assert "planner" not in adapter.seen and "implementation_worker" not in adapter.seen
+
+
+def test_status_reports_restart_stages_and_shortcut_blockers(tmp_path, monkeypatch):
+    root, source_id, adapter = _failed_verification_source(tmp_path, monkeypatch)
+    _restart_cli(monkeypatch, tmp_path, adapter)
+    monkeypatch.chdir(root)
+
+    result = CliRunner().invoke(app, ["status", source_id])
+
+    assert result.exit_code == 0, result.output
+    assert "Restart: eligible --from validation|review|verification|remediation" in result.output
+
+
+def test_interrupted_restart_resumes_with_check_only_mode(tmp_path, monkeypatch):
+    from dev_orchestration.adapters.base import AgentTimeoutError
+
+    root, source_id, adapter = _failed_verification_source(tmp_path, monkeypatch)
+    _restart_cli(monkeypatch, tmp_path, adapter)
+    monkeypatch.chdir(root)
+    original_run = adapter.run
+    timeout_once = True
+
+    def interrupt_review(request):
+        nonlocal timeout_once
+        if timeout_once and request.role == "implementation_reviewer":
+            timeout_once = False
+            raise AgentTimeoutError(request.role, 1, "fake")
+        return original_run(request)
+
+    adapter.run = interrupt_review
+    adapter.seen.clear()
+    first = CliRunner().invoke(
+        app, ["restart", source_id, "--reason", "resume this review if interrupted"]
+    )
+    assert first.exit_code == 1, first.output
+    paused = _latest_manifest(root)
+    assert paused.status is RunState.PAUSED_INTERRUPTED
+    assert paused.restart_mode == "check_only"
+    adapter.seen.clear()
+
+    resumed = CliRunner().invoke(app, ["resume", paused.run_id])
+
+    assert resumed.exit_code == 0, resumed.output
+    complete = _latest_manifest(root)
+    assert complete.status is RunState.COMPLETE_LOCAL
+    assert complete.restart_mode == "check_only"
+    assert adapter.seen == ["implementation_reviewer", "verifier"]
+
+
+def test_remediation_restart_uses_fresh_review_and_bounded_worker_path(tmp_path, monkeypatch):
+    root, source_id, adapter = _failed_verification_source(tmp_path, monkeypatch)
+    _restart_cli(monkeypatch, tmp_path, adapter)
+    monkeypatch.chdir(root)
+    original_run = adapter.run
+    findings_pending = True
+
+    def find_once(request):
+        nonlocal findings_pending
+        if request.role == "implementation_reviewer" and findings_pending:
+            findings_pending = False
+            adapter.seen.append(request.role)
+            now = datetime.now(UTC)
+            return AgentResult(
+                "fake",
+                None,
+                0,
+                {
+                    "outcome": "CHANGES_REQUIRED",
+                    "findings": [
+                        {
+                            "id": "F901",
+                            "severity": "blocking",
+                            "summary": "restart remediation fixture finding",
+                            "evidence_required": "fresh reviewer pass",
+                        }
+                    ],
+                },
+                now,
+                now,
+            )
+        return original_run(request)
+
+    adapter.run = find_once
+    adapter.seen.clear()
+
+    result = CliRunner().invoke(
+        app,
+        ["restart", source_id, "--from", "remediation", "--reason", "address fresh findings"],
+    )
+
+    assert result.exit_code == 0, result.output
+    child = _latest_manifest(root)
+    assert child.restart_mode == "remediate"
+    assert child.restart_from == "remediation"
+    assert adapter.seen == [
+        "implementation_reviewer",
+        "implementation_worker",
+        "implementation_reviewer",
+        "verifier",
+    ]
+
+
+def test_restart_rejects_a_review_shortcut_after_the_diff_changes(tmp_path, monkeypatch):
+    root, source_id, adapter = _failed_verification_source(tmp_path, monkeypatch)
+    source_manifest = RunStore(root, source_id).read_manifest()
+    source_worktree = Path(source_manifest.git.worktree)
+    (source_worktree / "src" / "app.py").write_text("x = 3\n")
+    _restart_cli(monkeypatch, tmp_path, adapter)
+    monkeypatch.chdir(root)
+    adapter.seen.clear()
+
+    result = CliRunner().invoke(
+        app,
+        ["restart", source_id, "--from", "verification", "--reason", "recheck changed code"],
+    )
+
+    assert result.exit_code == 1
+    assert "use --from validation" in result.output
+    assert adapter.seen == []
+    assert len(list((root / ".ai" / "runs").glob("*/manifest.json"))) == 1
+
+    rechecked = CliRunner().invoke(
+        app,
+        ["restart", source_id, "--from", "validation", "--reason", "validate the corrected diff"],
+    )
+
+    assert rechecked.exit_code == 0, rechecked.output
+    child = _latest_manifest(root)
+    assert (Path(child.git.worktree) / "src" / "app.py").read_text() == "x = 3\n"
+    assert "planner" not in adapter.seen and "implementation_worker" not in adapter.seen
+
+
+def test_restart_import_preserves_binary_and_executable_changes(tmp_path, monkeypatch):
+    root, source_id, adapter = _failed_verification_source(tmp_path, monkeypatch)
+    source_manifest = RunStore(root, source_id).read_manifest()
+    source_worktree = Path(source_manifest.git.worktree)
+    binary = source_worktree / "src" / "payload.bin"
+    binary.write_bytes(b"\x00\x01\xff")
+    executable = source_worktree / "src" / "tool.sh"
+    executable.write_text("#!/bin/sh\nexit 0\n")
+    executable.chmod(0o755)
+    _restart_cli(monkeypatch, tmp_path, adapter)
+    monkeypatch.chdir(root)
+
+    result = CliRunner().invoke(
+        app, ["restart", source_id, "--reason", "certify corrected implementation"]
+    )
+
+    assert result.exit_code == 0, result.output
+    child = _latest_manifest(root)
+    restarted = Path(child.git.worktree)
+    assert (restarted / "src" / "payload.bin").read_bytes() == b"\x00\x01\xff"
+    assert (restarted / "src" / "tool.sh").stat().st_mode & 0o111
