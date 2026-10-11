@@ -99,6 +99,46 @@ class GitRepo:
     def current_commit(self) -> str:
         return self.run_git("rev-parse", "HEAD")
 
+    def shared_root(self) -> Path:
+        """Return the primary checkout root shared by this repository's worktrees."""
+        common = Path(self.run_git("rev-parse", "--git-common-dir"))
+        if not common.is_absolute():
+            common = self.root / common
+        return common.resolve().parent
+
+    def branch_exists(self, branch: str) -> bool:
+        proc = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(self.root),
+                "show-ref",
+                "--verify",
+                "--quiet",
+                f"refs/heads/{branch}",
+            ],
+            capture_output=True,
+            timeout=GIT_TIMEOUT_SECONDS,
+            check=False,
+        )
+        return proc.returncode == 0
+
+    def branch_head(self, branch: str) -> str:
+        return self.run_git("rev-parse", "--verify", f"refs/heads/{branch}^{{commit}}")
+
+    def delete_branch(self, branch: str) -> None:
+        """Delete one explicitly recorded local run branch after checkout removal."""
+        self.run_git("branch", "-D", "--", branch)
+
+    def bundle_branch(self, branch: str, base_ref: str, destination: Path) -> bytes:
+        """Save and verify the run branch's commits beyond its recorded base."""
+        self.run_git("bundle", "create", str(destination), branch, f"^{base_ref}")
+        self.run_git("bundle", "verify", str(destination))
+        heads = self.run_git("bundle", "list-heads", str(destination))
+        if f"refs/heads/{branch}" not in heads:
+            raise GitCommandError(f"bundle does not contain recorded branch {branch}")
+        return destination.read_bytes()
+
     def remote_url(self) -> str:
         """Read the origin identity without changing any repository configuration."""
         return self.run_git("config", "--get", "remote.origin.url")
@@ -167,6 +207,10 @@ class GitRepo:
 
         Built in a throwaway index so the checkout's own index is never touched.
         """
+        return self.change_patch_bytes(base_ref).decode("utf-8")
+
+    def change_patch_bytes(self, base_ref: str) -> bytes:
+        """Return a binary-safe patch for commits, index changes, and untracked files."""
         with tempfile.TemporaryDirectory() as scratch:
             env = {**os.environ, "GIT_INDEX_FILE": str(Path(scratch) / "index")}
             # The temporary index starts empty, so `add -A` snapshots the whole tree
@@ -177,7 +221,6 @@ class GitRepo:
                     ["git", "-C", str(self.root), *args],
                     env=env,
                     capture_output=True,
-                    text=True,
                     timeout=GIT_TIMEOUT_SECONDS,
                     check=False,
                 )
@@ -187,7 +230,6 @@ class GitRepo:
                 ["git", "-C", str(self.root), "diff", "--cached", "--binary", base_ref],
                 env=env,
                 capture_output=True,
-                text=True,
                 timeout=GIT_TIMEOUT_SECONDS,
                 check=False,
             )
@@ -195,19 +237,82 @@ class GitRepo:
             raise GitCommandError(f"git diff --cached failed: {proc.stderr.strip()}")
         return proc.stdout
 
+    def verify_patch(self, base_ref: str, patch: bytes) -> bool:
+        """Prove an archived patch reconstructs its exact tree using a scratch index."""
+        with tempfile.TemporaryDirectory() as scratch:
+            index = str(Path(scratch) / "index")
+            env = {**os.environ, "GIT_INDEX_FILE": index}
+            guards.reject_disallowed_invocation(("read-tree", base_ref))
+            read = subprocess.run(
+                ["git", "-C", str(self.root), "read-tree", base_ref],
+                env=env,
+                capture_output=True,
+                timeout=GIT_TIMEOUT_SECONDS,
+                check=False,
+            )
+            if read.returncode != 0:
+                raise GitCommandError(
+                    f"git read-tree failed: {read.stderr.decode(errors='replace')}"
+                )
+            if not patch:
+                guards.reject_disallowed_invocation(("diff", "--cached", "--binary", base_ref))
+                unchanged = subprocess.run(
+                    ["git", "-C", str(self.root), "diff", "--cached", "--binary", base_ref],
+                    env=env,
+                    capture_output=True,
+                    timeout=GIT_TIMEOUT_SECONDS,
+                    check=False,
+                )
+                if unchanged.returncode != 0:
+                    raise GitCommandError(
+                        f"git diff --cached failed: {unchanged.stderr.decode(errors='replace')}"
+                    )
+                return unchanged.stdout == b""
+            guards.reject_disallowed_invocation(("apply", "--cached", "--binary"))
+            applied = subprocess.run(
+                ["git", "-C", str(self.root), "apply", "--cached", "--binary", "-"],
+                input=patch,
+                env=env,
+                capture_output=True,
+                timeout=GIT_TIMEOUT_SECONDS,
+                check=False,
+            )
+            if applied.returncode != 0:
+                raise GitCommandError(
+                    f"archived patch cannot be applied: {applied.stderr.decode(errors='replace')}"
+                )
+            guards.reject_disallowed_invocation(("diff", "--cached", "--binary", base_ref))
+            rebuilt = subprocess.run(
+                ["git", "-C", str(self.root), "diff", "--cached", "--binary", base_ref],
+                env=env,
+                capture_output=True,
+                timeout=GIT_TIMEOUT_SECONDS,
+                check=False,
+            )
+            if rebuilt.returncode != 0:
+                raise GitCommandError(
+                    f"git diff --cached failed: {rebuilt.stderr.decode(errors='replace')}"
+                )
+            return rebuilt.stdout == patch
+
     def apply_patch(self, patch: str) -> None:
         """Apply a patch from change_patch to the working tree only; all or nothing."""
+        self.apply_patch_bytes(patch.encode("utf-8"))
+
+    def apply_patch_bytes(self, patch: bytes) -> None:
+        """Apply a binary-safe patch to the working tree only."""
         guards.reject_disallowed_invocation(("apply", "--binary"))
         proc = subprocess.run(
             ["git", "-C", str(self.root), "apply", "--binary"],
             input=patch,
             capture_output=True,
-            text=True,
             timeout=GIT_TIMEOUT_SECONDS,
             check=False,
         )
         if proc.returncode != 0:
-            raise GitCommandError(f"git apply failed: {proc.stderr.strip()}")
+            raise GitCommandError(
+                f"git apply failed: {proc.stderr.decode(errors='replace').strip()}"
+            )
 
     def _path_is_tracked(self, path: str) -> bool:
         proc = subprocess.run(

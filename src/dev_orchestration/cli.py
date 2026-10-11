@@ -12,6 +12,7 @@ import yaml
 from dev_orchestration import doctor as doctor_module
 from dev_orchestration import release
 from dev_orchestration.adapters.registry import ReadOnlyRoleUnsupportedError, default_registry
+from dev_orchestration.artifacts.goals import GoalError, GoalLedger
 from dev_orchestration.artifacts.store import (
     CheckpointError,
     NoApprovedPlanError,
@@ -28,7 +29,6 @@ from dev_orchestration.git.repo import (
     GitCommandError,
     discover_repo,
 )
-from dev_orchestration.git.worktree import worktree_path
 from dev_orchestration.init_repo import (
     FileExistsRefusal,
     UncommittedContractFileError,
@@ -95,6 +95,7 @@ EXPECTED_ERRORS = (
     ReadOnlyRoleUnsupportedError,
     CheckpointError,
     RunClaimError,
+    GoalError,
     ResumeRefused,
     LegacyRecoveryError,
     SchedulerError,
@@ -210,6 +211,9 @@ def _report_plan_review_reuse(outcome) -> None:
 @app.command()
 def run(
     request: str = typer.Argument(..., help="What you want done"),
+    goal_id: str = typer.Option(
+        ..., "--goal", help="Stable task or epic ID shared by its attempts"
+    ),
     plan_file: Path | None = typer.Option(  # noqa: B008
         None, "--plan", help="Import an external plan; review runs unless prior evidence matches"
     ),
@@ -250,7 +254,7 @@ def run(
                 raise ContextContractError("--reviewed-plan-from requires --plan FILE")
             review_source = RunStore(repo.root, reviewed_plan_from)
             if (
-                review_source.root.resolve().parent != (repo.root / ".ai" / "runs").resolve()
+                review_source.root.resolve().parent != RunStore.runs_directory(repo.root).resolve()
                 or not (review_source.root / "manifest.json").is_file()
             ):
                 raise NoSuchRunError(
@@ -271,6 +275,7 @@ def run(
             registry,
             request,
             Path(global_config.worktree_root).expanduser(),
+            goal_id=goal_id,
             acceptance_criteria=criteria,
             acceptance_criteria_source=criteria_source,
             tier_override=override,
@@ -398,7 +403,7 @@ def status(run_id: str | None = typer.Argument(None, help="Run id to inspect")) 
         selected = run_id or (candidates[0][0] if candidates else None)
         if selected is None:
             raise NoSuchRunError("no runs found in this repository")
-        store_root = repo.root / ".ai" / "runs" / selected
+        store_root = RunStore.runs_directory(repo.root) / selected
         if not (store_root / "manifest.json").is_file():
             raise NoSuchRunError(f"run {selected!r} does not exist")
 
@@ -499,11 +504,15 @@ def retry(
         repo = discover_repo(Path.cwd())
         source = RunStore(repo.root, run_id)
         if (
-            source.root.resolve().parent != (repo.root / ".ai" / "runs").resolve()
+            source.root.resolve().parent != RunStore.runs_directory(repo.root).resolve()
             or not (source.root / "manifest.json").is_file()
         ):
             raise NoSuchRunError(f"run {run_id!r} does not exist")
         old = source.read_manifest()
+        if not old.goal_id:
+            raise ContextContractError(
+                f"legacy run {run_id} has no goal ID; associate it with `dev-orch goal-associate` first"
+            )
         if old.terminal_cause == "implementation_review_escalated":
             review_files = list((source.root / "review").glob("implementation-review-v*.json"))
             if review_files:
@@ -574,6 +583,7 @@ def retry(
             default_registry(config, global_config),
             old.request_text,
             Path(global_config.worktree_root).expanduser(),
+            goal_id=old.goal_id,
             acceptance_criteria=list(old.acceptance_criteria),
             acceptance_criteria_source=old.acceptance_criteria_source,
             tier_override=old.tier_override,
@@ -609,34 +619,94 @@ def cancel(
     try:
         repo = discover_repo(Path.cwd())
         store = RunStore(repo.root, run_id)
-        if not (store.root / "manifest.json").is_file():
+        if (
+            store.root.resolve().parent != RunStore.runs_directory(repo.root).resolve()
+            or not (store.root / "manifest.json").is_file()
+        ):
             raise NoSuchRunError(f"run {run_id!r} does not exist")
         engine = Engine(store)
         provider_stopped = store.stop_active_provider()
         with store.claim(wait_seconds=10 if provider_stopped else 0):
             outcome = engine.cancel(reason)
+            schedule_error = None
             try:
                 SchedulerQueue().cancel(repo.root, run_id)
             except OSError as exc:
                 store.append_event({"event": "scheduler_cancel_failed", "detail": str(exc)})
-                typer.echo(
-                    f"{run_id}: cancelled, but scheduled wakeup removal failed: {exc}",
-                    err=True,
-                )
-                raise typer.Exit(1) from exc
-            try:
-                config = _project_config(repo)
-                worktree_root = Path(_global_config().worktree_root).expanduser()
-                worktree = worktree_path(worktree_root, config.project.name, run_id)
-            except GitCommandError:
-                pass  # no project.yaml (yet, or ever) -- cancellation itself still stands
-            else:
-                cleanup_worktree_if_unproductive(engine, repo, worktree)
+                schedule_error = exc
+            cleanup_worktree_if_unproductive(engine, repo)
+        if schedule_error is not None:
+            typer.echo(
+                f"{run_id}: cancelled, but scheduled wakeup removal failed: {schedule_error}",
+                err=True,
+            )
+            raise typer.Exit(1)
         suffix = " (active provider terminated)" if provider_stopped else ""
         typer.echo(f"{run_id}: {outcome.status}{suffix}")
     except EXPECTED_ERRORS + (NoSuchRunError,) as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(1) from exc
+
+
+@app.command("goal-associate")
+def goal_associate(
+    run_id: str = typer.Argument(..., help="Legacy run ID"),
+    goal_id: str = typer.Option(..., "--goal", help="Stable task or epic ID"),
+) -> None:
+    """Explicitly connect one legacy run to a goal's attempt history."""
+    try:
+        repo = discover_repo(Path.cwd())
+        GoalLedger(repo.root).associate(run_id, goal_id)
+    except EXPECTED_ERRORS as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(f"{run_id}: associated with goal {goal_id}")
+
+
+@app.command("goal-reopen")
+def goal_reopen(
+    goal_id: str = typer.Argument(..., help="Completed or exhausted goal ID"),
+    reason: str = typer.Option(
+        ..., "--reason", help="Human decision authorizing another attempt budget"
+    ),
+) -> None:
+    """Record a human decision that reopens an exhausted goal's attempt budget."""
+    try:
+        repo = discover_repo(Path.cwd())
+        generation = GoalLedger(repo.root).reopen(goal_id, reason)
+    except EXPECTED_ERRORS as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(f"{goal_id}: reopened as attempt generation {generation}")
+
+
+@app.command("cleanup-run")
+def cleanup_run(
+    run_id: str = typer.Argument(..., help="Failed, escalated, or cancelled run ID"),
+) -> None:
+    """Finish an interrupted cleanup from its saved run and ownership records."""
+    try:
+        repo = discover_repo(Path.cwd())
+        store = RunStore(repo.root, run_id)
+        if (
+            store.root.resolve().parent != RunStore.runs_directory(repo.root).resolve()
+            or not (store.root / "manifest.json").is_file()
+        ):
+            raise NoSuchRunError(f"run {run_id!r} does not exist")
+        engine = Engine(store)
+        if engine.state not in {RunState.FAILED, RunState.ESCALATED, RunState.CANCELLED}:
+            raise ContextContractError(f"run {run_id} is {engine.state}; cleanup is terminal-only")
+        cleanup_worktree_if_unproductive(engine, repo)
+        if not any(
+            event.get("event") == "run_cleanup_complete" for event in read_events(store.root)
+        ):
+            raise ContextContractError(
+                f"run {run_id} cleanup remains blocked; inspect its cleanup events and worktree"
+            )
+    except EXPECTED_ERRORS + (NoSuchRunError,) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(f"{run_id}: worktree and branch removed after archive verification")
 
 
 @app.command()
@@ -739,11 +809,13 @@ def usage(
             chosen = run_id or (candidates[0] if candidates else None)
             if chosen is None:
                 raise NoSuchRunError("no runs found in this repository")
-            if not (repo.root / ".ai" / "runs" / chosen / "manifest.json").is_file():
+            if not (RunStore.runs_directory(repo.root) / chosen / "manifest.json").is_file():
                 raise NoSuchRunError(f"run {chosen!r} does not exist")
             selected = [chosen]
         events = [
-            event for run in selected for event in read_events(repo.root / ".ai" / "runs" / run)
+            event
+            for run in selected
+            for event in read_events(RunStore.runs_directory(repo.root) / run)
         ]
         rows = summarize_token_usage(events)
     except EXPECTED_ERRORS + (NoSuchRunError,) as exc:

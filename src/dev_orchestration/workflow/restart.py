@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import tempfile
 from pathlib import Path
 
 from dev_orchestration.adapters.registry import RoleRegistry
@@ -9,7 +10,7 @@ from dev_orchestration.artifacts.store import CheckpointError, RunStore
 from dev_orchestration.config.models import ProjectConfig
 from dev_orchestration.domain.enums import Outcome, RunState
 from dev_orchestration.domain.findings import Classification, ReviewResult
-from dev_orchestration.git.repo import GitRepo
+from dev_orchestration.git.repo import GitCommandError, GitRepo
 from dev_orchestration.scope import ScopeFence
 from dev_orchestration.workflow.bootstrap import (
     bootstrap_run,
@@ -17,8 +18,9 @@ from dev_orchestration.workflow.bootstrap import (
     resolve_runtime_context,
 )
 from dev_orchestration.workflow.checkpoints import input_hashes, record_stage
+from dev_orchestration.workflow.engine import Engine
 from dev_orchestration.workflow.recovery import ResumeRefused, _verify_human_approval, resume_run
-from dev_orchestration.workflow.runner import RunOutcome
+from dev_orchestration.workflow.runner import RunOutcome, cleanup_worktree_if_unproductive
 from dev_orchestration.workflow.scope_check import ScopeViolation, enforce_fence
 from dev_orchestration.workflow.snapshot import capture_snapshot
 from dev_orchestration.workflow.validation import ValidationOutcome, all_passed
@@ -39,6 +41,22 @@ def _code_digest(snapshot: dict) -> str:
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
+
+
+def _patch_code_digest(repo: GitRepo, base_commit: str, patch: bytes) -> str:
+    """Compute the normal source snapshot fingerprint from an archived patch."""
+    with tempfile.TemporaryDirectory(prefix="dev-orch-restart-") as scratch:
+        worktree = Path(scratch) / "checkout"
+        repo.run_git("worktree", "add", "--quiet", "--detach", str(worktree), base_commit)
+        try:
+            checkout = GitRepo(worktree)
+            checkout.apply_patch_bytes(patch)
+            return _code_digest(capture_snapshot(checkout, base_commit))
+        finally:
+            if worktree.exists():
+                from dev_orchestration.git.worktree import remove_worktree
+
+                remove_worktree(repo, worktree)
 
 
 def _version(path: str) -> int:
@@ -64,7 +82,7 @@ def _source_contract(
     repo: GitRepo, config: ProjectConfig, registry: RoleRegistry, run_id: str
 ) -> tuple[RunStore, dict, Path | None]:
     source = RunStore(repo.root, run_id)
-    if source.root.resolve().parent != (repo.root / ".ai" / "runs").resolve():
+    if source.root.resolve().parent != RunStore.runs_directory(repo.root).resolve():
         raise ResumeRefused("run ID must name a run in this repository")
     if not (source.root / "manifest.json").is_file():
         raise ResumeRefused(f"run {run_id!r} does not exist")
@@ -267,8 +285,8 @@ def restart_status(
         source, _, worktree = _source_contract(repo, config, registry, run_id)
         manifest = source.read_manifest()
         if worktree is None:
-            patch = (source.root / "execution/final-change.patch").read_text(encoding="utf-8")
-            digest = hashlib.sha256(patch.encode()).hexdigest()
+            patch = (source.root / "execution/final-change.patch").read_bytes()
+            digest = _patch_code_digest(repo, manifest.git.base_commit or "", patch)
         else:
             digest = _code_digest(capture_snapshot(GitRepo(worktree), manifest.git.base_commit))
         stages = ["validation"]
@@ -293,7 +311,7 @@ def restart_status(
         if blockers:
             detail += "; shortcuts refused: " + " / ".join(dict.fromkeys(blockers))
         return detail
-    except (ResumeRefused, OSError, ValueError, KeyError) as exc:
+    except (ResumeRefused, GitCommandError, OSError, ValueError, KeyError) as exc:
         return f"Restart: unavailable: {exc}"
 
 
@@ -315,6 +333,10 @@ def restart_run(
         raise ResumeRefused("restart requires a non-empty --reason")
     source, _, source_worktree = _source_contract(repo, project_config, registry, run_id)
     original = source.read_manifest()
+    if not original.goal_id:
+        raise ResumeRefused(
+            f"legacy run {run_id} has no goal ID; associate it with `dev-orch goal-associate` first"
+        )
     if from_stage in {"review", "verification"} and original.tier.value not in {
         "standard",
         "substantial",
@@ -322,27 +344,23 @@ def restart_run(
         raise ResumeRefused(f"tier {original.tier} does not include implementation review")
     fence = ScopeFence.from_config(project_config.scope)
     if patch_path is not None:
-        patch_text = patch_path.expanduser().resolve().read_text(encoding="utf-8")
+        patch_bytes = patch_path.expanduser().resolve().read_bytes()
     elif source_worktree is not None:
-        patch_text = GitRepo(source_worktree).change_patch(original.git.base_commit)
+        patch_bytes = GitRepo(source_worktree).change_patch_bytes(original.git.base_commit)
     else:
-        patch_text = (source.root / "execution/final-change.patch").read_text(encoding="utf-8")
-    if not patch_text.strip():
+        patch_bytes = (source.root / "execution/final-change.patch").read_bytes()
+    if not patch_bytes.strip():
         raise ResumeRefused("source has no implementation changes to restart")
 
-    source_digest = None
-    if patch_path is None and source_worktree is not None:
-        source_digest = _code_digest(
-            capture_snapshot(GitRepo(source_worktree), original.git.base_commit or "")
+    source_digest = _patch_code_digest(repo, original.git.base_commit or "", patch_bytes)
+    if from_stage == "review":
+        _validation_evidence(source, source_digest)
+    elif from_stage == "verification":
+        _verification_evidence(
+            source,
+            source_digest,
+            review_required=original.tier.value in {"standard", "substantial"},
         )
-        if from_stage == "review":
-            _validation_evidence(source, source_digest)
-        elif from_stage == "verification":
-            _verification_evidence(
-                source,
-                source_digest,
-                review_required=original.tier.value in {"standard", "substantial"},
-            )
 
     # A reviewer/verifier shortcut is eligible only when source evidence pins this
     # patch to the exact checked implementation. The patch is applied below before
@@ -355,14 +373,16 @@ def restart_run(
     }[from_stage]
     config = project_config
     store, worktree = bootstrap_run(
-        repo, config, original.request_text or "", original.tier, worktree_root
+        repo, config, original.request_text or "", original.tier, worktree_root, original.goal_id
     )
     try:
         worktree_repo = GitRepo(worktree)
-        worktree_repo.apply_patch(patch_text)
+        worktree_repo.apply_patch_bytes(patch_bytes)
         enforce_fence(worktree_repo, original.git.base_commit or "", fence)
         snapshot = capture_snapshot(worktree_repo, original.git.base_commit or "")
         code_digest = _code_digest(snapshot)
+        if code_digest != source_digest:
+            raise ResumeRefused("archived patch changed while preparing the restart")
         if from_stage == "review":
             _validation_evidence(source, code_digest)
         elif from_stage == "verification":
@@ -381,6 +401,9 @@ def restart_run(
                 "run_id": store.run_id,
                 "repository": str(repo.root),
                 "git": store.read_manifest().git,
+                "goal_id": original.goal_id,
+                "goal_attempt": store.read_manifest().goal_attempt,
+                "goal_generation": store.read_manifest().goal_generation,
                 "status": RunState.VALIDATING,
                 "created_at": store.read_manifest().created_at,
                 "completed_at": None,
@@ -499,8 +522,8 @@ def restart_run(
         ]
         if reused:
             store.append_event({"event": "restart_evidence_reused", "artifacts": reused})
-        patch_target = store.write_text_artifact(
-            "execution/restart-input.patch", patch_text, immutable=True
+        patch_target = store.write_bytes_artifact(
+            "execution/restart-input.patch", patch_bytes, immutable=True
         )
         artifacts.append(patch_target.relative_to(store.root).as_posix())
         initial = "validation" if requested_next == "validation" else requested_next
@@ -521,4 +544,5 @@ def restart_run(
                 terminal_reason=str(exc),
             )
             store.append_event({"event": cause, "detail": str(exc)})
+        cleanup_worktree_if_unproductive(Engine(store), repo, worktree)
         raise

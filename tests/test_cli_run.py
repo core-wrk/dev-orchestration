@@ -221,16 +221,28 @@ def test_status_unknown_run_fails_cleanly(tmp_path, monkeypatch):
 def test_run_refuses_unsupported_tier_without_traceback(tmp_path, monkeypatch):
     root = repo(tmp_path)
     monkeypatch.chdir(root)
-    result = CliRunner().invoke(app, ["run", "rewrite auth", "--tier", "high_risk"])
+    result = CliRunner().invoke(
+        app, ["run", "rewrite auth", "--goal", "auth-rewrite", "--tier", "high_risk"]
+    )
     assert (
         result.exit_code == 1 and "high_risk" in result.output and "Traceback" not in result.output
     )
 
 
+def test_run_requires_an_explicit_goal_id(tmp_path, monkeypatch):
+    root = repo(tmp_path)
+    monkeypatch.chdir(root)
+    result = CliRunner().invoke(app, ["run", "add a flag"])
+    assert result.exit_code != 0
+    assert "--goal" in result.output
+
+
 def test_reviewed_plan_source_requires_an_external_plan(tmp_path, monkeypatch):
     root = repo(tmp_path)
     monkeypatch.chdir(root)
-    result = CliRunner().invoke(app, ["run", "add a flag", "--reviewed-plan-from", "source"])
+    result = CliRunner().invoke(
+        app, ["run", "add a flag", "--goal", "flag", "--reviewed-plan-from", "source"]
+    )
     assert result.exit_code == 1
     assert "requires --plan FILE" in result.output
 
@@ -239,7 +251,7 @@ def test_run_refuses_dirty_repository_and_names_file(tmp_path, monkeypatch):
     root = repo(tmp_path)
     (root / "scratch.txt").write_text("dirty\n")
     monkeypatch.chdir(root)
-    result = CliRunner().invoke(app, ["run", "add a flag"])
+    result = CliRunner().invoke(app, ["run", "add a flag", "--goal", "flag"])
     assert (
         result.exit_code == 1
         and "scratch.txt" in result.output
@@ -274,7 +286,9 @@ def test_tier_override_is_effective_persisted_and_cannot_beat_minimum(tmp_path, 
     monkeypatch.setattr(cli_module, "default_registry", lambda *a, **k: registry(accepted_adapter))
     _use_local_worktree(monkeypatch, accepted_root)
     monkeypatch.chdir(accepted_root)
-    accepted = CliRunner().invoke(app, ["run", "fix", "--tier", "standard"])
+    accepted = CliRunner().invoke(
+        app, ["run", "fix", "--goal", "accepted-fix", "--tier", "standard"]
+    )
     assert accepted.exit_code == 0, accepted.output
     accepted_manifest = _latest_manifest(accepted_root)
     assert accepted_manifest.tier is Tier.STANDARD
@@ -287,7 +301,9 @@ def test_tier_override_is_effective_persisted_and_cannot_beat_minimum(tmp_path, 
     monkeypatch.setattr(cli_module, "default_registry", lambda *a, **k: registry(rejected_adapter))
     _use_local_worktree(monkeypatch, rejected_root)
     monkeypatch.chdir(rejected_root)
-    rejected = CliRunner().invoke(app, ["run", "rewrite auth", "--tier", "trivial"])
+    rejected = CliRunner().invoke(
+        app, ["run", "rewrite auth", "--goal", "rejected-auth", "--tier", "trivial"]
+    )
     assert rejected.exit_code == 1
     assert "Traceback" not in rejected.output
     assert _latest_manifest(rejected_root).status is RunState.ESCALATED
@@ -318,7 +334,7 @@ scope:
     monkeypatch.setattr(cli_module, "default_registry", lambda *a, **k: registry(minimum_adapter))
     _use_local_worktree(monkeypatch, minimum_root)
     monkeypatch.chdir(minimum_root)
-    minimum = CliRunner().invoke(app, ["run", "fix", "--tier", "trivial"])
+    minimum = CliRunner().invoke(app, ["run", "fix", "--goal", "minimum-fix", "--tier", "trivial"])
     assert minimum.exit_code == 0, minimum.output
     minimum_manifest = _latest_manifest(minimum_root)
     assert minimum_manifest.tier is Tier.STANDARD
@@ -336,7 +352,9 @@ def test_external_plan_is_imported_hashed_reviewed_and_not_regenerated(tmp_path,
     monkeypatch.setattr(cli_module, "default_registry", lambda *a, **k: registry(adapter))
     _use_local_worktree(monkeypatch, root)
     monkeypatch.chdir(root)
-    result = CliRunner().invoke(app, ["run", "add a flag", "--plan", str(source)])
+    result = CliRunner().invoke(
+        app, ["run", "add a flag", "--goal", "external-plan", "--plan", str(source)]
+    )
     assert result.exit_code == 0, result.output
     manifest = _latest_manifest(root)
     assert manifest.plan_origin == "external"
@@ -384,6 +402,8 @@ def test_criteria_are_taken_from_the_command_line_when_supplied(tmp_path, monkey
         [
             "run",
             "add a flag",
+            "--goal",
+            "cli-criteria",
             "--criterion",
             "the flag exists",
             "--criterion",
@@ -402,7 +422,7 @@ def test_criteria_fall_back_to_the_request_and_say_so(tmp_path, monkeypatch):
     monkeypatch.setattr(cli_module, "default_registry", lambda *a, **k: registry(ScriptedAdapter()))
     _use_local_worktree(monkeypatch, root)
     monkeypatch.chdir(root)
-    result = CliRunner().invoke(app, ["run", "add a flag"])
+    result = CliRunner().invoke(app, ["run", "add a flag", "--goal", "fallback-criteria"])
     assert result.exit_code == 0, result.output
     manifest = _latest_manifest(root)
     assert manifest.acceptance_criteria == ["add a flag"]
@@ -415,10 +435,13 @@ def _dead_run(root, cause, retry_of=None, with_plan=True):
     dead.update_manifest(
         terminal_cause=cause,
         retry_of=retry_of,
+        goal_id="test-retry-goal",
+        goal_attempt=1,
         request_text="add a flag",
         acceptance_criteria=["flag exists"],
         config_layers=[{"scope": {"include": ["src/"], "exclude": []}}],
     )
+    dead.append_event({"event": "run_cleanup_complete", "branch": None})
     if with_plan:
         (dead.root / "planning").mkdir(exist_ok=True)
         plan = dead.root / "planning" / "approved-plan.md"
@@ -442,6 +465,8 @@ def test_retry_reuses_the_approved_plan_of_an_implementation_stage_death(tmp_pat
     assert result.exit_code == 0, result.output
     manifest = _latest_manifest(root)
     assert manifest.retry_of == "20260829-101500_standard_dead"
+    assert manifest.goal_id == "test-retry-goal"
+    assert manifest.goal_attempt == 2
     assert manifest.plan_origin == "external"
     assert manifest.acceptance_criteria == ["flag exists"]
     assert "planner" not in adapter.seen and "plan_reviewer" in adapter.seen
@@ -502,7 +527,10 @@ def _retry_fixture(tmp_path, monkeypatch, patch_text, cause="implementation_revi
     repo(root)
     dead = _dead_run(root, cause)
     if patch_text is not None:
-        dead.write_text_artifact("execution/final-change.patch", patch_text)
+        if isinstance(patch_text, bytes):
+            dead.write_bytes_artifact("execution/final-change.patch", patch_text)
+        else:
+            dead.write_text_artifact("execution/final-change.patch", patch_text)
     subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
     subprocess.run(["git", "-C", str(root), "commit", "-qm", "audit trail"], check=True)
     adapter = ScriptedAdapter(tier="standard")
@@ -577,6 +605,32 @@ def test_retry_continues_the_saved_change_without_reimplementing(tmp_path, monke
     worktree = Path(manifest.git.worktree)
     assert (worktree / "src" / "app.py").read_text() == "x = 3\n"
     assert (worktree / "src" / "new.py").read_text() == "y = 1\n"
+
+
+def test_retry_continues_binary_and_executable_changes_from_the_archive(tmp_path, monkeypatch):
+    from dev_orchestration.git.repo import GitRepo
+
+    source_root = tmp_path / "binary-source"
+    source_root.mkdir()
+    repo(source_root)
+    (source_root / "src" / "payload.bin").write_bytes(b"\x00\x01\xff")
+    executable = source_root / "src" / "tool.sh"
+    executable.write_text("#!/bin/sh\nexit 0\n")
+    executable.chmod(0o755)
+    patch = GitRepo(source_root).change_patch_bytes("HEAD")
+    import shutil
+
+    shutil.rmtree(source_root)
+    root, adapter = _retry_fixture(tmp_path, monkeypatch, patch)
+
+    result = CliRunner().invoke(app, ["retry", "20260829-101500_standard_dead"])
+
+    assert result.exit_code == 0, result.output
+    manifest = _latest_manifest(root)
+    worktree = Path(manifest.git.worktree)
+    assert (worktree / "src" / "payload.bin").read_bytes() == b"\x00\x01\xff"
+    assert (worktree / "src" / "tool.sh").stat().st_mode & 0o111
+    assert "implementation_worker" not in adapter.seen
 
 
 def test_retry_fresh_reimplements_even_when_a_change_was_saved(tmp_path, monkeypatch):
@@ -666,6 +720,7 @@ def _failed_verification_source(tmp_path, monkeypatch):
         "add a flag",
         tmp_path / "worktrees",
         ["flag exists"],
+        goal_id="test-restart-goal",
     )
     assert outcome.final_state is RunState.FAILED
     return root, outcome.run_id, adapter
@@ -685,8 +740,8 @@ def _restart_cli(monkeypatch, tmp_path, adapter):
 def test_restart_cause_other_rechecks_saved_code_without_replanning(tmp_path, monkeypatch):
     root, source_id, adapter = _failed_verification_source(tmp_path, monkeypatch)
     source_manifest = RunStore(root, source_id).read_manifest()
-    source_code = Path(source_manifest.git.worktree) / "src" / "app.py"
-    original_content = source_code.read_bytes()
+    archived_patch = (RunStore(root, source_id).root / "execution/final-change.patch").read_bytes()
+    assert not Path(source_manifest.git.worktree).exists()
     adapter.seen.clear()
     _restart_cli(monkeypatch, tmp_path, adapter)
     monkeypatch.chdir(root)
@@ -698,11 +753,15 @@ def test_restart_cause_other_rechecks_saved_code_without_replanning(tmp_path, mo
     assert result.exit_code == 0, result.output
     child = _latest_manifest(root)
     assert child.linked_source_run == source_id
+    assert child.goal_id == source_manifest.goal_id
+    assert child.goal_attempt == 2
     assert child.restart_mode == "check_only"
     assert child.restart_from == "validation"
     assert "planner" not in adapter.seen and "implementation_worker" not in adapter.seen
     assert adapter.seen == ["implementation_reviewer", "verifier"]
-    assert source_code.read_bytes() == original_content
+    assert (
+        RunStore(root, source_id).root / "execution/final-change.patch"
+    ).read_bytes() == archived_patch
     assert RunStore(root, source_id).read_manifest().status is RunState.FAILED
 
 
@@ -742,13 +801,10 @@ def test_restart_review_shortcut_runs_only_review_and_verification(tmp_path, mon
 
 
 def test_restart_imports_an_explicit_patch_against_the_saved_base(tmp_path, monkeypatch):
-    from dev_orchestration.git.repo import GitRepo
-
     root, source_id, adapter = _failed_verification_source(tmp_path, monkeypatch)
-    source_manifest = RunStore(root, source_id).read_manifest()
     patch_file = tmp_path / "replacement.patch"
-    patch_file.write_text(
-        GitRepo(Path(source_manifest.git.worktree)).change_patch(source_manifest.git.base_commit)
+    patch_file.write_bytes(
+        (RunStore(root, source_id).root / "execution/final-change.patch").read_bytes()
     )
     _restart_cli(monkeypatch, tmp_path, adapter)
     monkeypatch.chdir(root)
@@ -867,16 +923,29 @@ def test_remediation_restart_uses_fresh_review_and_bounded_worker_path(tmp_path,
 
 def test_restart_rejects_a_review_shortcut_after_the_diff_changes(tmp_path, monkeypatch):
     root, source_id, adapter = _failed_verification_source(tmp_path, monkeypatch)
-    source_manifest = RunStore(root, source_id).read_manifest()
-    source_worktree = Path(source_manifest.git.worktree)
-    (source_worktree / "src" / "app.py").write_text("x = 3\n")
+    source_store = RunStore(root, source_id)
+    changed_patch = tmp_path / "changed.patch"
+    changed_patch.write_bytes(
+        (source_store.root / "execution/final-change.patch")
+        .read_bytes()
+        .replace(b"+x = 2", b"+x = 3")
+    )
     _restart_cli(monkeypatch, tmp_path, adapter)
     monkeypatch.chdir(root)
     adapter.seen.clear()
 
     result = CliRunner().invoke(
         app,
-        ["restart", source_id, "--from", "verification", "--reason", "recheck changed code"],
+        [
+            "restart",
+            source_id,
+            "--from",
+            "verification",
+            "--patch",
+            str(changed_patch),
+            "--reason",
+            "recheck changed code",
+        ],
     )
 
     assert result.exit_code == 1
@@ -886,7 +955,16 @@ def test_restart_rejects_a_review_shortcut_after_the_diff_changes(tmp_path, monk
 
     rechecked = CliRunner().invoke(
         app,
-        ["restart", source_id, "--from", "validation", "--reason", "validate the corrected diff"],
+        [
+            "restart",
+            source_id,
+            "--from",
+            "validation",
+            "--patch",
+            str(changed_patch),
+            "--reason",
+            "validate the corrected diff",
+        ],
     )
 
     assert rechecked.exit_code == 0, rechecked.output
@@ -896,19 +974,40 @@ def test_restart_rejects_a_review_shortcut_after_the_diff_changes(tmp_path, monk
 
 
 def test_restart_import_preserves_binary_and_executable_changes(tmp_path, monkeypatch):
+    from dev_orchestration.git.repo import GitRepo
+
     root, source_id, adapter = _failed_verification_source(tmp_path, monkeypatch)
     source_manifest = RunStore(root, source_id).read_manifest()
-    source_worktree = Path(source_manifest.git.worktree)
-    binary = source_worktree / "src" / "payload.bin"
+    patch_source = tmp_path / "patch-source"
+    git = GitRepo(root)
+    git.run_git(
+        "worktree", "add", "--quiet", "--detach", str(patch_source), source_manifest.git.base_commit
+    )
+    source_tree = GitRepo(patch_source)
+    source_tree.apply_patch_bytes(
+        (RunStore(root, source_id).root / "execution/final-change.patch").read_bytes()
+    )
+    binary = patch_source / "src" / "payload.bin"
     binary.write_bytes(b"\x00\x01\xff")
-    executable = source_worktree / "src" / "tool.sh"
+    executable = patch_source / "src" / "tool.sh"
     executable.write_text("#!/bin/sh\nexit 0\n")
     executable.chmod(0o755)
+    patch_file = tmp_path / "binary-and-mode.patch"
+    patch_file.write_bytes(source_tree.change_patch_bytes(source_manifest.git.base_commit))
+    git.run_git("worktree", "remove", "--force", str(patch_source))
     _restart_cli(monkeypatch, tmp_path, adapter)
     monkeypatch.chdir(root)
 
     result = CliRunner().invoke(
-        app, ["restart", source_id, "--reason", "certify corrected implementation"]
+        app,
+        [
+            "restart",
+            source_id,
+            "--patch",
+            str(patch_file),
+            "--reason",
+            "certify corrected implementation",
+        ],
     )
 
     assert result.exit_code == 0, result.output

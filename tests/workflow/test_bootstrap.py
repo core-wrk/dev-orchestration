@@ -1,9 +1,14 @@
 import subprocess
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
+from dev_orchestration.artifacts.goals import GoalError, GoalLedger
+from dev_orchestration.artifacts.store import RunStore
 from dev_orchestration.config.models import ProjectConfig
-from dev_orchestration.domain.enums import Tier
+from dev_orchestration.domain.enums import ProjectClass, RunState, Tier
+from dev_orchestration.domain.run import RunManifest
 from dev_orchestration.git.repo import DirtyWorktreeError, GitRepo
 from dev_orchestration.scope import ScopeFence
 from dev_orchestration.workflow.bootstrap import (
@@ -32,6 +37,7 @@ def repo(tmp_path):
     subprocess.run(["git", "-C", str(root), "config", "user.name", "T"], check=True)
     (root / "src").mkdir()
     (root / "src" / "app.py").write_text("x\n")
+    (root / ".gitignore").write_text(".ai/runs/\n")
     subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
     subprocess.run(["git", "-C", str(root), "commit", "-qm", "init"], check=True)
     return GitRepo(root)
@@ -65,7 +71,9 @@ def test_strictness_never_relaxes():
 
 
 def test_bootstrap_records_policy_and_creates_isolated_branch(repo, tmp_path):
-    store, worktree = bootstrap_run(repo, CONFIG, "add a flag", Tier.STANDARD, tmp_path / "wt")
+    store, worktree = bootstrap_run(
+        repo, CONFIG, "add a flag", Tier.STANDARD, tmp_path / "wt", "test-goal"
+    )
     assert worktree.is_dir()
     assert store.read_manifest().resolved_config["protected.autonomous_push"] is False
     assert store.read_manifest().git.branch.startswith("ai/")
@@ -74,7 +82,90 @@ def test_bootstrap_records_policy_and_creates_isolated_branch(repo, tmp_path):
 def test_bootstrap_blocks_dirty_repo(repo, tmp_path):
     (repo.root / "scratch.txt").write_text("dirty\n")
     with pytest.raises(DirtyWorktreeError):
-        bootstrap_run(repo, CONFIG, "x", Tier.STANDARD, tmp_path / "wt")
+        bootstrap_run(repo, CONFIG, "x", Tier.STANDARD, tmp_path / "wt", "test-goal")
+
+
+def test_one_active_run_per_goal_is_shared_across_linked_checkouts(repo, tmp_path):
+    linked_root = tmp_path / "linked"
+    repo.run_git("worktree", "add", "--quiet", "--detach", str(linked_root), repo.current_commit())
+    linked = GitRepo(linked_root)
+
+    start = threading.Barrier(2)
+
+    def launch(checkout, request, worktree_root):
+        start.wait()
+        try:
+            return bootstrap_run(
+                checkout, CONFIG, request, Tier.STANDARD, worktree_root, "epic-088"
+            )
+        except GoalError as exc:
+            return exc
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(
+            executor.map(
+                lambda args: launch(*args),
+                [
+                    (repo, "first attempt", tmp_path / "first-worktrees"),
+                    (linked, "duplicate attempt", tmp_path / "linked-worktrees"),
+                ],
+            )
+        )
+    admitted = [result for result in results if not isinstance(result, GoalError)]
+    refused = [result for result in results if isinstance(result, GoalError)]
+    assert len(admitted) == 1
+    assert len(refused) == 1
+    first, _ = admitted[0]
+    assert f"active run {first.run_id}" in str(refused[0])
+
+    other, _ = bootstrap_run(
+        linked,
+        CONFIG,
+        "independent goal",
+        Tier.STANDARD,
+        tmp_path / "other-worktrees",
+        "epic-089",
+    )
+    assert other.read_manifest().goal_id == "epic-089"
+
+
+def test_reopening_a_goal_starts_a_new_attempt_generation(repo):
+    store, _ = bootstrap_run(
+        repo, CONFIG, "first attempt", Tier.STANDARD, repo.root.parent / "worktrees", "epic-088"
+    )
+    from dev_orchestration.workflow.engine import Engine
+
+    Engine(store).cancel("fixture cleanup")
+    from dev_orchestration.workflow.runner import cleanup_worktree_if_unproductive
+
+    cleanup_worktree_if_unproductive(Engine(store), repo)
+    ledger = GoalLedger(repo.root)
+    assert ledger.reopen("epic-088", "human approved a new implementation direction") == 1
+    with ledger.reserve("epic-088") as reservation:
+        assert reservation.generation == 1
+        assert reservation.attempt == 1
+
+
+def test_legacy_run_needs_explicit_goal_association_before_it_counts(repo):
+    store = RunStore(repo.root, "legacy-run")
+    store.initialize(
+        RunManifest(
+            run_id="legacy-run",
+            repository=str(repo.root),
+            workflow="standard",
+            tier=Tier.STANDARD,
+            project_class=ProjectClass.INTERNAL_UTILITY,
+            status=RunState.FAILED,
+        )
+    )
+    store.append_event({"event": "run_cleanup_complete", "branch": None})
+
+    ledger = GoalLedger(repo.root)
+    ledger.associate("legacy-run", "legacy-goal")
+
+    assert store.read_manifest().goal_id == "legacy-goal"
+    with ledger.reserve("legacy-goal") as reservation:
+        assert reservation.attempt == 2
 
 
 def test_runtime_profile_minimum_and_context_are_joined(tmp_path):

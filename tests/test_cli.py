@@ -115,11 +115,17 @@ def test_cancel_reports_queue_cleanup_failure_after_cancelling_run(tmp_path, mon
             raise PermissionError("queue is read-only")
 
     monkeypatch.setattr("dev_orchestration.cli.SchedulerQueue", UnwritableQueue)
+    cleanup_states = []
+    monkeypatch.setattr(
+        "dev_orchestration.cli.cleanup_worktree_if_unproductive",
+        lambda engine, _repo: cleanup_states.append(engine.state),
+    )
     monkeypatch.chdir(tmp_path)
     result = CliRunner().invoke(app, ["cancel", "run-1"])
     assert result.exit_code == 1
     assert "cancelled, but scheduled wakeup removal failed" in result.output
     assert store.read_manifest().status is RunState.CANCELLED
+    assert cleanup_states == [RunState.CANCELLED]
 
 
 def _init_git_repo(root):

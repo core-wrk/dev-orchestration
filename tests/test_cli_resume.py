@@ -22,6 +22,7 @@ def test_status_and_resume_command_preserve_saved_run(tmp_path, monkeypatch):
         "change app",
         tmp_path / "wt",
         CRITERIA,
+        goal_id="test-cli-resume",
     )
     assert first.final_state is RunState.PAUSED_INTERRUPTED
     adapter = Scripted()
@@ -52,7 +53,8 @@ def test_run_auto_resume_option_is_saved(tmp_path, monkeypatch):
     )
     monkeypatch.chdir(root)
     result = CliRunner().invoke(
-        cli.app, ["run", "change app", "--criterion", CRITERIA[0], "--auto-resume"]
+        cli.app,
+        ["run", "change app", "--goal", "change-app", "--criterion", CRITERIA[0], "--auto-resume"],
     )
     assert result.exit_code == 0, result.output
     run_id = result.output.split(":", 1)[0].splitlines()[-1]

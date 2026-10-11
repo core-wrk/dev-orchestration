@@ -18,8 +18,8 @@ from dev_orchestration.workflow.cloud import (
     resume_cloud_due,
 )
 from dev_orchestration.workflow.recovery import ResumeRefused, resume_due, resume_run
-from dev_orchestration.workflow.runner import execute_run
 from dev_orchestration.workflow.scheduler import SchedulerQueue
+from tests.workflow.run_helpers import execute_run
 from tests.workflow.test_resume import (
     CONFIG,
     CRITERIA,

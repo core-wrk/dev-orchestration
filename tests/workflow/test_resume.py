@@ -25,8 +25,8 @@ from dev_orchestration.workflow.checkpoints import input_hashes
 from dev_orchestration.workflow.cloud import link_cloud_session
 from dev_orchestration.workflow.legacy import LegacyRecoveryError
 from dev_orchestration.workflow.recovery import ResumeRefused, approve_run, resume_run
-from dev_orchestration.workflow.runner import execute_run
 from dev_orchestration.workflow.scheduler import SchedulerQueue
+from tests.workflow.run_helpers import execute_run
 
 CONFIG = ProjectConfig.model_validate(
     {
@@ -236,8 +236,10 @@ def test_tampered_prior_failure_snapshot_refuses_before_provider(tmp_path):
             project_class=ProjectClass.INTERNAL_UTILITY,
             status=RunState.FAILED,
             terminal_cause="validation_failed",
+            goal_id="tampered-prior-failure",
         )
     )
+    source.append_event({"event": "run_cleanup_complete", "branch": None})
 
     class PausedWorker(Scripted):
         def run(self, request):

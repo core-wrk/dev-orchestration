@@ -18,6 +18,7 @@ from pathlib import Path
 
 from dev_orchestration.artifacts.events import append_event
 from dev_orchestration.domain.run import RunManifest
+from dev_orchestration.git.repo import GitCommandError, GitRepo
 
 SUBDIRECTORIES = ("planning", "execution", "review", "verification", "approval", "checkpoints")
 
@@ -61,13 +62,26 @@ def _sync_directory(path: Path) -> None:
 
 class RunStore:
     def __init__(self, repo_root: Path, run_id: str) -> None:
-        self.repo_root = repo_root
+        try:
+            shared_root = GitRepo(repo_root).shared_root()
+        except GitCommandError:
+            shared_root = repo_root.resolve()
+        self.repo_root = repo_root.resolve()
         self.run_id = run_id
-        self.root = repo_root / ".ai" / "runs" / run_id
+        self.root = shared_root / ".ai" / "runs" / run_id
+
+    @classmethod
+    def runs_directory(cls, repo_root: Path) -> Path:
+        try:
+            root = GitRepo(repo_root).shared_root()
+        except GitCommandError:
+            root = repo_root.resolve()
+        return root / ".ai" / "runs"
 
     def initialize(self, manifest: RunManifest) -> None:
+        self.root.mkdir(parents=True, exist_ok=False)
         for sub in SUBDIRECTORIES:
-            (self.root / sub).mkdir(parents=True, exist_ok=True)
+            (self.root / sub).mkdir()
         self._write_manifest(manifest)
 
     def _write_manifest(self, manifest: RunManifest) -> None:

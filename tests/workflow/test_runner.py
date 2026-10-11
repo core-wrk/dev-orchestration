@@ -7,6 +7,7 @@ import pytest
 
 from dev_orchestration.adapters.base import AdapterStatus, AgentResult, AgentTimeoutError
 from dev_orchestration.adapters.registry import RoleRegistry
+from dev_orchestration.artifacts.goals import GoalError, GoalLedger
 from dev_orchestration.artifacts.store import CheckpointError, RunStore
 from dev_orchestration.config.models import ProjectConfig, RoleConfig
 from dev_orchestration.context.assembler import Category, ContextContractError
@@ -15,7 +16,7 @@ from dev_orchestration.domain.run import RunManifest
 from dev_orchestration.git.repo import GitRepo
 from dev_orchestration.workflow.cloud import link_cloud_session
 from dev_orchestration.workflow.recovery import ResumeRefused, approve_run, resume_run
-from dev_orchestration.workflow.runner import execute_run
+from tests.workflow.run_helpers import execute_run
 
 CRITERIA = ["the flag exists"]
 CONFIG = ProjectConfig.model_validate(
@@ -182,6 +183,8 @@ def test_substantial_run_reaches_complete_local_when_approval_is_not_required(tm
     manifest = RunManifest.model_validate_json(
         (outcome.store_root / "manifest.json").read_text(encoding="utf-8")
     )
+    assert manifest.goal_attempt == 1
+    assert git.branch_exists(manifest.git.branch)
     assert manifest.tier is Tier.SUBSTANTIAL
     assert not manifest.approval_required
     assert adapter.seen == [
@@ -201,7 +204,13 @@ def test_substantial_run_pauses_before_worker_when_approval_is_required(tmp_path
     )
     adapter = Scripted(script(tier="substantial"))
     outcome = execute_run(
-        git, config, registry(adapter), "change the flag with approval", tmp_path / "wt", CRITERIA
+        git,
+        config,
+        registry(adapter),
+        "change the flag with approval",
+        tmp_path / "wt",
+        CRITERIA,
+        goal_id="approval-goal",
     )
     assert outcome.final_state is RunState.AWAITING_APPROVAL
     assert outcome.reason == "human approval required before execution"
@@ -215,6 +224,17 @@ def test_substantial_run_pauses_before_worker_when_approval_is_required(tmp_path
     assert summary.is_file()
     assert "change the flag with approval" in summary.read_text(encoding="utf-8")
     assert any(event["event"] == "approval_required" for event in events(outcome))
+    assert Path(manifest.git.worktree).exists()
+    with pytest.raises(GoalError, match="already has active run"):
+        execute_run(
+            git,
+            config,
+            registry(Scripted(script(tier="substantial"))),
+            "change the flag with approval",
+            tmp_path / "wt",
+            CRITERIA,
+            goal_id="approval-goal",
+        )
 
 
 def test_linked_cloud_run_requires_explicit_approval_then_resumes_saved_plan(tmp_path):
@@ -578,6 +598,7 @@ def test_unignored_validation_cache_is_cleaned_and_does_not_trip_the_fence(tmp_p
 
 def test_role_timeout_pauses_run_with_role_and_limit(tmp_path):
     git = repo(tmp_path)
+    goal_id = "timeout-goal"
     outcome = execute_run(
         git,
         CONFIG,
@@ -585,11 +606,28 @@ def test_role_timeout_pauses_run_with_role_and_limit(tmp_path):
         "timeout safely",
         tmp_path / "wt",
         CRITERIA,
+        goal_id=goal_id,
     )
     assert outcome.final_state is RunState.PAUSED_INTERRUPTED
+    manifest = RunStore(git.root, outcome.run_id).read_manifest()
     pause = json.loads((outcome.store_root / "manifest.json").read_text())["pause"]
     assert pause["role"] == "implementation_worker"
     assert "7-second" in pause["diagnostic"]
+    assert manifest.goal_attempt == 1
+    assert Path(manifest.git.worktree).exists()
+    assert git.branch_exists(manifest.git.branch)
+    next_adapter = Scripted(script())
+    with pytest.raises(GoalError, match="already has active run"):
+        execute_run(
+            git,
+            CONFIG,
+            registry(next_adapter),
+            "timeout safely",
+            tmp_path / "wt",
+            CRITERIA,
+            goal_id=goal_id,
+        )
+    assert next_adapter.seen == []
 
 
 @pytest.mark.parametrize("verdict", ["FAIL", "UNKNOWN"])
@@ -610,9 +648,28 @@ def test_blocked_escalated_and_nonzero_agent_results_are_terminal(tmp_path):
     git = repo(tmp_path)
     blocked = dict(PASS, outcome="BLOCKED")
     outcome = execute_run(
-        git, CONFIG, registry(Scripted(script(review=blocked))), "bad", tmp_path / "wt", CRITERIA
+        git,
+        CONFIG,
+        registry(Scripted(script(review=blocked))),
+        "bad",
+        tmp_path / "wt",
+        CRITERIA,
+        goal_id="blocked-goal",
     )
     assert outcome.final_state is RunState.BLOCKED
+    manifest = RunStore(git.root, outcome.run_id).read_manifest()
+    assert Path(manifest.git.worktree).exists()
+    assert git.branch_exists(manifest.git.branch)
+    with pytest.raises(GoalError, match="already has active run"):
+        execute_run(
+            git,
+            CONFIG,
+            registry(Scripted(script())),
+            "bad",
+            tmp_path / "wt",
+            CRITERIA,
+            goal_id="blocked-goal",
+        )
     escalated = execute_run(
         git,
         CONFIG,
@@ -633,8 +690,58 @@ def test_blocked_escalated_and_nonzero_agent_results_are_terminal(tmp_path):
     assert nonzero.final_state is RunState.ESCALATED
 
 
+def test_three_failed_attempts_stop_the_goal_until_human_reopen(tmp_path):
+    git = repo(tmp_path)
+    goal_id = "epic-088"
+    for expected_attempt in range(1, 4):
+        outcome = execute_run(
+            git,
+            CONFIG,
+            registry(NonzeroWorker(script())),
+            "add a flag",
+            tmp_path / "wt",
+            CRITERIA,
+            goal_id=goal_id,
+        )
+        manifest = RunStore(git.root, outcome.run_id).read_manifest()
+        assert outcome.final_state is RunState.ESCALATED
+        assert manifest.goal_attempt == expected_attempt
+        assert not Path(manifest.git.worktree).exists()
+        assert not git.branch_exists(manifest.git.branch)
+        patch = (outcome.store_root / "execution/failure-change.patch").read_bytes()
+        assert patch
+        assert git.verify_patch(manifest.git.base_commit, patch)
+
+    assert len(list((git.root / ".ai/runs").glob("*/manifest.json"))) == 3
+    assert git.run_git("branch", "--list", "ai/*") == ""
+    worktree_entries = git.run_git("worktree", "list", "--porcelain").splitlines()
+    assert sum(line.startswith("worktree ") for line in worktree_entries) == 1
+    blocked_adapter = NonzeroWorker(script())
+    with pytest.raises(GoalError, match="3-attempt limit"):
+        execute_run(
+            git,
+            CONFIG,
+            registry(blocked_adapter),
+            "add a flag",
+            tmp_path / "wt",
+            CRITERIA,
+            goal_id=goal_id,
+        )
+    assert blocked_adapter.seen == []
+    assert len(list((git.root / ".ai/runs").glob("*/manifest.json"))) == 3
+    assert git.run_git("branch", "--list", "ai/*") == ""
+    worktree_entries = git.run_git("worktree", "list", "--porcelain").splitlines()
+    assert sum(line.startswith("worktree ") for line in worktree_entries) == 1
+
+    assert GoalLedger(git.root).reopen(goal_id, "human approved a revised approach") == 1
+    with GoalLedger(git.root).reserve(goal_id) as reservation:
+        assert reservation.generation == 1
+        assert reservation.attempt == 1
+
+
 def test_scope_violation_escalates_for_uncommitted_out_of_scope_file(tmp_path):
     git = repo(tmp_path)
+    goal_id = "scope-violation-goal"
 
     class Touching(Scripted):
         def run(self, request):
@@ -644,10 +751,74 @@ def test_scope_violation_escalates_for_uncommitted_out_of_scope_file(tmp_path):
             return super().run(request)
 
     outcome = execute_run(
-        git, CONFIG, registry(Touching(script())), "add a flag", tmp_path / "wt", CRITERIA
+        git,
+        CONFIG,
+        registry(Touching(script())),
+        "add a flag",
+        tmp_path / "wt",
+        CRITERIA,
+        goal_id=goal_id,
     )
     assert outcome.final_state is RunState.ESCALATED
     assert "vendor/sneaky.py" in outcome.reason
+    manifest = RunStore(git.root, outcome.run_id).read_manifest()
+    assert manifest.terminal_cause == "scope_violation"
+    next_adapter = Scripted(script())
+    with pytest.raises(GoalError, match="human decision"):
+        execute_run(
+            git,
+            CONFIG,
+            registry(next_adapter),
+            "add a flag",
+            tmp_path / "wt",
+            CRITERIA,
+            goal_id=goal_id,
+        )
+    assert next_adapter.seen == []
+
+
+def test_plan_review_escalation_stops_the_goal_for_human_decision(tmp_path):
+    git = repo(tmp_path)
+    goal_id = "plan-review-goal"
+    adapter = Scripted(script())
+    adapter.script["plan_reviewer"] = [
+        {
+            "outcome": "ESCALATE",
+            "findings": [
+                {
+                    "id": "F001",
+                    "severity": "blocking",
+                    "summary": "plan needs a human decision",
+                    "evidence_required": "decision record",
+                }
+            ],
+        }
+    ]
+    outcome = execute_run(
+        git,
+        CONFIG,
+        registry(adapter),
+        "add a flag",
+        tmp_path / "wt",
+        CRITERIA,
+        goal_id=goal_id,
+    )
+    assert outcome.final_state is RunState.ESCALATED
+    manifest = RunStore(git.root, outcome.run_id).read_manifest()
+    assert manifest.terminal_cause == "plan_review_escalated"
+
+    next_adapter = Scripted(script())
+    with pytest.raises(GoalError, match="human decision"):
+        execute_run(
+            git,
+            CONFIG,
+            registry(next_adapter),
+            "add a flag",
+            tmp_path / "wt",
+            CRITERIA,
+            goal_id=goal_id,
+        )
+    assert next_adapter.seen == []
 
 
 def test_success_and_escalation_leave_complete_audit_artifacts(tmp_path):
@@ -699,8 +870,8 @@ def test_success_and_escalation_leave_complete_audit_artifacts(tmp_path):
     assert [event["event"] for event in events(escalated)][-1] in {
         "state_changed",
         "run_terminal",
-        "worktree_cleanup_skipped",
-        "worktree_cleanup_failed",
+        "run_cleanup_complete",
+        "run_cleanup_blocked",
         "worktree_removed",
     }
 
@@ -721,21 +892,166 @@ def test_escalation_with_a_clean_worktree_removes_it(tmp_path):
     assert any(event["event"] == "worktree_removed" for event in events(outcome))
 
 
-def test_escalation_with_a_dirty_worktree_leaves_it_for_manual_review(tmp_path):
+def test_escalation_archives_dirty_changes_then_removes_the_worktree_and_branch(tmp_path):
     git = repo(tmp_path)
+
+    class CommittingWorker(Scripted):
+        def run(self, request):
+            result = super().run(request)
+            if request.role == "implementation_worker":
+                GitRepo(request.cwd).commit("worker checkpoint", ["src/app.py"])
+                (request.cwd / "src" / "payload.bin").write_bytes(b"\x00\x01\xff")
+                executable = request.cwd / "src" / "tool.sh"
+                executable.write_text("#!/bin/sh\nexit 0\n")
+                executable.chmod(0o755)
+            return result
+
     outcome = execute_run(
         git,
         CONFIG,
-        registry(Scripted(script(review=dict(PASS, outcome="ESCALATE")))),
+        registry(CommittingWorker(script(review=dict(PASS, outcome="ESCALATE")))),
         "escalate after writing something",
         tmp_path / "wt",
         CRITERIA,
     )
     assert outcome.final_state is RunState.ESCALATED
     worktree = tmp_path / "wt" / "demo" / outcome.run_id
+    assert not worktree.exists()
+    manifest = RunStore(git.root, outcome.run_id).read_manifest()
+    saved = (outcome.store_root / "execution/failure-change.patch").read_bytes()
+    assert b"x = 2" in saved
+    assert b"GIT binary patch" in saved
+    assert b"new file mode 100755" in saved
+    assert git.verify_patch(manifest.git.base_commit, saved)
+    restored = tmp_path / "restored-archive"
+    git.run_git("worktree", "add", "--quiet", "--detach", str(restored), manifest.git.base_commit)
+    restored_repo = GitRepo(restored)
+    restored_repo.apply_patch_bytes(saved)
+    assert (restored / "src" / "app.py").read_text() == "x = 2\n"
+    assert (restored / "src" / "payload.bin").read_bytes() == b"\x00\x01\xff"
+    assert (restored / "src" / "tool.sh").stat().st_mode & 0o111
+    git.run_git("worktree", "remove", "--force", str(restored))
+    bundle = outcome.store_root / "execution/failure-branch.bundle"
+    assert bundle.is_file()
+    receipt = json.loads((outcome.store_root / "execution/cleanup-receipt.json").read_text())
+    heads = git.run_git("bundle", "list-heads", str(bundle))
+    assert f"{receipt['branch_head']} refs/heads/{manifest.git.branch}" in heads
+    assert any(event["event"] == "worktree_removed" for event in events(outcome))
+    assert any(event["event"] == "run_cleanup_complete" for event in events(outcome))
+
+
+def test_cleanup_failure_and_interruption_keep_the_run_reserved_until_finished(
+    tmp_path, monkeypatch
+):
+    import dev_orchestration.workflow.runner as runner_module
+    from dev_orchestration.workflow.bootstrap import bootstrap_run
+    from dev_orchestration.workflow.engine import Engine
+
+    git = repo(tmp_path)
+    store, worktree = bootstrap_run(
+        git, CONFIG, "cleanup recovery", Tier.STANDARD, tmp_path / "wt", "cleanup-recovery"
+    )
+    manifest = store.read_manifest()
+    (worktree / "src" / "app.py").write_text("x = 2\n")
+    engine = Engine(store)
+    store.update_manifest(terminal_reason="fixture failure", terminal_cause="other")
+    engine.transition(RunState.FAILED)
+
+    verify_patch = GitRepo.verify_patch
+    monkeypatch.setattr(GitRepo, "verify_patch", lambda self, base, patch: False)
+    runner_module.cleanup_worktree_if_unproductive(engine, git)
     assert worktree.exists()
-    assert (worktree / "src" / "app.py").read_text() == "x = 2\n"
-    assert any(event["event"] == "worktree_cleanup_skipped" for event in events(outcome))
+    assert git.branch_exists(manifest.git.branch)
+    with pytest.raises(GoalError, match="finish its saved cleanup"):
+        bootstrap_run(git, CONFIG, "duplicate", Tier.STANDARD, tmp_path / "wt", "cleanup-recovery")
+
+    monkeypatch.setattr(GitRepo, "verify_patch", verify_patch)
+    remove_worktree = runner_module.remove_worktree
+
+    def interrupt_after_remove(repo_arg, path):
+        remove_worktree(repo_arg, path)
+        raise OSError("simulated interruption after worktree removal")
+
+    monkeypatch.setattr(runner_module, "remove_worktree", interrupt_after_remove)
+    runner_module.cleanup_worktree_if_unproductive(engine, git)
+    assert not worktree.exists()
+    assert git.branch_exists(manifest.git.branch)
+    assert (store.root / "execution/cleanup-receipt.json").is_file()
+    with pytest.raises(GoalError, match="finish its saved cleanup"):
+        bootstrap_run(git, CONFIG, "duplicate", Tier.STANDARD, tmp_path / "wt", "cleanup-recovery")
+
+    monkeypatch.setattr(runner_module, "remove_worktree", remove_worktree)
+    runner_module.cleanup_worktree_if_unproductive(engine, git)
+    assert not git.branch_exists(manifest.git.branch)
+    recorded = [json.loads(line) for line in (store.root / "events.jsonl").read_text().splitlines()]
+    assert any(event["event"] == "run_cleanup_complete" for event in recorded)
+
+
+def test_missing_post_bootstrap_worktree_without_archive_blocks_cleanup(tmp_path):
+    import dev_orchestration.workflow.runner as runner_module
+    from dev_orchestration.workflow.bootstrap import bootstrap_run
+    from dev_orchestration.workflow.engine import Engine
+
+    git = repo(tmp_path)
+    store, worktree = bootstrap_run(
+        git, CONFIG, "missing worktree", Tier.STANDARD, tmp_path / "wt", "missing-worktree"
+    )
+    manifest = store.read_manifest()
+    (worktree / "src" / "app.py").write_text("unarchived change\n")
+    engine = Engine(store)
+    store.update_manifest(terminal_reason="fixture failure", terminal_cause="other")
+    engine.transition(RunState.FAILED)
+    git.run_git("worktree", "remove", "--force", str(worktree))
+
+    runner_module.cleanup_worktree_if_unproductive(engine, git)
+
+    assert not worktree.exists()
+    assert git.branch_exists(manifest.git.branch)
+    assert not (store.root / "execution/failure-change.patch").exists()
+    recorded = [json.loads(line) for line in (store.root / "events.jsonl").read_text().splitlines()]
+    assert any(event["event"] == "run_cleanup_blocked" for event in recorded)
+    assert not any(event["event"] == "run_cleanup_complete" for event in recorded)
+    with pytest.raises(GoalError, match="finish its saved cleanup"):
+        bootstrap_run(git, CONFIG, "duplicate", Tier.STANDARD, tmp_path / "wt", "missing-worktree")
+
+
+def test_cleanup_rechecks_for_external_edits_before_removal(tmp_path, monkeypatch):
+    import dev_orchestration.workflow.runner as runner_module
+    from dev_orchestration.workflow.bootstrap import bootstrap_run
+    from dev_orchestration.workflow.engine import Engine
+
+    git = repo(tmp_path)
+    store, worktree = bootstrap_run(
+        git, CONFIG, "external edit guard", Tier.STANDARD, tmp_path / "wt", "edit-guard"
+    )
+    manifest = store.read_manifest()
+    (worktree / "src" / "app.py").write_text("x = 2\n")
+    engine = Engine(store)
+    store.update_manifest(terminal_reason="fixture failure", terminal_cause="other")
+    engine.transition(RunState.FAILED)
+
+    verify_receipt = runner_module._verify_cleanup_receipt
+    external_edit = worktree / "src" / "external.py"
+
+    def verify_then_edit(engine_arg, repo_arg, receipt):
+        verify_receipt(engine_arg, repo_arg, receipt)
+        external_edit.write_text("retain this unexpected edit\n")
+
+    monkeypatch.setattr(runner_module, "_verify_cleanup_receipt", verify_then_edit)
+    runner_module.cleanup_worktree_if_unproductive(engine, git)
+    assert worktree.exists()
+    assert external_edit.read_text() == "retain this unexpected edit\n"
+    assert git.branch_exists(manifest.git.branch)
+    recorded = [json.loads(line) for line in (store.root / "events.jsonl").read_text().splitlines()]
+    assert not any(event["event"] == "run_cleanup_complete" for event in recorded)
+    with pytest.raises(GoalError, match="finish its saved cleanup"):
+        bootstrap_run(git, CONFIG, "duplicate", Tier.STANDARD, tmp_path / "wt", "edit-guard")
+
+    monkeypatch.setattr(runner_module, "_verify_cleanup_receipt", verify_receipt)
+    external_edit.unlink()
+    runner_module.cleanup_worktree_if_unproductive(engine, git)
+    assert not worktree.exists()
+    assert not git.branch_exists(manifest.git.branch)
 
 
 def test_completed_run_keeps_its_worktree_for_human_review(tmp_path):
@@ -746,6 +1062,8 @@ def test_completed_run_keeps_its_worktree_for_human_review(tmp_path):
     assert outcome.final_state is RunState.COMPLETE_LOCAL
     worktree = tmp_path / "wt" / "demo" / outcome.run_id
     assert worktree.exists()
+    manifest = RunStore(git.root, outcome.run_id).read_manifest()
+    assert git.branch_exists(manifest.git.branch)
     assert not any(
         event["event"].startswith("worktree_cleanup") or event["event"] == "worktree_removed"
         for event in events(outcome)
@@ -836,8 +1154,8 @@ def test_same_base_retry_automatically_reuses_completed_plan_review(tmp_path):
         tmp_path / "wt2",
         CRITERIA,
         external_plan=source.root / "planning/approved-plan.md",
-        retry_of=first.run_id,
-        retry_source=source,
+        reviewed_plan_from=source,
+        goal_id="separate-request",
     )
 
     assert retried.final_state is RunState.COMPLETE_LOCAL
@@ -867,6 +1185,7 @@ def test_reused_plan_review_seeds_finding_ids_for_new_reviews(tmp_path):
         tmp_path / "source",
         CRITERIA,
         external_plan=plan_source,
+        goal_id="explicit-review-recovery",
     )
     source = RunStore(git.root, first.run_id)
     implementation_finding = {
@@ -930,7 +1249,7 @@ def test_invalid_review_source_does_not_bootstrap_a_new_run(tmp_path):
             reviewed_plan_from=source,
         )
 
-    assert len(list((git.root / ".ai" / "runs").iterdir())) == 1
+    assert len(list((git.root / ".ai" / "runs").glob("*/manifest.json"))) == 1
     assert not (tmp_path / "reused" / "demo").exists()
 
 

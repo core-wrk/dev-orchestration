@@ -3,6 +3,7 @@
 import hashlib
 import json
 import subprocess
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -11,6 +12,7 @@ from pydantic import BaseModel
 from dev_orchestration.adapters.base import AgentInterruptedError, AgentTimeoutError
 from dev_orchestration.adapters.registry import ReadOnlyRoleUnsupportedError, RoleRegistry
 from dev_orchestration.adapters.usage import UsageAwareAdapter, UsageLimitError, next_attempt
+from dev_orchestration.artifacts.goals import validate_goal_id
 from dev_orchestration.artifacts.store import CheckpointError, RunStore
 from dev_orchestration.config.models import ProjectConfig, ValidationCommand
 from dev_orchestration.config.resolver import PROTECTED_DEFAULTS
@@ -272,36 +274,252 @@ def _terminal(
 # checked out are swept.
 _UNPRODUCTIVE_TERMINAL_STATES = frozenset({RunState.FAILED, RunState.ESCALATED, RunState.CANCELLED})
 
+FAILURE_PATCH_ARTIFACT = "execution/failure-change.patch"
+FAILURE_BUNDLE_ARTIFACT = "execution/failure-branch.bundle"
+CLEANUP_RECEIPT_ARTIFACT = "execution/cleanup-receipt.json"
 
-def cleanup_worktree_if_unproductive(engine: Engine, repo: GitRepo, worktree: Path) -> None:
-    """Remove a run's worktree once nothing further can happen in it.
 
-    Left in place, unproductive worktrees accumulate indefinitely (nothing
-    else ever removes them) and each one adds objects to the shared git
-    database. A large backlog of unreachable objects has been observed to
-    make plain `git` calls -- including ones agents run unprompted while
-    exploring a repo -- slow enough to blow through provider timeouts.
-    A worktree with uncommitted changes is left alone and merely noted:
-    dev-orch never modifies or discards uncommitted work (see
-    GitRepo.ensure_clean), and an unproductive run can still have left real,
-    unfinished output behind for a human to recover by hand.
-    """
-    if engine.state not in _UNPRODUCTIVE_TERMINAL_STATES or not worktree.exists():
+def _archive_failed_worktree(engine: Engine, repo: GitRepo, worktree: Path) -> dict:
+    """Save and verify all source changes and any run-created commit history."""
+    manifest = engine.store.read_manifest()
+    base = manifest.git.base_commit
+    branch = manifest.git.branch
+    recorded = manifest.git.worktree
+    if not base or not branch or not recorded:
+        raise GitCommandError("run record lacks branch, base commit, or worktree ownership")
+    if Path(recorded).resolve() != worktree.resolve():
+        raise GitCommandError("cleanup path does not match the worktree recorded by this run")
+
+    worktree_repo = GitRepo(worktree)
+    if worktree_repo.current_branch() != branch:
+        raise GitCommandError("worktree is no longer on the branch recorded by this run")
+    if worktree_repo.ignored_paths():
+        raise GitCommandError("worktree contains ignored files; inspect them before cleanup")
+    head = worktree_repo.current_commit()
+    if repo.branch_head(branch) != head:
+        raise GitCommandError("run branch moved independently of its recorded worktree")
+    patch = worktree_repo.change_patch_bytes(base)
+    if not worktree_repo.verify_patch(base, patch):
+        raise GitCommandError("saved change patch failed its scratch-index restoration check")
+
+    patch_path = engine.store.root / FAILURE_PATCH_ARTIFACT
+    legacy_patch_path = engine.store.root / CHANGE_PATCH_ARTIFACT
+    if patch_path.exists() and patch_path.read_bytes() != patch:
+        raise GitCommandError("existing failure patch differs from current worktree changes")
+    if not patch_path.exists():
+        engine.store.write_bytes_artifact(FAILURE_PATCH_ARTIFACT, patch, immutable=True)
+    if legacy_patch_path.exists() and legacy_patch_path.read_bytes() != patch:
+        raise GitCommandError("existing continuation patch differs from current worktree changes")
+    if not legacy_patch_path.exists():
+        engine.store.write_bytes_artifact(CHANGE_PATCH_ARTIFACT, patch, immutable=True)
+
+    bundle = b""
+    if head != base:
+        if not worktree_repo.is_ancestor(base):
+            raise GitCommandError("run branch no longer descends from its recorded base")
+        bundle_path = engine.store.root / FAILURE_BUNDLE_ARTIFACT
+        if bundle_path.exists():
+            bundle = bundle_path.read_bytes()
+            with tempfile.TemporaryDirectory() as scratch:
+                check = Path(scratch) / "branch.bundle"
+                check.write_bytes(bundle)
+                check_repo = GitRepo(repo.root)
+                listed = check_repo.run_git("bundle", "list-heads", str(check))
+                if f"{head} refs/heads/{branch}" not in listed:
+                    raise GitCommandError(
+                        "existing branch bundle does not match the recorded branch"
+                    )
+                check_repo.run_git("bundle", "verify", str(check))
+        else:
+            with tempfile.TemporaryDirectory() as scratch:
+                bundle = worktree_repo.bundle_branch(branch, base, Path(scratch) / "branch.bundle")
+            engine.store.write_bytes_artifact(FAILURE_BUNDLE_ARTIFACT, bundle, immutable=True)
+
+    receipt = {
+        "run_id": manifest.run_id,
+        "base_commit": base,
+        "branch": branch,
+        "branch_head": head,
+        "patch_sha256": hashlib.sha256(patch).hexdigest(),
+        "bundle_sha256": hashlib.sha256(bundle).hexdigest() if bundle else None,
+        "patch_artifact": FAILURE_PATCH_ARTIFACT,
+        "bundle_artifact": FAILURE_BUNDLE_ARTIFACT if bundle else None,
+    }
+    receipt_path = engine.store.root / CLEANUP_RECEIPT_ARTIFACT
+    if receipt_path.exists():
+        if json.loads(receipt_path.read_text(encoding="utf-8")) != receipt:
+            raise GitCommandError("existing cleanup receipt does not match archived work")
+    else:
+        engine.store.write_json_artifact(CLEANUP_RECEIPT_ARTIFACT, receipt, immutable=True)
+    engine.store.append_event(
+        {
+            "event": "failure_archive_saved",
+            "patch_sha256": receipt["patch_sha256"],
+            "bundle_sha256": receipt["bundle_sha256"],
+        }
+    )
+    return receipt
+
+
+def _verify_cleanup_receipt(engine: Engine, repo: GitRepo, receipt: dict) -> None:
+    manifest = engine.store.read_manifest()
+    if (
+        receipt.get("run_id") != manifest.run_id
+        or receipt.get("base_commit") != manifest.git.base_commit
+        or receipt.get("branch") != manifest.git.branch
+    ):
+        raise GitCommandError("cleanup receipt does not match the recorded run ownership")
+    patch_path = engine.store.root / FAILURE_PATCH_ARTIFACT
+    if not patch_path.is_file():
+        raise GitCommandError("archived failure patch is missing")
+    patch = patch_path.read_bytes()
+    if hashlib.sha256(patch).hexdigest() != receipt.get("patch_sha256"):
+        raise GitCommandError("archived failure patch hash does not match its receipt")
+    if not repo.verify_patch(receipt["base_commit"], patch):
+        raise GitCommandError("archived failure patch no longer restores its recorded changes")
+    bundle_digest = receipt.get("bundle_sha256")
+    if bundle_digest is not None:
+        bundle_path = engine.store.root / FAILURE_BUNDLE_ARTIFACT
+        if not bundle_path.is_file():
+            raise GitCommandError("archived branch bundle is missing")
+        bundle = bundle_path.read_bytes()
+        if hashlib.sha256(bundle).hexdigest() != bundle_digest:
+            raise GitCommandError("archived branch bundle hash does not match its receipt")
+        with tempfile.TemporaryDirectory() as scratch:
+            check = Path(scratch) / "branch.bundle"
+            check.write_bytes(bundle)
+            output = repo.run_git("bundle", "list-heads", str(check))
+            expected = f"{receipt['branch_head']} refs/heads/{receipt['branch']}"
+            if expected not in output:
+                raise GitCommandError("archived branch bundle has a different commit")
+            repo.run_git("bundle", "verify", str(check))
+
+
+def cleanup_worktree_if_unproductive(
+    engine: Engine, repo: GitRepo, worktree: Path | None = None
+) -> None:
+    """Archive run changes, then remove only the recorded run worktree and branch."""
+    if engine.state not in _UNPRODUCTIVE_TERMINAL_STATES:
         return
-    if GitRepo(worktree).status_paths():
+    manifest = engine.store.read_manifest()
+    recorded = Path(manifest.git.worktree) if manifest.git.worktree else None
+    if recorded is None:
+        engine.store.append_event(
+            {"event": "run_cleanup_blocked", "detail": "run has no recorded worktree ownership"}
+        )
+        return
+    if worktree is not None and worktree.resolve() != recorded.resolve():
         engine.store.append_event(
             {
-                "event": "worktree_cleanup_skipped",
-                "detail": f"{worktree} has uncommitted changes; left in place for manual review",
+                "event": "run_cleanup_blocked",
+                "detail": "requested path differs from recorded worktree",
             }
         )
         return
+    worktree = recorded
     try:
-        remove_worktree(repo, worktree)
-    except GitCommandError as exc:
-        engine.store.append_event({"event": "worktree_cleanup_failed", "detail": str(exc)})
-        return
-    engine.store.append_event({"event": "worktree_removed", "path": str(worktree)})
+        receipt = None
+        if worktree.exists():
+            receipt = _archive_failed_worktree(engine, repo, worktree)
+            _verify_cleanup_receipt(engine, repo, receipt)
+            # Recheck ownership and exact patch bytes immediately before removal.
+            current = GitRepo(worktree)
+            if current.current_branch() != receipt["branch"]:
+                raise GitCommandError("worktree branch changed after archive verification")
+            if current.current_commit() != receipt["branch_head"]:
+                raise GitCommandError("worktree commit changed after archive verification")
+            if current.ignored_paths():
+                raise GitCommandError("ignored files appeared after archive verification")
+            patch = current.change_patch_bytes(receipt["base_commit"])
+            if hashlib.sha256(patch).hexdigest() != receipt["patch_sha256"]:
+                raise GitCommandError("worktree changes changed after archive verification")
+            remove_worktree(repo, worktree)
+            engine.store.append_event({"event": "worktree_removed", "path": str(worktree)})
+        else:
+            receipt_path = engine.store.root / CLEANUP_RECEIPT_ARTIFACT
+            if receipt_path.is_file():
+                receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+            else:
+                event_path = engine.store.root / "events.jsonl"
+                recorded_events = (
+                    [
+                        json.loads(line)
+                        for line in event_path.read_text(encoding="utf-8").splitlines()
+                    ]
+                    if event_path.is_file()
+                    else []
+                )
+                if any(
+                    event.get("event") == "run_bootstrapped" for event in recorded_events
+                ) or not any(event.get("event") == "bootstrap_failed" for event in recorded_events):
+                    raise GitCommandError(
+                        "missing worktree has no archive receipt from a failed bootstrap"
+                    )
+                reservation = next(
+                    (
+                        event
+                        for event in recorded_events
+                        if event.get("event") == "run_branch_reserved"
+                    ),
+                    None,
+                )
+                base = manifest.git.base_commit
+                branch = manifest.git.branch
+                if (
+                    reservation is None
+                    or reservation.get("branch_existed_before") is not False
+                    or reservation.get("worktree_existed_before") is not False
+                    or not base
+                    or not branch
+                ):
+                    raise GitCommandError("missing worktree has no bootstrap ownership receipt")
+                head = repo.branch_head(branch) if repo.branch_exists(branch) else base
+                if head != base:
+                    raise GitCommandError(
+                        "missing worktree has committed changes but no preservation bundle"
+                    )
+                patch = b""
+                if not repo.verify_patch(base, patch):
+                    raise GitCommandError("empty bootstrap patch failed its restoration check")
+                for artifact in (FAILURE_PATCH_ARTIFACT, CHANGE_PATCH_ARTIFACT):
+                    artifact_path = engine.store.root / artifact
+                    if artifact_path.exists():
+                        if artifact_path.read_bytes() != patch:
+                            raise GitCommandError(f"existing artifact {artifact} is not empty")
+                    else:
+                        engine.store.write_bytes_artifact(artifact, patch, immutable=True)
+                receipt = {
+                    "run_id": manifest.run_id,
+                    "base_commit": base,
+                    "branch": branch,
+                    "branch_head": head,
+                    "patch_sha256": hashlib.sha256(patch).hexdigest(),
+                    "bundle_sha256": None,
+                    "patch_artifact": FAILURE_PATCH_ARTIFACT,
+                    "bundle_artifact": None,
+                }
+                if receipt_path.exists():
+                    if json.loads(receipt_path.read_text(encoding="utf-8")) != receipt:
+                        raise GitCommandError(
+                            "existing cleanup receipt differs from bootstrap state"
+                        )
+                else:
+                    engine.store.write_json_artifact(
+                        CLEANUP_RECEIPT_ARTIFACT, receipt, immutable=True
+                    )
+
+        _verify_cleanup_receipt(engine, repo, receipt)
+
+        branch = manifest.git.branch
+        if not branch:
+            raise GitCommandError("run record lacks its owned branch name")
+        if repo.branch_exists(branch):
+            if repo.branch_head(branch) != receipt["branch_head"]:
+                raise GitCommandError("run branch changed after its archive was verified")
+            repo.delete_branch(branch)
+        engine.store.append_event({"event": "run_cleanup_complete", "branch": branch})
+    except (GitCommandError, OSError, ValueError, KeyError, TypeError) as exc:
+        engine.store.append_event({"event": "run_cleanup_blocked", "detail": str(exc)})
 
 
 # Causes where the plan was fine and the code was close: the change is kept so a retry
@@ -334,12 +552,11 @@ def apply_continued_change(
         raise CheckpointError(
             f"checkpoint artifact {CONTINUED_CHANGE_ARTIFACT} changed or is missing"
         )
-    patch_text = patch_bytes.decode("utf-8")
     _run_worktree_stage(
         worktree_repo,
         base_commit,
         fence,
-        lambda: worktree_repo.apply_patch(patch_text),
+        lambda: worktree_repo.apply_patch_bytes(patch_bytes),
     )
     return True
 
@@ -475,6 +692,7 @@ def execute_run(
     worktree_root: Path,
     acceptance_criteria: list[str],
     *,
+    goal_id: str,
     tier_override: Tier | None = None,
     downgrade_reason: str | None = None,
     external_plan: Path | None = None,
@@ -490,6 +708,7 @@ def execute_run(
     """Execute a run; every started run is returned in a terminal state."""
     if not request_text.strip():
         raise ContextContractError("a run requires non-empty request text")
+    goal_id = validate_goal_id(goal_id)
     acceptance_criteria = _normalize_criteria(acceptance_criteria)
     if acceptance_criteria_source not in {"explicit", "request_fallback"}:
         raise ContextContractError(
@@ -500,11 +719,13 @@ def execute_run(
     if retry_of is not None and retry_source is not None:
         if retry_source.run_id != retry_of:
             raise ContextContractError("retry evidence source does not match retry_of")
-        if retry_source.repo_root.resolve() != repo.root.resolve():
+        if retry_source.read_manifest().goal_id != goal_id:
+            raise ContextContractError("retry must inherit the source run's goal ID")
+        if GitRepo(retry_source.repo_root).shared_root() != repo.shared_root():
             raise ContextContractError("retry evidence source belongs to a different repository")
     if (
         reviewed_plan_from is not None
-        and reviewed_plan_from.repo_root.resolve() != repo.root.resolve()
+        and GitRepo(reviewed_plan_from.repo_root).shared_root() != repo.shared_root()
     ):
         raise ContextContractError("reviewed plan source belongs to a different repository")
     reuse_source = reviewed_plan_from or (retry_source if retry_of is not None else None)
@@ -513,7 +734,15 @@ def execute_run(
         validate_plan_review_source(reuse_source)
         source_finding_index = reuse_source.finding_index()
     store, worktree = bootstrap_run(
-        repo, project_config, request_text, Tier.STANDARD, worktree_root
+        repo,
+        project_config,
+        request_text,
+        Tier.STANDARD,
+        worktree_root,
+        goal_id,
+        decision_resolution=(retry_of, retry_resolution_reason)
+        if retry_of is not None and retry_resolution_reason
+        else None,
     )
     if retry_of is not None:
         store.update_manifest(retry_of=retry_of)
@@ -540,9 +769,9 @@ def execute_run(
                 {"event": "retry_resolution_reason", "detail": retry_resolution_reason}
             )
         if continue_patch is not None:
-            store.write_text_artifact(
+            store.write_bytes_artifact(
                 CONTINUED_CHANGE_ARTIFACT,
-                continue_patch.read_text(encoding="utf-8"),
+                continue_patch.read_bytes(),
                 immutable=True,
             )
 
@@ -908,7 +1137,14 @@ def execute_run(
                         if plan_review.outcome is Outcome.BLOCKED
                         else RunState.ESCALATED
                     )
-                    _terminal(engine, target, "plan review: " + str(plan_review.outcome))
+                    _terminal(
+                        engine,
+                        target,
+                        "plan review: " + str(plan_review.outcome),
+                        "plan_review_escalated"
+                        if plan_review.outcome is Outcome.ESCALATE
+                        else "other",
+                    )
                     return _outcome(engine, repo=repo, worktree=worktree)
                 reconciliation_cycles += 1
                 if reconciliation_cycles > MAX_REMEDIATION_CYCLES:
@@ -943,7 +1179,12 @@ def execute_run(
                     if plan_review.outcome is Outcome.BLOCKED
                     else RunState.ESCALATED
                 )
-                _terminal(engine, target, "plan review: " + str(plan_review.outcome))
+                _terminal(
+                    engine,
+                    target,
+                    "plan review: " + str(plan_review.outcome),
+                    "plan_review_escalated" if plan_review.outcome is Outcome.ESCALATE else "other",
+                )
                 return _outcome(engine, repo=repo, worktree=worktree)
             if not reuse_matches:
                 store.approve_plan(version)
@@ -1301,12 +1542,14 @@ def execute_run(
         ContextContractError,
         ReadOnlyRoleUnsupportedError,
     ) as exc:
-        _terminal(
-            engine,
-            RunState.ESCALATED,
-            str(exc),
-            exc.cause if isinstance(exc, RemediationExhausted) else "other",
+        cause = (
+            exc.cause
+            if isinstance(exc, RemediationExhausted)
+            else "scope_violation"
+            if isinstance(exc, ScopeViolation)
+            else "other"
         )
+        _terminal(engine, RunState.ESCALATED, str(exc), cause)
         return _outcome(engine, repo=repo, worktree=worktree)
     except (IllegalTransitionError, UnsupportedTierError, TierDowngradeError) as exc:
         _terminal(engine, RunState.ESCALATED, str(exc))

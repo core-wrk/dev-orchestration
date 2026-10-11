@@ -9,10 +9,10 @@ import pytest
 
 from dev_orchestration.adapters.base import AgentResult
 from dev_orchestration.adapters.usage import UsageObservation
+from dev_orchestration.artifacts.goals import GoalError
 from dev_orchestration.artifacts.store import RunClaimError, RunStore
 from dev_orchestration.domain.enums import RunState
 from dev_orchestration.workflow.recovery import ResumeRefused, resume_blocker, resume_due
-from dev_orchestration.workflow.runner import execute_run
 from dev_orchestration.workflow.scheduler import (
     SchedulerError,
     SchedulerQueue,
@@ -20,6 +20,7 @@ from dev_orchestration.workflow.scheduler import (
     disable_launchd,
     enable_launchd,
 )
+from tests.workflow.run_helpers import execute_run
 from tests.workflow.test_resume import (
     CONFIG,
     CRITERIA,
@@ -44,6 +45,21 @@ def test_concurrent_due_wakeups_invoke_one_continuation(tmp_path):
         scheduler_queue=queue,
     )
     assert first.final_state is RunState.PAUSED_USAGE
+    paused_manifest = RunStore(git.root, first.run_id).read_manifest()
+    assert paused_manifest.goal_attempt == 1
+    assert Path(paused_manifest.git.worktree).exists()
+    blocked_adapter = Scripted()
+    with pytest.raises(GoalError, match="already has active run"):
+        execute_run(
+            git,
+            CONFIG,
+            registry(blocked_adapter),
+            "change app",
+            tmp_path / "wt",
+            CRITERIA,
+            goal_id=paused_manifest.goal_id,
+        )
+    assert blocked_adapter.seen == []
     adapter = Scripted()
     due = datetime.now(UTC) + timedelta(minutes=2)
 
@@ -68,6 +84,10 @@ def test_concurrent_due_wakeups_invoke_one_continuation(tmp_path):
     )
     assert adapter.seen.count("plan_reviewer") == 1
     assert queue.due(due) == []
+    completed_manifest = RunStore(git.root, first.run_id).read_manifest()
+    assert completed_manifest.goal_attempt == 1
+    assert completed_manifest.status is RunState.COMPLETE_LOCAL
+    assert Path(completed_manifest.git.worktree).exists()
 
 
 def test_hosted_wakeup_in_new_process_uses_restored_worktree_path(tmp_path):

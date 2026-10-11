@@ -3,6 +3,7 @@
 import json
 from pathlib import Path
 
+from dev_orchestration.artifacts.store import RunStore
 from dev_orchestration.domain.enums import RunState
 from dev_orchestration.domain.run import RunManifest
 
@@ -113,7 +114,7 @@ def read_events(store_root: Path) -> list[dict]:
 
 
 def list_runs(repo_root: Path) -> list[tuple[str, str]]:
-    runs_dir = repo_root / ".ai" / "runs"
+    runs_dir = RunStore.runs_directory(repo_root)
     if not runs_dir.is_dir():
         return []
     listed: list[tuple[str, str]] = []

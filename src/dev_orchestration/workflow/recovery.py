@@ -183,7 +183,14 @@ def _check_run(
         mode="json"
     ):
         raise ResumeRefused("project configuration changed")
-    if str(store.repo_root.resolve()) != str(Path(manifest.repository).resolve()):
+    try:
+        same_repository = (
+            GitRepo(store.repo_root).shared_root()
+            == GitRepo(Path(manifest.repository)).shared_root()
+        )
+    except GitCommandError:
+        same_repository = False
+    if not same_repository:
         cloud = manifest.cloud_session
         if cloud is None:
             raise ResumeRefused("repository identity changed")
@@ -274,7 +281,7 @@ def _verify_human_approval(store: RunStore) -> dict:
     while ancestor_id and ancestor_id not in allowed_approval_runs:
         allowed_approval_runs.add(ancestor_id)
         ancestor = RunStore(store.repo_root, ancestor_id)
-        if ancestor.root.resolve().parent != (store.repo_root / ".ai" / "runs").resolve():
+        if ancestor.root.resolve().parent != RunStore.runs_directory(store.repo_root).resolve():
             raise ResumeRefused("recovery lineage points outside this repository")
         if not (ancestor.root / "manifest.json").is_file():
             break
@@ -312,6 +319,10 @@ def approve_run(
         raise ResumeRefused(f"run {run_id!r} does not exist")
     with store.claim():
         manifest = store.read_manifest()
+        if not manifest.goal_id:
+            raise ResumeRefused(
+                f"legacy run {run_id} has no goal ID; associate it with `dev-orch goal-associate` first"
+            )
         session = manifest.cloud_session
         if session is None:
             raise ResumeRefused("link the intact cloud session before approving this run")
@@ -424,6 +435,10 @@ def resume_run(
     store = RunStore(repo.root, run_id)
     if not (store.root / "manifest.json").is_file():
         raise ResumeRefused(f"run {run_id!r} does not exist")
+    if not store.read_manifest().goal_id:
+        raise ResumeRefused(
+            f"legacy run {run_id} has no goal ID; associate it with `dev-orch goal-associate` first"
+        )
     if store.read_manifest().checkpoint is None:
         if store.read_manifest().schema_version != "1.0":
             raise ResumeRefused("run initialization has no recovery checkpoint")
@@ -660,7 +675,14 @@ def resume_run(
                             if reviewed.outcome is Outcome.BLOCKED
                             else RunState.ESCALATED
                         )
-                        _terminal(engine, target, f"plan review: {reviewed.outcome}")
+                        _terminal(
+                            engine,
+                            target,
+                            f"plan review: {reviewed.outcome}",
+                            "plan_review_escalated"
+                            if reviewed.outcome is Outcome.ESCALATE
+                            else "other",
+                        )
                         return _outcome(engine, repo=repo, worktree=worktree)
                     cycle += 1
                     if cycle > MAX_REMEDIATION_CYCLES:
@@ -684,7 +706,14 @@ def resume_run(
                             if reviewed.outcome is Outcome.BLOCKED
                             else RunState.ESCALATED
                         )
-                        _terminal(engine, target, f"plan review: {reviewed.outcome}")
+                        _terminal(
+                            engine,
+                            target,
+                            f"plan review: {reviewed.outcome}",
+                            "plan_review_escalated"
+                            if reviewed.outcome is Outcome.ESCALATE
+                            else "other",
+                        )
                         return _outcome(engine, repo=repo, worktree=worktree)
                     store.approve_plan(_latest_plan(store))
                     final_review = _latest(store, "review", "plan-review")
@@ -921,7 +950,14 @@ def resume_run(
                             if reviewed.outcome is Outcome.BLOCKED
                             else RunState.ESCALATED
                         )
-                        _terminal(engine, target, f"implementation review: {reviewed.outcome}")
+                        _terminal(
+                            engine,
+                            target,
+                            f"implementation review: {reviewed.outcome}",
+                            "implementation_review_escalated"
+                            if reviewed.outcome is Outcome.ESCALATE
+                            else "other",
+                        )
                         return _outcome(engine, repo=repo, worktree=worktree)
                     cycle += 1
                     if cycle > MAX_REMEDIATION_CYCLES:

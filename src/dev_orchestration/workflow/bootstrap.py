@@ -3,10 +3,12 @@
 import hashlib
 import json
 import re
+import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 
+from dev_orchestration.artifacts.goals import GoalLedger
 from dev_orchestration.artifacts.store import RunStore, new_run_id, slugify
 from dev_orchestration.config.models import ProjectConfig
 from dev_orchestration.config.resolver import (
@@ -269,6 +271,8 @@ def bootstrap_run(
     request_text: str,
     tier: Tier,
     worktree_root: Path,
+    goal_id: str,
+    decision_resolution: tuple[str, str] | None = None,
 ) -> tuple[RunStore, Path]:
     """Create the durable run record and isolated worktree from a clean base."""
     repo.ensure_clean()
@@ -280,43 +284,66 @@ def bootstrap_run(
             )
 
     slug = slugify(request_text)[:40] or "run"
-    run_id = new_run_id(str(tier), slug)
-    run_root = repo.root / ".ai" / "runs" / run_id
+    run_id = f"{new_run_id(str(tier), slug)}-{secrets.token_hex(4)}"
+    runs_dir = RunStore.runs_directory(repo.root)
+    run_root = runs_dir / run_id
     suffix = 2
     while run_root.exists():
-        run_id = f"{new_run_id(str(tier), slug)}-{suffix}"
-        run_root = repo.root / ".ai" / "runs" / run_id
+        run_id = f"{new_run_id(str(tier), slug)}-{suffix}-{secrets.token_hex(4)}"
+        run_root = runs_dir / run_id
         suffix += 1
     branch = f"{project_config.git.branch_prefix}{run_id}-{slug}"
     worktree = worktree_root / project_config.project.name / run_id
     base_commit = repo.current_commit()
+    if worktree.exists():
+        raise BootstrapIntegrityError(f"refusing to use existing worktree path {worktree}")
+    if repo.branch_exists(branch):
+        raise BootstrapIntegrityError(f"refusing to reuse existing branch {branch}")
     store = RunStore(repo.root, run_id)
-    store.initialize(
-        RunManifest(
-            run_id=run_id,
-            repository=str(repo.root),
-            workflow=str(tier),
-            tier=tier,
-            project_class=project_config.project.project_class,
-            request_text=request_text,
-            created_at=datetime.now(UTC),
-            resolved_config=policy,
-            git=GitBlock(base_commit=base_commit, branch=branch),
+    with GoalLedger(repo.root).reserve(
+        goal_id, decision_resolution=decision_resolution
+    ) as reservation:
+        store.initialize(
+            RunManifest(
+                run_id=run_id,
+                repository=str(repo.root),
+                workflow=str(tier),
+                tier=tier,
+                project_class=project_config.project.project_class,
+                request_text=request_text,
+                created_at=datetime.now(UTC),
+                resolved_config=policy,
+                git=GitBlock(base_commit=base_commit, branch=branch, worktree=str(worktree)),
+                goal_id=reservation.goal_id,
+                goal_attempt=reservation.attempt,
+                goal_generation=reservation.generation,
+            )
         )
-    )
-    try:
-        create_worktree(repo, worktree, branch)
-    except Exception as exc:
-        store.update_manifest(
-            status=RunState.FAILED,
-            completed_at=datetime.now(UTC),
-            terminal_reason=str(exc),
+        store.append_event(
+            {
+                "event": "run_branch_reserved",
+                "branch": branch,
+                "worktree": str(worktree),
+                "base_commit": base_commit,
+                "branch_existed_before": False,
+                "worktree_existed_before": False,
+            }
         )
-        store.append_event({"event": "bootstrap_failed", "detail": str(exc)})
-        raise
-    store.update_manifest(
-        git=GitBlock(base_commit=base_commit, branch=branch, worktree=str(worktree))
-    )
+        try:
+            create_worktree(repo, worktree, branch)
+        except Exception as exc:
+            store.update_manifest(
+                status=RunState.FAILED,
+                completed_at=datetime.now(UTC),
+                terminal_reason=str(exc),
+                terminal_cause="bootstrap_failed",
+            )
+            store.append_event({"event": "bootstrap_failed", "detail": str(exc)})
+            from dev_orchestration.workflow.engine import Engine
+            from dev_orchestration.workflow.runner import cleanup_worktree_if_unproductive
+
+            cleanup_worktree_if_unproductive(Engine(store), repo)
+            raise
     current_commit = repo.current_commit()
     worktree_repo = GitRepo(worktree)
     if current_commit != base_commit:
@@ -329,6 +356,10 @@ def bootstrap_run(
             terminal_reason=reason,
         )
         store.append_event({"event": "bootstrap_failed", "detail": reason})
+        from dev_orchestration.workflow.engine import Engine
+        from dev_orchestration.workflow.runner import cleanup_worktree_if_unproductive
+
+        cleanup_worktree_if_unproductive(Engine(store), repo)
         raise BootstrapIntegrityError(reason)
     if not worktree_repo.is_ancestor(base_commit):
         reason = f"run worktree {worktree} does not descend from recorded base {base_commit}"
@@ -338,6 +369,10 @@ def bootstrap_run(
             terminal_reason=reason,
         )
         store.append_event({"event": "bootstrap_failed", "detail": reason})
+        from dev_orchestration.workflow.engine import Engine
+        from dev_orchestration.workflow.runner import cleanup_worktree_if_unproductive
+
+        cleanup_worktree_if_unproductive(Engine(store), repo)
         raise BootstrapIntegrityError(reason)
     store.append_event({"event": "run_bootstrapped", "run_id": run_id, "branch": branch})
     return store, worktree

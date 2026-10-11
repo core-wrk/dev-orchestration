@@ -82,6 +82,9 @@ class RunManifest(BaseModel):
     terminal_reason: str | None = None
     terminal_cause: str | None = None
     retry_of: str | None = None
+    goal_id: str | None = None
+    goal_attempt: int | None = None
+    goal_generation: int = 0
     checkpoint: str | None = None
     auto_resume: bool = False
     pause: PauseRecord | None = None

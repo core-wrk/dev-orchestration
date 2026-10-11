@@ -58,12 +58,15 @@ ALLOWED_VERBS = frozenset(
     {
         "add",
         "apply",
+        "branch",
+        "bundle",
         "checkout",
         "commit",
         "config",
         "diff",
         "ls-files",
         "rev-parse",
+        "read-tree",
         "status",
         "worktree",
     }
@@ -112,11 +115,13 @@ def reject_disallowed_invocation(args: tuple[str, ...]) -> None:
             "changes. dev-orchestration never modifies uncommitted work; it "
             "uses checkout only to create a branch."
         )
-    if verb == "apply" and args != ("apply", "--binary"):
+    if verb == "apply" and args not in {
+        ("apply", "--binary"),
+        ("apply", "--cached", "--binary"),
+    }:
         raise ProhibitedOperationError(
-            "dev-orchestration uses git apply only as `apply --binary`, to replay a "
-            "saved run change onto a fresh run worktree; it is all-or-nothing and "
-            "never touches the index"
+            "dev-orchestration uses git apply only to replay a saved change or "
+            "verify an archive against a temporary index"
         )
     if verb == "config" and args != ("config", "--get", "remote.origin.url"):
         raise ProhibitedOperationError(

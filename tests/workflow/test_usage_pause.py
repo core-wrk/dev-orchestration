@@ -7,8 +7,8 @@ import pytest
 from dev_orchestration.adapters.base import AgentResult
 from dev_orchestration.adapters.usage import UsageObservation, parse_codex_snapshot, rejection
 from dev_orchestration.domain.enums import RunState
-from dev_orchestration.workflow.runner import execute_run
 from dev_orchestration.workflow.scheduler import SchedulerQueue
+from tests.workflow.run_helpers import execute_run
 from tests.workflow.test_resume import CONFIG, CRITERIA, Scripted, registry, repo
 
 
