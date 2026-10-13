@@ -213,9 +213,9 @@ class GitRepo:
         """Return a binary-safe patch for commits, index changes, and untracked files."""
         with tempfile.TemporaryDirectory() as scratch:
             env = {**os.environ, "GIT_INDEX_FILE": str(Path(scratch) / "index")}
-            # The temporary index starts empty, so `add -A` snapshots the whole tree
-            # and the cached diff against base_ref yields exactly the run's changes.
-            for args in (["add", "-A"],):
+            # Seed from the base tree so unchanged tracked-but-ignored files stay
+            # in the snapshot and cannot appear as false deletions.
+            for args in (["read-tree", base_ref], ["add", "-A"]):
                 guards.reject_disallowed_invocation(tuple(args))
                 step = subprocess.run(
                     ["git", "-C", str(self.root), *args],
@@ -327,6 +327,11 @@ class GitRepo:
     def is_tracked(self, path: str) -> bool:
         """Return whether a path is part of the repository index."""
         return self._path_is_tracked(path)
+
+    def tracked_ignored_paths(self) -> list[str]:
+        """Return tracked files that currently match a Git ignore rule."""
+        output = self.run_git("ls-files", "-c", "-i", "--exclude-standard", "-z", strip=False)
+        return sorted({path for path in output.split("\0") if path})
 
     def ignored_paths(self) -> IgnoredPathInventory:
         """Inventory every currently ignored file and snapshot its contents.

@@ -63,6 +63,31 @@ def test_cleanup_removes_unignored_tool_cache_without_touching_other_files(repo)
     assert outside.read_text() == "keep\n"
 
 
+@pytest.mark.parametrize("path", ["src/__pycache__/kept.pyc", ".coverage"])
+def test_cleanup_preserves_tracked_ignored_cache_files_and_removes_transient_files(repo, path):
+    (repo.root / ".gitignore").write_text("__pycache__/\n.coverage\n")
+    target = repo.root / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("tracked\n")
+    subprocess.run(["git", "-C", str(repo.root), "add", ".gitignore"], check=True)
+    subprocess.run(["git", "-C", str(repo.root), "add", "-f", str(target)], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo.root), "commit", "-q", "-m", "track ignored cache"], check=True
+    )
+    transient = (
+        target.parent / "transient.pyc"
+        if path != ".coverage"
+        else repo.root / "src" / "__pycache__" / "transient.pyc"
+    )
+    transient.parent.mkdir(parents=True, exist_ok=True)
+    transient.write_text("transient\n")
+
+    cleanup_ephemeral_paths(repo.root)
+
+    assert target.read_text() == "tracked\n"
+    assert not transient.exists()
+
+
 @pytest.mark.parametrize("state", ["untracked", "staged", "unstaged"])
 def test_uncommitted_staged_and_untracked_out_of_scope_paths_fail(repo, state):
     base = repo.current_commit()
@@ -83,6 +108,16 @@ def test_enforcement_names_every_offending_file(repo):
     with pytest.raises(ScopeViolation) as error:
         enforce_fence(repo, base, FENCE)
     assert "vendor/lib.py" in str(error.value)
+
+
+def test_ai_changes_still_fail_scope_fence(repo):
+    base = repo.current_commit()
+    config = repo.root / ".ai" / "project.yaml"
+    config.parent.mkdir()
+    config.write_text("changed\n")
+
+    with pytest.raises(ScopeViolation, match=r"\.ai/project\.yaml"):
+        enforce_fence(repo, base, FENCE)
 
 
 def test_ignored_file_modified_outside_the_fence_is_a_violation(repo):

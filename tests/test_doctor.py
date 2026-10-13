@@ -127,6 +127,21 @@ def test_uncommitted_file_fails_repository_clean_with_count_and_instruction(tmp_
     assert "commit or stash" in clean_check.detail.lower()
 
 
+def test_doctor_reports_tracked_files_matching_ignore_rules(tmp_path):
+    _init_repo(tmp_path)
+    (tmp_path / ".gitignore").write_text(".coverage\n")
+    (tmp_path / ".coverage").write_text("tracked coverage\n")
+    _run_git("add", ".gitignore", cwd=tmp_path)
+    _run_git("add", "-f", ".coverage", cwd=tmp_path)
+    _run_git("commit", "-q", "-m", "track ignored coverage", cwd=tmp_path)
+
+    checks = run_checks(tmp_path, codex=FakeAdapter(), claude=FakeAdapter())
+
+    check = _by_name(checks, "tracked files matched by gitignore")
+    assert check.ok is False
+    assert ".coverage" in check.detail
+
+
 def test_unstaged_dotfile_modification_keeps_its_leading_character_in_doctor_detail(tmp_path):
     # `git status --porcelain` renders an unstaged modification as
     # " M path" -- a leading space in the status field. Stripping the

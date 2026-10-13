@@ -1,3 +1,4 @@
+import os
 import subprocess
 
 import pytest
@@ -167,6 +168,45 @@ def test_change_inventory_still_ignores_ignored_files_without_a_stage_snapshot(r
     (repo.root / "dist").mkdir()
     (repo.root / "dist" / "payload.sh").write_text("x\n")
     assert "dist/payload.sh" not in repo.change_inventory(base)
+
+
+def test_change_patch_reproduces_empty_index_false_deletion_and_uses_base_index(repo, tmp_path):
+    (repo.root / ".gitignore").write_text(".coverage\n")
+    (repo.root / ".coverage").write_text("coverage data\n")
+    (repo.root / "src").mkdir()
+    (repo.root / "src" / "edit.py").write_text("before\n")
+    (repo.root / "src" / "delete.py").write_text("remove me\n")
+    subprocess.run(["git", "-C", str(repo.root), "add", ".gitignore", "src"], check=True)
+    subprocess.run(["git", "-C", str(repo.root), "add", "-f", ".coverage"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo.root), "commit", "-q", "-m", "tracked ignored file"], check=True
+    )
+    base = repo.current_commit()
+
+    # The old empty-index sequence falsely reports the unchanged ignored file as deleted.
+    old_env = {**os.environ, "GIT_INDEX_FILE": str(tmp_path / "old-index")}
+    subprocess.run(
+        ["git", "-C", str(repo.root), "add", "-A"], env=old_env, check=True, capture_output=True
+    )
+    old_patch = subprocess.run(
+        ["git", "-C", str(repo.root), "diff", "--cached", "--binary", base],
+        env=old_env,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert "diff --git a/.coverage b/.coverage" in old_patch
+    assert "deleted file mode" in old_patch
+
+    (repo.root / "src" / "edit.py").write_text("after\n")
+    (repo.root / "src" / "delete.py").unlink()
+
+    patch = repo.change_patch_bytes(base).decode()
+
+    assert "diff --git a/.coverage b/.coverage" not in patch
+    assert "diff --git a/src/edit.py b/src/edit.py" in patch
+    assert "diff --git a/src/delete.py b/src/delete.py" in patch
+    assert "deleted file mode" in patch
 
 
 def test_ignored_delta_detects_overwrite_delete_and_type_change(repo):

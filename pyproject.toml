@@ -20,6 +20,7 @@ packages = ["src/dev_orchestration"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["src"]
 markers = ["live: hits a real provider CLI; skipped by default"]
 addopts = "-m 'not live'"
 

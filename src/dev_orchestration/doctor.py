@@ -90,6 +90,19 @@ def _repository_checks(cwd: Path) -> list[Check]:
 
     checks = [Check("git repository", True, str(repo.root))]
 
+    tracked_ignored = repo.tracked_ignored_paths()
+    if tracked_ignored:
+        preview = ", ".join(tracked_ignored[:3]) + ("..." if len(tracked_ignored) > 3 else "")
+        checks.append(
+            Check(
+                "tracked files matched by gitignore",
+                False,
+                f"{len(tracked_ignored)} path(s): {preview}. Remove ignore rules or untrack these files.",
+            )
+        )
+    else:
+        checks.append(Check("tracked files matched by gitignore", True))
+
     try:
         repo.ensure_clean()
         checks.append(Check("repository clean", True))

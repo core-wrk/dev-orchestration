@@ -1,7 +1,6 @@
 """Enforce the scope fence against every Git change state."""
 
 import os
-import shutil
 from pathlib import Path, PurePosixPath
 
 from dev_orchestration.git.repo import GitRepo
@@ -36,6 +35,7 @@ def _is_ephemeral_path(path: str) -> bool:
 
 def cleanup_ephemeral_paths(root: Path) -> None:
     """Remove only known reproducible tool caches from an isolated worktree."""
+    tracked_paths = set(GitRepo(root).run_git("ls-files", "-z", strip=False).split("\0"))
     for current, directories, files in os.walk(root, topdown=True, followlinks=False):
         current_path = Path(current)
         for name in list(directories):
@@ -44,12 +44,35 @@ def cleanup_ephemeral_paths(root: Path) -> None:
             target = current_path / name
             directories.remove(name)
             if target.is_symlink():
-                target.unlink()
+                relative = target.relative_to(root).as_posix()
+                if relative not in tracked_paths:
+                    target.unlink()
             else:
-                shutil.rmtree(target)
+                for cache_root, cache_directories, cache_files in os.walk(
+                    target, topdown=False, followlinks=False
+                ):
+                    cache_path = Path(cache_root)
+                    for filename in cache_files:
+                        child = cache_path / filename
+                        relative = child.relative_to(root).as_posix()
+                        if relative not in tracked_paths:
+                            child.unlink()
+                    for dirname in cache_directories:
+                        child = cache_path / dirname
+                        relative = child.relative_to(root).as_posix()
+                        if child.is_symlink():
+                            if relative not in tracked_paths:
+                                child.unlink()
+                        elif not any(child.iterdir()):
+                            child.rmdir()
+                if not any(target.iterdir()):
+                    target.rmdir()
         for name in files:
             if name == ".coverage":
-                (current_path / name).unlink()
+                target = current_path / name
+                relative = target.relative_to(root).as_posix()
+                if relative not in tracked_paths:
+                    target.unlink()
 
 
 def check_diff_against_fence(repo: GitRepo, base_ref: str, fence: ScopeFence) -> list[str]:
