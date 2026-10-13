@@ -169,6 +169,22 @@ def test_standard_run_reaches_complete_local_and_persists_final_commit(tmp_path)
     assert GitRepo(tmp_path / "wt" / "demo" / outcome.run_id).is_ancestor(base)
 
 
+def test_missing_required_validation_dependency_fails_before_verifier(tmp_path):
+    git = repo(tmp_path)
+    data = CONFIG.model_dump(mode="json")
+    data["validation_links"] = [".venv", "node_modules"]
+    data["required_validation_links"] = ["node_modules"]
+    config = ProjectConfig.model_validate(data)
+    adapter = Scripted(script())
+    outcome = execute_run(git, config, registry(adapter), "add a flag", tmp_path / "wt", CRITERIA)
+    manifest = RunManifest.model_validate_json(
+        (outcome.store_root / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert outcome.final_state is RunState.FAILED
+    assert manifest.terminal_cause == "environment"
+    assert "verifier" not in adapter.seen
+
+
 def test_substantial_run_reaches_complete_local_when_approval_is_not_required(tmp_path):
     git = repo(tmp_path)
     config = ProjectConfig.model_validate(

@@ -1,5 +1,6 @@
 """Run configured validation independently of provider narration."""
 
+import os
 import subprocess
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -13,11 +14,16 @@ from dev_orchestration.domain.enums import Tier
 TAIL_CHARS = 4000
 
 
+class ValidationEnvironmentError(RuntimeError):
+    """A required validation dependency is unavailable in the worktree."""
+
+
 @contextmanager
 def validation_environment(
     base_root: Path | None,
     worktree_root: Path,
     link_paths: tuple[str, ...] = (".venv",),
+    required_paths: tuple[str, ...] = (),
 ) -> Iterator[None]:
     """Expose the base checkout's ignored dependency directories temporarily.
 
@@ -30,18 +36,34 @@ def validation_environment(
     its own set (e.g. ``node_modules``, ``functions/node_modules``) via
     ``ProjectConfig.validation_links``.
     """
-    if base_root is None:
-        yield
-        return
     linked: list[tuple[Path, Path]] = []
-    for relative in link_paths:
-        source = (base_root / relative).resolve()
-        target = worktree_root / relative
-        if source.is_dir() and not target.exists() and not target.is_symlink():
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.symlink_to(source, target_is_directory=True)
-            linked.append((target, source))
     try:
+        for relative in link_paths:
+            target = worktree_root / relative
+            source = (base_root / relative).resolve() if base_root is not None else None
+            if (
+                source is not None
+                and source.is_dir()
+                and not target.exists()
+                and not target.is_symlink()
+            ):
+                try:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.symlink_to(source, target_is_directory=True)
+                except OSError as exc:
+                    if relative not in required_paths:
+                        raise
+                    raise ValidationEnvironmentError(
+                        f"required validation directory {relative!r} could not be linked: {exc}"
+                    ) from exc
+                else:
+                    linked.append((target, source))
+        for relative in required_paths:
+            target = worktree_root / relative
+            if not target.is_dir() or not os.access(target, os.R_OK | os.X_OK):
+                raise ValidationEnvironmentError(
+                    f"required validation directory {relative!r} is missing or inaccessible"
+                )
         yield
     finally:
         for target, source in linked:

@@ -70,7 +70,13 @@ from dev_orchestration.workflow.stages import (
     verify,
 )
 from dev_orchestration.workflow.tiers import specification_minimum_tier
-from dev_orchestration.workflow.validation import ValidationOutcome, all_passed, run_validations
+from dev_orchestration.workflow.validation import (
+    ValidationEnvironmentError,
+    ValidationOutcome,
+    all_passed,
+    run_validations,
+    validation_environment,
+)
 
 
 class ResumeRefused(RuntimeError):
@@ -837,6 +843,7 @@ def resume_run(
                         ),
                         repo.root,
                         tuple(project_config.validation_links),
+                        tuple(project_config.required_validation_links),
                     )
                     artifact = _save_validation(store, outcomes, cycle)
                     if not all_passed(outcomes):
@@ -982,6 +989,13 @@ def resume_run(
                     checkpoint(stage, [f"execution/remediation-v{cycle}.json"], cycle)
                 elif stage == "verifier":
                     store.update_manifest(status=RunState.FINAL_VERIFICATION)
+                    with validation_environment(
+                        repo.root,
+                        worktree,
+                        tuple(project_config.validation_links),
+                        tuple(project_config.required_validation_links),
+                    ):
+                        pass
                     outcomes = _validation(store, cycle)
                     review_paths = list(
                         (store.root / "review").glob("implementation-review-v*.json")
@@ -1132,6 +1146,9 @@ def resume_run(
             if store.read_manifest().restart_mode is None:
                 raise
             _terminal(engine, RunState.ESCALATED, str(exc), "restart_remediation_exhausted")
+            return _outcome(engine, repo=repo, worktree=worktree)
+        except ValidationEnvironmentError as exc:
+            _terminal(engine, RunState.FAILED, str(exc), "environment")
             return _outcome(engine, repo=repo, worktree=worktree)
         except (ContextContractError, CheckpointError, ResumeRefused) as exc:
             restart_mode = store.read_manifest().restart_mode

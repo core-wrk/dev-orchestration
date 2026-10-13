@@ -6,6 +6,7 @@ from pydantic import ValidationError
 from dev_orchestration.config.models import ProjectConfig, ValidationCommand
 from dev_orchestration.domain.enums import Tier
 from dev_orchestration.workflow.validation import (
+    ValidationEnvironmentError,
     ValidationOutcome,
     all_passed,
     run_validations,
@@ -123,3 +124,56 @@ def test_validation_environment_skips_paths_missing_from_base(tmp_path):
 
     with validation_environment(base, worktree, ("node_modules",)):
         assert not (worktree / "node_modules").exists()
+
+
+def test_required_missing_broken_and_obstructed_targets_fail(tmp_path):
+    base = tmp_path / "base"
+    worktree = tmp_path / "worktree"
+    base.mkdir()
+    worktree.mkdir()
+    with (
+        pytest.raises(ValidationEnvironmentError),
+        validation_environment(base, worktree, ("node_modules",), ("node_modules",)),
+    ):
+        pass
+
+    (base / "node_modules").symlink_to(base / "missing", target_is_directory=True)
+    with (
+        pytest.raises(ValidationEnvironmentError),
+        validation_environment(base, worktree, ("node_modules",), ("node_modules",)),
+    ):
+        pass
+    (base / "node_modules").unlink()
+
+    (base / "node_modules").mkdir()
+    (worktree / "node_modules").write_text("obstructed")
+    with (
+        pytest.raises(ValidationEnvironmentError),
+        validation_environment(base, worktree, ("node_modules",), ("node_modules",)),
+    ):
+        pass
+
+
+def test_required_nested_link_and_interruption_cleanup(tmp_path):
+    base = tmp_path / "base"
+    worktree = tmp_path / "worktree"
+    (base / "functions" / "node_modules").mkdir(parents=True)
+    worktree.mkdir()
+    with (
+        pytest.raises(KeyboardInterrupt),
+        validation_environment(
+            base, worktree, ("functions/node_modules",), ("functions/node_modules",)
+        ),
+    ):
+        assert (worktree / "functions" / "node_modules").is_dir()
+        raise KeyboardInterrupt
+    assert not (worktree / "functions" / "node_modules").exists()
+
+
+def test_optional_missing_venv_does_not_block_node_validation_environment(tmp_path):
+    base = tmp_path / "base"
+    worktree = tmp_path / "worktree"
+    base.mkdir()
+    worktree.mkdir()
+    with validation_environment(base, worktree):
+        assert not (worktree / ".venv").exists()

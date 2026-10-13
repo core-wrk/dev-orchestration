@@ -2,7 +2,7 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from dev_orchestration.domain.enums import ProjectClass, Tier
 
@@ -100,11 +100,22 @@ class ProjectConfig(BaseModel):
     scope: Scope = Field(default_factory=Scope)
     validation: dict[str, ValidationCommand] = Field(default_factory=dict)
     validation_links: list[str] = Field(default_factory=lambda: [".venv"])
+    required_validation_links: list[str] = Field(default_factory=list)
     git: GitPolicy = Field(default_factory=GitPolicy)
     context: ContextPolicy = Field(default_factory=ContextPolicy)
     approval: ApprovalPolicy = Field(default_factory=ApprovalPolicy)
     roles: dict[str, "RoleConfig"] = Field(default_factory=dict)
     protected: dict[str, object] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def required_links_are_linked(self):
+        missing = set(self.required_validation_links) - set(self.validation_links)
+        if missing:
+            raise ValueError(
+                "required_validation_links must also appear in validation_links: "
+                + ", ".join(sorted(missing))
+            )
+        return self
 
 
 class RoleConfig(BaseModel):

@@ -1060,3 +1060,49 @@ def test_pause_after_validation_repair_revalidates_without_rerunning_worker(tmp_
     assert "implementation_worker" not in resumed_adapter.seen
     assert resumed_adapter.seen == ["implementation_reviewer", "verifier"]
     assert (store.root / "execution/validation-v2.json").is_file()
+
+
+def test_resumed_run_missing_required_dependency_fails_before_verifier(tmp_path, monkeypatch):
+    import dev_orchestration.workflow.runner as runner_module
+
+    git = repo(tmp_path)
+    config_data = CONFIG.model_dump(mode="json")
+    config_data["validation_links"] = [".venv", "node_modules"]
+    config_data["required_validation_links"] = ["node_modules"]
+    config = ProjectConfig.model_validate(config_data)
+    actual_record_stage = runner_module.record_stage
+
+    def crash_after_validation_checkpoint(*args, **kwargs):
+        result = actual_record_stage(*args, **kwargs)
+        if kwargs.get("next_stage") == "validation":
+            raise SystemExit(9)
+        return result
+
+    first_adapter = Scripted()
+    monkeypatch.setattr(runner_module, "record_stage", crash_after_validation_checkpoint)
+    with pytest.raises(SystemExit):
+        execute_run(
+            git,
+            config,
+            registry(first_adapter),
+            "change app",
+            tmp_path / "wt",
+            CRITERIA,
+        )
+    run_dirs = [
+        path
+        for path in (git.root / ".ai/runs").iterdir()
+        if path.is_dir() and path.name != ".goals"
+    ]
+    assert len(run_dirs) == 1
+    run_id = run_dirs[0].name
+    monkeypatch.setattr(runner_module, "record_stage", actual_record_stage)
+
+    resumed_adapter = Scripted()
+    resumed = resume_run(git, config, registry(resumed_adapter), run_id)
+    manifest = RunManifest.model_validate_json(
+        (resumed.store_root / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert resumed.final_state is RunState.FAILED
+    assert manifest.terminal_cause == "environment"
+    assert "verifier" not in resumed_adapter.seen

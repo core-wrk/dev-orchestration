@@ -122,9 +122,15 @@ repo, run_id, checkout, queue = sys.argv[1:]
 outcome = resume_due(GitRepo(Path(repo)), CONFIG, registry(Scripted()), run_id, now=datetime.now(UTC) + timedelta(minutes=2), restored_worktree=Path(checkout), scheduler_queue=SchedulerQueue(Path(queue)))
 print(outcome.final_state)
 """
+    source_root = Path(__file__).resolve().parents[2]
+    child_env = os.environ.copy()
+    child_env["PYTHONPATH"] = os.pathsep.join(
+        [str(source_root / "src"), str(source_root), child_env.get("PYTHONPATH", "")]
+    )
     result = subprocess.run(
         [sys.executable, "-c", script, str(git.root), first.run_id, str(restored), str(queue_path)],
-        cwd=Path(__file__).resolve().parents[2],
+        cwd=source_root,
+        env=child_env,
         capture_output=True,
         text=True,
         check=False,

@@ -83,6 +83,7 @@ from dev_orchestration.workflow.tiers import (
     stages_for,
 )
 from dev_orchestration.workflow.validation import (
+    ValidationEnvironmentError,
     ValidationOutcome,
     all_passed,
     run_validations,
@@ -671,11 +672,14 @@ def _run_validation_stage(
     action,
     validation_root: Path | None = None,
     link_paths: tuple[str, ...] = (".venv",),
+    required_paths: tuple[str, ...] = (),
 ):
     """Run validation while ensuring its ignored caches do not become residue."""
     ignored_before = worktree_repo.ignored_paths()
     try:
-        with validation_environment(validation_root, worktree_repo.root, link_paths):
+        with validation_environment(
+            validation_root, worktree_repo.root, link_paths, required_paths
+        ):
             result = action()
         enforce_fence(worktree_repo, base_commit, fence)
         return result
@@ -824,6 +828,7 @@ def execute_run(
                 lambda: run_validations(project_config.validation, effective_tier, worktree),
                 repo.root,
                 tuple(project_config.validation_links),
+                tuple(project_config.required_validation_links),
             )
             artifact = _save_validation(store, repaired, cycle)
             receipt(next_stage, [artifact], cycle)
@@ -1310,6 +1315,7 @@ def execute_run(
             lambda: run_validations(project_config.validation, effective_tier, worktree),
             repo.root,
             tuple(project_config.validation_links),
+            tuple(project_config.required_validation_links),
         )
         review_next = (
             "implementation_reviewer"
@@ -1406,6 +1412,7 @@ def execute_run(
                 lambda: run_validations(project_config.validation, effective_tier, worktree),
                 repo.root,
                 tuple(project_config.validation_links),
+                tuple(project_config.required_validation_links),
             )
             _save_validation(store, outcomes, cycle)
             outcomes, repair_failed = repair_failed_validation(
@@ -1464,6 +1471,13 @@ def execute_run(
             return _outcome(engine, repo=repo, worktree=worktree)
 
         engine.transition(RunState.FINAL_VERIFICATION)
+        with validation_environment(
+            repo.root,
+            worktree,
+            tuple(project_config.validation_links),
+            tuple(project_config.required_validation_links),
+        ):
+            pass
         verification = verify(
             registry,
             request_text,
@@ -1607,6 +1621,9 @@ def execute_run(
                 ),
             )
             engine.transition(RunState.PAUSED_INTERRUPTED)
+        return _outcome(engine, repo=repo, worktree=worktree)
+    except ValidationEnvironmentError as exc:
+        _terminal(engine, RunState.FAILED, str(exc), "environment")
         return _outcome(engine, repo=repo, worktree=worktree)
     except (OSError, subprocess.SubprocessError) as exc:
         _terminal(engine, RunState.ESCALATED, f"provider invocation failed: {exc}")

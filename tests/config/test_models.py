@@ -39,6 +39,19 @@ def test_safe_command_is_accepted():
     assert cmd.command == "npm run build"
 
 
+def test_required_validation_links_default_empty_and_must_be_linked():
+    config = ProjectConfig.model_validate({"project": {"name": "x", "class": "internal_utility"}})
+    assert config.required_validation_links == []
+    with pytest.raises(ValidationError, match="must also appear in validation_links"):
+        ProjectConfig.model_validate(
+            {
+                "project": {"name": "x", "class": "internal_utility"},
+                "validation_links": [".venv"],
+                "required_validation_links": ["node_modules"],
+            }
+        )
+
+
 def test_role_timeout_must_be_positive_and_is_optional():
     from dev_orchestration.config.models import RoleConfig
 
