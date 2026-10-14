@@ -1176,6 +1176,7 @@ def execute_run(
                         invariants,
                         runtime.references,
                         store,
+                        scope_fence=scope_context,
                     )
             if not reuse_matches:
                 engine.transition(RunState.PLANNED)

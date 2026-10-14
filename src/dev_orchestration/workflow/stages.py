@@ -107,10 +107,16 @@ def plan(
     invariants: list[ContextRef],
     references: list[ContextRef],
     store: RunStore,
+    scope_fence: ContextRef | None = None,
 ) -> Path:
     packet = assemble(
         "planning",
-        [ContextRef(label=Category.BRIEF, path=None, content=brief), *invariants, *references],
+        [
+            ContextRef(label=Category.BRIEF, path=None, content=brief),
+            *invariants,
+            *references,
+            *([scope_fence] if scope_fence is not None else []),
+        ],
     )
     request = _request(registry, "planner", store, packet, store.repo_root)
     result = registry.adapter_for("planner").run(request)
@@ -463,6 +469,15 @@ def verify(
     store: RunStore,
     worktree: Path | None = None,
 ) -> Verification:
+    previous = [
+        int(path.stem.rsplit("-v", 1)[1])
+        for path in store.root.glob("verification/current-state-diff-v*.patch")
+        if path.stem.rsplit("-v", 1)[-1].isdigit()
+    ]
+    version = max(previous, default=0) + 1
+    diff_path = store.write_text_artifact(
+        f"verification/current-state-diff-v{version}.patch", current_state, immutable=True
+    )
     packet = assemble(
         "final_verification",
         [
@@ -473,7 +488,14 @@ def verify(
                 path=None,
                 content="\n".join(criteria),
             ),
-            ContextRef(label=Category.CURRENT_STATE, path=None, content=current_state),
+            ContextRef(
+                label=Category.CURRENT_STATE,
+                path=str(diff_path),
+                content=(
+                    f"Complete current-state diff (also provided inline): {diff_path}\n\n"
+                    f"{current_state}"
+                ),
+            ),
             ContextRef(
                 label=Category.VALIDATION_EVIDENCE,
                 path=None,

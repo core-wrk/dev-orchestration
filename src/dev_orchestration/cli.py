@@ -54,6 +54,7 @@ from dev_orchestration.workflow.reporting import (
     describe_status,
     list_runs,
     read_events,
+    read_finding_summaries,
     render_token_usage,
     summarize_token_usage,
 )
@@ -208,6 +209,23 @@ def _report_plan_review_reuse(outcome) -> None:
             typer.echo(f"Plan review will run: {event['reason']}.", err=True)
 
 
+def _report_outcome(outcome) -> None:
+    typer.echo(f"{outcome.run_id}: {outcome.final_state}")
+    if outcome.reason:
+        typer.echo(outcome.reason, err=True)
+    if outcome.final_state is RunState.COMPLETE_LOCAL:
+        return
+
+    findings = read_finding_summaries(outcome.store_root)
+    if findings is None:
+        typer.echo("Findings: unavailable (no readable saved review summary)", err=True)
+    elif findings:
+        for finding_id, summary in findings:
+            typer.echo(f"Finding {finding_id}: {summary}", err=True)
+    else:
+        typer.echo("Findings: none in the latest saved reviews", err=True)
+
+
 @app.command()
 def run(
     request: str = typer.Argument(..., help="What you want done"),
@@ -292,9 +310,7 @@ def run(
     except EXPECTED_ERRORS as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(1) from exc
-    typer.echo(f"{outcome.run_id}: {outcome.final_state}")
-    if outcome.reason:
-        typer.echo(outcome.reason, err=True)
+    _report_outcome(outcome)
     if outcome.final_state is not RunState.COMPLETE_LOCAL:
         raise typer.Exit(1)
 
@@ -364,9 +380,7 @@ def resume(
     except EXPECTED_ERRORS as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(1) from exc
-    typer.echo(f"{outcome.run_id}: {outcome.final_state}")
-    if outcome.reason:
-        typer.echo(outcome.reason, err=True)
+    _report_outcome(outcome)
     if outcome.final_state is not RunState.COMPLETE_LOCAL:
         raise typer.Exit(1)
 
@@ -438,6 +452,8 @@ def status(run_id: str | None = typer.Argument(None, help="Run id to inspect")) 
                 store.latest_checkpoint(),
                 blocker,
                 restart_info,
+                read_finding_summaries(store.root),
+                store.active_provider_path.is_file(),
             )
         )
     except EXPECTED_ERRORS + (NoSuchRunError,) as exc:
@@ -453,7 +469,14 @@ def restart(
         "--from",
         help="Recovery stage: validation, review, verification, or remediation",
     ),
-    reason: str = typer.Option(..., "--reason", help="Why this recovery attempt is being started"),
+    reason: str = typer.Option(
+        ...,
+        "--reason",
+        help=(
+            "Audit note for why restart is requested; not passed as repair instructions. "
+            "A remediation worker runs only after failed validation or a fresh blocking review finding."
+        ),
+    ),
     patch: Path | None = typer.Option(  # noqa: B008
         None, "--patch", help="Replacement patch against the saved base"
     ),
@@ -476,9 +499,7 @@ def restart(
     except EXPECTED_ERRORS + (NoSuchRunError,) as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(1) from exc
-    typer.echo(f"{outcome.run_id}: {outcome.final_state}")
-    if outcome.reason:
-        typer.echo(outcome.reason, err=True)
+    _report_outcome(outcome)
     if outcome.final_state is not RunState.COMPLETE_LOCAL:
         raise typer.Exit(1)
 
@@ -603,9 +624,7 @@ def retry(
     except EXPECTED_ERRORS + (NoSuchRunError,) as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(1) from exc
-    typer.echo(f"{outcome.run_id}: {outcome.final_state}")
-    if outcome.reason:
-        typer.echo(outcome.reason, err=True)
+    _report_outcome(outcome)
     if outcome.final_state is not RunState.COMPLETE_LOCAL:
         raise typer.Exit(1)
 

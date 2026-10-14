@@ -36,6 +36,8 @@ def describe_status(
     checkpoint: dict | None = None,
     resume_blocker: str | None = None,
     restart_info: str | None = None,
+    finding_summaries: list[tuple[str, str]] | None = None,
+    active_provider_recorded: bool | None = None,
 ) -> str:
     lines = [
         f"Run:    {manifest.run_id}",
@@ -49,6 +51,24 @@ def describe_status(
         reason = manifest.failure_reason or manifest.terminal_reason
         if reason:
             lines.append(f"Failure reason: {reason}")
+    if manifest.status in {RunState.BLOCKED, RunState.FAILED, RunState.ESCALATED}:
+        if finding_summaries is None:
+            lines.append("Findings: unavailable (no readable saved review summary)")
+        elif finding_summaries:
+            lines.extend(
+                f"Finding {finding_id}: {summary}" for finding_id, summary in finding_summaries
+            )
+        else:
+            lines.append("Findings: none in the latest saved reviews")
+    next_action = NEXT_ACTION[manifest.status]
+    if manifest.status is RunState.CREATED:
+        process_note = (
+            "record exists; liveness was not checked"
+            if active_provider_recorded
+            else "unknown (no active provider record)"
+        )
+        lines.append(f"Process liveness: {process_note}")
+        next_action = "inspect events and checkpoints; resume this run if work began"
     if checkpoint is not None:
         lines.append(f"Next role: {checkpoint.get('next_stage', 'unknown')}")
     if manifest.pause is not None:
@@ -107,8 +127,39 @@ def describe_status(
         last = events[-1]
         detail = last.get("detail") or last.get("outcome") or ""
         lines.append(f"Last:   {last.get('event', 'unknown')} {detail}".rstrip())
-    lines.append(f"Next:   {NEXT_ACTION[manifest.status]}")
+    lines.append(f"Next:   {next_action}")
     return "\n".join(lines)
+
+
+def read_finding_summaries(store_root: Path) -> list[tuple[str, str]] | None:
+    """Read the latest saved plan and implementation findings for one run."""
+    paths = []
+    for prefix in ("plan-review", "implementation-review"):
+        candidates = []
+        for path in (store_root / "review").glob(f"{prefix}-v*.json"):
+            version = path.stem.rsplit("-v", 1)[-1]
+            if version.isdigit():
+                candidates.append((int(version), path))
+        if candidates:
+            paths.append(max(candidates, key=lambda item: item[0])[1])
+    if not paths:
+        return None
+
+    summaries = []
+    try:
+        for path in paths:
+            result = json.loads(path.read_text(encoding="utf-8"))
+            findings = result.get("findings")
+            if not isinstance(findings, list):
+                return None
+            for finding in findings:
+                finding_id, summary = finding.get("id"), finding.get("summary")
+                if not isinstance(finding_id, str) or not isinstance(summary, str):
+                    return None
+                summaries.append((finding_id, summary))
+    except (OSError, ValueError, AttributeError):
+        return None
+    return summaries
 
 
 def read_events(store_root: Path) -> list[dict]:

@@ -4,8 +4,29 @@ Return a Verification with exactly one PASS, FAIL, or UNKNOWN verdict for every
 supplied acceptance criterion. Use only the supplied current state and evidence.
 Do not modify the worktree and do not invent evidence.
 
-Use outcome_explanation to explain any outcome other than PASS. Each explanation
-must name a supplied finding ID and give a concise note. A non-PASS outcome may
-describe only supplied minor findings when every acceptance criterion passes;
-otherwise report the actual FAIL, BLOCKED, or ESCALATE outcome as appropriate.
-Keep unresolved_finding_ids aligned with the finding IDs in outcome_explanation.
+The current-state diff is also saved at the absolute path shown in the supplied
+current-state section. If inline content is incomplete or truncated, use the
+existing read-only tools to inspect that full artifact before returning UNKNOWN.
+Do not treat a diff summary or a partial excerpt as the complete change.
+
+Treat the supplied acceptance criteria as authoritative. Changes to tests,
+documentation, or an evaluation plan do not revise or narrow those criteria.
+Judge path and behavior restrictions against the relevant full diff: exporting
+a function does not make changes to its production callers export-only, and a
+helper test does not prove behavior of a command-line program. When the supplied
+contract names an acceptance document, inspect its changes and identify them in
+the evidence for the relevant acceptance criterion. Do not report an informational
+document edit as an unresolved finding. If a changed acceptance document conflicts
+with the supplied criteria, mark the affected criterion FAIL and describe the
+conflict in its evidence; if the full change or its effect cannot be assessed,
+mark it UNKNOWN. Keep the supplied criteria unchanged.
+
+Use outcome_explanation only for notes about supplied reviewer findings. Each
+explanation must name a supplied finding ID and give a concise note. When a
+criterion is FAIL or UNKNOWN for a reason that is not a supplied finding, explain
+that result in the criterion's evidence; do not invent a finding ID or add an
+outcome_explanation entry for it. A non-PASS outcome may describe only supplied
+minor findings when every acceptance criterion passes; otherwise report the
+actual FAIL, BLOCKED, or ESCALATE outcome as appropriate. Keep
+unresolved_finding_ids aligned with the supplied finding IDs in
+outcome_explanation.

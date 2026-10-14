@@ -663,7 +663,12 @@ def resume_run(
                         )
                     else:
                         version = plan(
-                            registry, request_text, invariants, runtime.references, store
+                            registry,
+                            request_text,
+                            invariants,
+                            runtime.references,
+                            store,
+                            scope_fence=scope_context,
                         )
                     store.update_manifest(status=RunState.PLANNED)
                     checkpoint("plan_reviewer", [f"planning/{version.name}"])

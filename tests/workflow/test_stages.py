@@ -247,6 +247,78 @@ def test_verification_passes_every_criterion_to_the_model(store):
     assert Category.ACCEPTANCE_CRITERIA in adapter.requests[0].context.labels()
 
 
+def test_verification_saves_a_full_immutable_diff_for_each_invocation(store, tmp_path):
+    criteria = ["the last marker is retained"]
+    result_payload = {
+        "outcome": "PASS",
+        "criteria": criteria,
+        "verdicts": [{"criterion": criteria[0], "verdict": "PASS", "evidence": "complete diff"}],
+        "unresolved_finding_ids": [],
+    }
+    adapter = Scripted([result_payload, result_payload])
+    state = "ordinary change\n" * 20_000 + "DECISIVE_CHANGE_AT_END\n"
+    verifier = registry(adapter, "verifier")
+
+    verify(verifier, "req", "# plan", criteria, state, "unit: exit 0", [], store)
+    verify(verifier, "req", "# plan", criteria, state, "unit: exit 0", [], store)
+
+    artifacts = sorted((store.root / "verification").glob("current-state-diff-v*.patch"))
+    assert len(artifacts) == 2
+    assert all(path.read_text() == state for path in artifacts)
+    assert all("DECISIVE_CHANGE_AT_END" in path.read_text() for path in artifacts)
+    current_state_refs = [
+        next(item for item in request.context.items if item.label == Category.CURRENT_STATE)
+        for request in adapter.requests
+    ]
+    assert {item.path for item in current_state_refs} == {str(path) for path in artifacts}
+
+
+def test_verification_keeps_supplied_criteria_authoritative_when_diff_edits_a_done_section(store):
+    criteria = ["The approved evaluation accepts only export-only production changes."]
+    payload = {
+        "outcome": "PASS",
+        "criteria": criteria,
+        "verdicts": [{"criterion": criteria[0], "verdict": "PASS", "evidence": "reviewed"}],
+        "unresolved_finding_ids": [],
+    }
+    adapter = Scripted([payload])
+    current_state = (
+        "--- a/docs/evaluation-plan.md\n"
+        "+++ b/docs/evaluation-plan.md\n"
+        "-Only export-only production changes are allowed.\n"
+        "+Production call sites may now be refactored.\n"
+    )
+
+    verify(
+        registry(adapter, "verifier"),
+        "Keep the contract in docs/evaluation-plan.md and satisfy the approved criteria.",
+        "# approved contract",
+        criteria,
+        current_state,
+        "unit: exit 0",
+        [],
+        store,
+    )
+
+    request = adapter.requests[0]
+    criteria_ref = next(
+        item for item in request.context.items if item.label == Category.ACCEPTANCE_CRITERIA
+    )
+    state_ref = next(item for item in request.context.items if item.label == Category.CURRENT_STATE)
+    assert criteria_ref.content == criteria[0]
+    assert "Production call sites may now be refactored." in state_ref.content
+    assert "Treat the supplied acceptance criteria as authoritative" in request.prompt
+    assert "identify them in the evidence for the relevant acceptance criterion" in " ".join(
+        request.prompt.split()
+    )
+    assert "mark the affected criterion FAIL" in request.prompt
+    assert "mark it UNKNOWN" in request.prompt
+    assert (
+        "Use outcome_explanation only for notes about supplied reviewer findings" in request.prompt
+    )
+    assert "do not invent a finding ID" in request.prompt
+
+
 def test_verification_runs_in_the_supplied_worktree(store, tmp_path):
     adapter = Scripted(
         [

@@ -52,7 +52,13 @@ STAGE_CONTRACTS: dict[str, frozenset[Category]] = {
         }
     ),
     "planning": frozenset(
-        {Category.BRIEF, Category.INVARIANTS, Category.REFERENCES, Category.CONTEXT_NOTES}
+        {
+            Category.BRIEF,
+            Category.INVARIANTS,
+            Category.REFERENCES,
+            Category.SCOPE_FENCE,
+            Category.CONTEXT_NOTES,
+        }
     ),
     "plan_review": frozenset(
         {

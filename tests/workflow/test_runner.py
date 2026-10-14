@@ -169,6 +169,23 @@ def test_standard_run_reaches_complete_local_and_persists_final_commit(tmp_path)
     assert GitRepo(tmp_path / "wt" / "demo" / outcome.run_id).is_ancestor(base)
 
 
+def test_fresh_planner_receives_the_configured_scope_fence(tmp_path):
+    git = repo(tmp_path)
+    scope = CONFIG.scope.model_copy(
+        update={"include": ["src/", "docs/"], "exclude": ["docs/private/"]}
+    )
+    config = CONFIG.model_copy(update={"scope": scope})
+    adapter = Scripted(script())
+
+    outcome = execute_run(git, config, registry(adapter), "add a flag", tmp_path / "wt", CRITERIA)
+
+    assert outcome.final_state is RunState.COMPLETE_LOCAL
+    planner = next(request for request in adapter.requests if request.role == "planner")
+    scope_item = next(item for item in planner.context.items if item.label == "scope_fence")
+    assert '"include": ["src/", "docs/"]' in scope_item.content
+    assert '"exclude": ["docs/private/"]' in scope_item.content
+
+
 def test_missing_required_validation_dependency_fails_before_verifier(tmp_path):
     git = repo(tmp_path)
     data = CONFIG.model_dump(mode="json")
@@ -658,6 +675,45 @@ def test_fail_or_unknown_verification_cannot_complete_local(tmp_path, verdict):
         git, CONFIG, registry(Scripted(script(verifier=failed))), "bad", tmp_path / "wt", CRITERIA
     )
     assert outcome.final_state is RunState.FAILED
+    saved = json.loads((outcome.store_root / "verification/final-verification.json").read_text())
+    assert saved["outcome_explanation"] == []
+    assert saved["unresolved_finding_ids"] == []
+
+
+def test_named_acceptance_document_note_in_evidence_does_not_block_a_valid_pass(tmp_path):
+    class AcceptanceDocumentWorker(Scripted):
+        def run(self, request):
+            result = super().run(request)
+            if request.role == "implementation_worker":
+                document = request.cwd / "docs" / "evaluation-plan.md"
+                document.parent.mkdir(parents=True)
+                document.write_text("The requested flag is available.\n")
+            elif request.role == "verifier":
+                result.output["verdicts"][0]["evidence"] = (
+                    "docs/evaluation-plan.md was updated with the requested note; "
+                    "the supplied criterion is satisfied."
+                )
+            return result
+
+    git = repo(tmp_path)
+    config = CONFIG.model_copy(
+        update={"scope": CONFIG.scope.model_copy(update={"include": ["src/", "docs/"]})}
+    )
+    outcome = execute_run(
+        git,
+        config,
+        registry(AcceptanceDocumentWorker(script())),
+        "Add the requested flag and update docs/evaluation-plan.md with a short availability note.",
+        tmp_path / "wt",
+        CRITERIA,
+    )
+
+    assert outcome.final_state is RunState.COMPLETE_LOCAL
+    saved = json.loads((outcome.store_root / "verification/final-verification.json").read_text())
+    assert saved["verdicts"][0]["evidence"].startswith("docs/evaluation-plan.md was updated")
+    assert saved["outcome_explanation"] == []
+    diff = (outcome.store_root / "verification/current-state-diff-v1.patch").read_text()
+    assert "docs/evaluation-plan.md" in diff
 
 
 def test_minor_only_verification_can_complete_and_retains_its_note(tmp_path):

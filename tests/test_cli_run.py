@@ -15,6 +15,7 @@ from dev_orchestration.config.models import RoleConfig
 from dev_orchestration.domain.enums import ProjectClass, RunState, Tier
 from dev_orchestration.domain.run import RunManifest
 from dev_orchestration.workflow.reporting import describe_status, list_runs
+from dev_orchestration.workflow.runner import RunOutcome
 from dev_orchestration.workflow.runner import execute_run as runner_execute_run
 
 PLAN = "# external plan\n"
@@ -210,6 +211,126 @@ def test_every_run_state_has_next_action():
             status=state,
         )
         assert "Next:" in describe_status(manifest, [])
+
+
+def test_created_status_marks_missing_process_record_as_unknown_and_recommends_inspection():
+    manifest = RunManifest(
+        run_id="20260829-101500_standard_created",
+        repository="x",
+        workflow="standard",
+        tier=Tier.STANDARD,
+        project_class=ProjectClass.INTERNAL_UTILITY,
+        status=RunState.CREATED,
+    )
+
+    rendered = describe_status(manifest, [], active_provider_recorded=False)
+
+    assert "Process liveness: unknown" in rendered
+    assert "inspect events and checkpoints" in rendered
+    assert "Next:   start the run" not in rendered
+
+
+def test_status_includes_saved_finding_summaries_from_the_selected_run(tmp_path, monkeypatch):
+    root = repo(tmp_path)
+    first = store(root, "20260829-101500_standard_first", RunState.ESCALATED)
+    second = store(root, "20260829-101600_standard_second", RunState.ESCALATED)
+    first.write_json_artifact(
+        "review/plan-review-v1.json",
+        {"outcome": "CHANGES_REQUIRED", "findings": [{"id": "F008", "summary": "bad path"}]},
+    )
+    second.write_json_artifact(
+        "review/plan-review-v1.json",
+        {
+            "outcome": "CHANGES_REQUIRED",
+            "findings": [{"id": "F008", "summary": "missing test"}],
+        },
+    )
+    monkeypatch.chdir(root)
+
+    first_status = CliRunner().invoke(app, ["status", first.run_id])
+    second_status = CliRunner().invoke(app, ["status", second.run_id])
+
+    assert first_status.exit_code == second_status.exit_code == 0
+    assert first.run_id in first_status.output and "F008: bad path" in first_status.output
+    assert second.run_id in second_status.output and "F008: missing test" in second_status.output
+    assert "F008: missing test" not in first_status.output
+    assert "F008: bad path" not in second_status.output
+
+
+def test_blocked_status_includes_saved_finding_summaries(tmp_path, monkeypatch):
+    root = repo(tmp_path)
+    blocked = store(root, "20260829-101700_standard_blocked", RunState.BLOCKED)
+    blocked.write_json_artifact(
+        "review/plan-review-v1.json",
+        {"outcome": "CHANGES_REQUIRED", "findings": [{"id": "F012", "summary": "missing owner"}]},
+    )
+    monkeypatch.chdir(root)
+
+    result = CliRunner().invoke(app, ["status", blocked.run_id])
+
+    assert result.exit_code == 0
+    assert "Finding F012: missing owner" in result.output
+    assert "Failure class:" not in result.output
+
+
+@pytest.mark.parametrize("command", ["run", "resume", "restart", "retry"])
+def test_unsuccessful_commands_report_run_scoped_findings(tmp_path, monkeypatch, command):
+    if command == "retry":
+        root, _ = _retry_fixture(tmp_path, monkeypatch, None)
+    else:
+        root = repo(tmp_path)
+        monkeypatch.chdir(root)
+
+    diagnostic = store(root, "20261014-101500_standard_diagnostic", RunState.FAILED)
+    diagnostic.write_json_artifact(
+        "review/implementation-review-v1.json",
+        {"outcome": "BLOCK", "findings": [{"id": "F090", "summary": "acceptance mismatch"}]},
+    )
+    outcome = RunOutcome(
+        run_id=diagnostic.run_id,
+        final_state=RunState.FAILED,
+        store_root=diagnostic.root,
+        reason="verification failed",
+    )
+    monkeypatch.setattr(cli_module, "default_registry", lambda *args, **kwargs: None)
+
+    if command == "run":
+        monkeypatch.setattr(cli_module, "execute_run", lambda *args, **kwargs: outcome)
+        args = ["run", "complete the task", "--goal", "diagnostic-test"]
+    elif command == "resume":
+        monkeypatch.setattr(cli_module, "resume_run", lambda *args, **kwargs: outcome)
+        args = ["resume", diagnostic.run_id]
+    elif command == "restart":
+        monkeypatch.setattr(cli_module, "restart_run", lambda *args, **kwargs: outcome)
+        args = ["restart", diagnostic.run_id, "--reason", "show saved findings"]
+    else:
+        monkeypatch.setattr(cli_module, "execute_run", lambda *args, **kwargs: outcome)
+        args = ["retry", "20260829-101500_standard_dead"]
+
+    result = CliRunner().invoke(app, args)
+
+    assert result.exit_code == 1, result.output
+    assert diagnostic.run_id in result.output
+    assert "Finding F090: acceptance mismatch" in result.output
+    assert "verification failed" in result.output
+
+
+@pytest.mark.parametrize("saved_review", [None, "not valid JSON"])
+def test_status_marks_missing_or_unreadable_saved_finding_summaries_unavailable(
+    tmp_path, monkeypatch, saved_review
+):
+    root = repo(tmp_path)
+    failed = store(root, "20260829-101700_standard_missing_review", RunState.ESCALATED)
+    if saved_review is not None:
+        review = failed.root / "review/plan-review-v1.json"
+        review.parent.mkdir(parents=True, exist_ok=True)
+        review.write_text(saved_review)
+    monkeypatch.chdir(root)
+
+    result = CliRunner().invoke(app, ["status", failed.run_id])
+
+    assert result.exit_code == 0
+    assert "Findings: unavailable" in result.output
 
 
 def test_runs_lists_newest_first(tmp_path):
@@ -1052,6 +1173,48 @@ def test_status_reports_restart_stages_and_shortcut_blockers(tmp_path, monkeypat
 
     assert result.exit_code == 0, result.output
     assert "Restart: eligible --from validation|review|verification|remediation" in result.output
+
+
+def test_restart_help_explains_reason_is_audit_text():
+    result = CliRunner().invoke(app, ["restart", "--help"])
+
+    assert result.exit_code == 0
+    assert "audit" in result.output.lower()
+    assert "repair" in result.output.lower()
+
+
+@pytest.mark.parametrize("use_replacement_patch", [False, True])
+def test_remediation_restart_with_clean_review_and_failed_verifier_does_not_run_worker(
+    tmp_path, monkeypatch, use_replacement_patch
+):
+    root, source_id, adapter = _failed_verification_source(tmp_path, monkeypatch)
+    source = RunStore(root, source_id)
+    patch_file = source.root / "execution/final-change.patch"
+    if use_replacement_patch:
+        replacement = tmp_path / "replacement.patch"
+        replacement.write_bytes(patch_file.read_bytes())
+    _restart_cli(monkeypatch, tmp_path, adapter)
+    monkeypatch.chdir(root)
+    original_run = adapter.run
+
+    def reject_verifier(request):
+        result = original_run(request)
+        if request.role == "verifier":
+            result.output["outcome"] = "CHANGES_REQUIRED"
+            result.output["verdicts"][0]["verdict"] = "FAIL"
+        return result
+
+    adapter.run = reject_verifier
+    adapter.seen.clear()
+    args = ["restart", source_id, "--from", "remediation", "--reason", "repair is conditional"]
+    if use_replacement_patch:
+        args.extend(["--patch", str(replacement)])
+
+    result = CliRunner().invoke(app, args)
+
+    assert result.exit_code == 1
+    assert adapter.seen == ["implementation_reviewer", "verifier"]
+    assert _latest_manifest(root).terminal_cause == "restart_verification_failed"
 
 
 def test_interrupted_restart_resumes_with_check_only_mode(tmp_path, monkeypatch):

@@ -125,6 +125,47 @@ def test_timeout_resumes_worker_without_repeating_plan(tmp_path):
     assert json.loads((first.store_root / "manifest.json").read_text())["git"]["final_commit"]
 
 
+def test_interrupted_planner_receives_scope_fence_before_and_after_resume(tmp_path):
+    class InterruptPlannerOnce(Scripted):
+        def __init__(self):
+            super().__init__()
+            self.planner_requests = []
+            self.interrupt = True
+
+        def run(self, request):
+            if request.role == "planner":
+                self.planner_requests.append(request)
+                if self.interrupt:
+                    self.interrupt = False
+                    raise AgentTimeoutError(request.role, 7, self.name)
+            return super().run(request)
+
+    git = repo(tmp_path)
+    scope = CONFIG.scope.model_copy(
+        update={"include": ["src/", "docs/"], "exclude": ["docs/private/"]}
+    )
+    config = CONFIG.model_copy(update={"scope": scope})
+    adapter = InterruptPlannerOnce()
+    first = execute_run(
+        git,
+        config,
+        registry(adapter),
+        "change app",
+        tmp_path / "wt",
+        CRITERIA,
+    )
+    assert first.final_state is RunState.PAUSED_INTERRUPTED
+
+    resumed = resume_run(git, config, registry(adapter), first.run_id)
+
+    assert resumed.final_state is RunState.COMPLETE_LOCAL
+    assert len(adapter.planner_requests) == 2
+    for request in adapter.planner_requests:
+        scope_item = next(item for item in request.context.items if item.label == "scope_fence")
+        assert '"include": ["src/", "docs/"]' in scope_item.content
+        assert '"exclude": ["docs/private/"]' in scope_item.content
+
+
 def test_seed_patch_receipt_worker_visibility_and_resume_once(tmp_path):
     class ObserveSeed(Scripted):
         def __init__(self, *, interrupt=False):
@@ -339,6 +380,49 @@ def test_resumed_verification_can_complete_with_minor_finding_note(tmp_path):
     assert resumed.final_state is RunState.COMPLETE_LOCAL
     result = json.loads((paused.store_root / "verification/final-verification.json").read_text())
     assert result["outcome_explanation"][0]["note"] == "cleanup is non-blocking"
+
+
+@pytest.mark.parametrize("verdict", ["FAIL", "UNKNOWN"])
+def test_resumed_fail_or_unknown_verification_cannot_complete(tmp_path, verdict):
+    class PauseAtVerifier(Scripted):
+        def run(self, request):
+            if request.role == "verifier":
+                self.seen.append(request.role)
+                raise AgentTimeoutError(request.role, 7, self.name)
+            return super().run(request)
+
+    class ResumeWithVerdict(Scripted):
+        def run(self, request):
+            if request.role == "verifier":
+                self.seen.append(request.role)
+                now = datetime.now(UTC)
+                return AgentResult(
+                    self.name,
+                    None,
+                    0,
+                    {
+                        **VERIFY,
+                        "outcome": "CHANGES_REQUIRED",
+                        "verdicts": [
+                            {"criterion": CRITERIA[0], "verdict": verdict, "evidence": "checked"}
+                        ],
+                    },
+                    now,
+                    now,
+                )
+            return super().run(request)
+
+    git = repo(tmp_path)
+    paused = execute_run(
+        git, CONFIG, registry(PauseAtVerifier()), "change app", tmp_path / "wt", CRITERIA
+    )
+    assert paused.final_state is RunState.PAUSED_INTERRUPTED
+
+    resumed = resume_run(git, CONFIG, registry(ResumeWithVerdict()), paused.run_id)
+
+    assert resumed.final_state is RunState.FAILED
+    saved = json.loads((paused.store_root / "verification/final-verification.json").read_text())
+    assert saved["verdicts"][0]["verdict"] == verdict
 
 
 def test_resume_finishes_plan_receipt_after_plan_finalization_pause(tmp_path, monkeypatch):
