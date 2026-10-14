@@ -299,11 +299,12 @@ class GitRepo:
         """Apply a patch from change_patch to the working tree only; all or nothing."""
         self.apply_patch_bytes(patch.encode("utf-8"))
 
-    def apply_patch_bytes(self, patch: bytes) -> None:
+    def apply_patch_bytes(self, patch: bytes, *, reverse: bool = False) -> None:
         """Apply a binary-safe patch to the working tree only."""
-        guards.reject_disallowed_invocation(("apply", "--binary"))
+        args = ("apply", "--binary", "-R") if reverse else ("apply", "--binary")
+        guards.reject_disallowed_invocation(args)
         proc = subprocess.run(
-            ["git", "-C", str(self.root), "apply", "--binary"],
+            ["git", "-C", str(self.root), *args],
             input=patch,
             capture_output=True,
             timeout=GIT_TIMEOUT_SECONDS,

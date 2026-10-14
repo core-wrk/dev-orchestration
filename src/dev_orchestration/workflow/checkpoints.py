@@ -51,6 +51,8 @@ def input_hashes(store: RunStore, registry: RoleRegistry) -> dict[str, str]:
             "roles",
             "resolved_config",
             "external_plan_artifact",
+            "seed_patch_artifact",
+            "seed_patch_sha256",
         },
     )
     if manifest.restart_mode is not None:
@@ -112,6 +114,11 @@ def input_hashes(store: RunStore, registry: RoleRegistry) -> dict[str, str]:
         if not path.is_file():
             raise CheckpointError("saved external plan is missing")
         values[manifest.external_plan_artifact] = _digest(path.read_bytes())
+    if manifest.seed_patch_artifact:
+        path = store.root / manifest.seed_patch_artifact
+        if not path.is_file():
+            raise CheckpointError("saved seed patch is missing")
+        values[manifest.seed_patch_artifact] = _digest(path.read_bytes())
     for role in manifest.roles:
         values[f"role:{role}"] = _digest(load_role_prompt(role).encode())
         binding = registry.binding_for(role)

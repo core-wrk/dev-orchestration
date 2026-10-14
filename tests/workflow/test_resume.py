@@ -16,8 +16,8 @@ from dev_orchestration.adapters.base import (
     AgentTimeoutError,
 )
 from dev_orchestration.adapters.registry import RoleRegistry
-from dev_orchestration.artifacts.store import RunStore
-from dev_orchestration.config.models import ProjectConfig, RoleConfig
+from dev_orchestration.artifacts.store import CheckpointError, RunStore
+from dev_orchestration.config.models import ApprovalPolicy, ProjectConfig, RoleConfig
 from dev_orchestration.domain.enums import ProjectClass, RunState, Tier
 from dev_orchestration.domain.run import RunManifest
 from dev_orchestration.git.repo import GitRepo
@@ -123,6 +123,149 @@ def test_timeout_resumes_worker_without_repeating_plan(tmp_path):
     assert resumed.final_state is RunState.COMPLETE_LOCAL
     assert adapter.seen == ["implementation_worker", "implementation_reviewer", "verifier"]
     assert json.loads((first.store_root / "manifest.json").read_text())["git"]["final_commit"]
+
+
+def test_seed_patch_receipt_worker_visibility_and_resume_once(tmp_path):
+    class ObserveSeed(Scripted):
+        def __init__(self, *, interrupt=False):
+            super().__init__()
+            self.interrupt = interrupt
+            self.seed_contents = []
+
+        def run(self, request):
+            if request.role == "implementation_worker":
+                self.seed_contents.append((request.cwd / "src/app.py").read_text())
+                if self.interrupt:
+                    raise AgentInterruptedError(request.role, self.name, 15)
+            return super().run(request)
+
+    git = repo(tmp_path)
+    patch_path = tmp_path / "seed.patch"
+    patch_path.write_bytes(
+        b"diff --git a/src/app.py b/src/app.py\n"
+        b"--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1 @@\n-x = 1\n+x = 99\n"
+    )
+    first_adapter = ObserveSeed(interrupt=True)
+    first = execute_run(
+        git,
+        CONFIG,
+        registry(first_adapter),
+        "change app",
+        tmp_path / "wt",
+        CRITERIA,
+        seed_patch=patch_path,
+    )
+    assert first.final_state is RunState.PAUSED_INTERRUPTED
+    assert first_adapter.seed_contents == ["x = 99\n"]
+    store = RunStore(git.root, first.run_id)
+    manifest = store.read_manifest()
+    assert manifest.seed_patch_artifact == "execution/seed-patch.patch"
+    assert (
+        manifest.seed_patch_sha256
+        == __import__("hashlib").sha256(patch_path.read_bytes()).hexdigest()
+    )
+    assert (store.root / manifest.seed_patch_artifact).read_bytes() == patch_path.read_bytes()
+    assert store.verify_checkpoint()["artifacts"]["execution/seed-patch-receipt.json"]
+
+    resumed_adapter = ObserveSeed()
+    resumed = resume_run(git, CONFIG, registry(resumed_adapter), first.run_id)
+    assert resumed.final_state is RunState.COMPLETE_LOCAL
+    assert resumed_adapter.seed_contents == ["x = 99\n"]
+    applied = [
+        line
+        for line in (store.root / "events.jsonl").read_text().splitlines()
+        if json.loads(line).get("event") == "seed_patch_applied"
+    ]
+    assert len(applied) == 1
+    saved_patch = store.root / manifest.seed_patch_artifact
+    saved_patch.write_bytes(saved_patch.read_bytes() + b"tampered")
+    with pytest.raises(CheckpointError, match="changed or is missing"):
+        store.verify_checkpoint()
+
+
+def test_seed_patch_binary_and_executable_changes_reach_worker(tmp_path):
+    class ObserveFiles(Scripted):
+        def run(self, request):
+            if request.role == "implementation_worker":
+                self.binary = (request.cwd / "src/blob.bin").read_bytes()
+                self.executable = (request.cwd / "src/tool").stat().st_mode & 0o111
+            return super().run(request)
+
+    git = repo(tmp_path)
+    (git.root / "src/blob.bin").write_bytes(b"old\x00bytes")
+    (git.root / "src/tool").write_text("#!/bin/sh\necho old\n")
+    (git.root / "src/tool").chmod(0o644)
+    subprocess.run(["git", "-C", str(git.root), "add", "src/blob.bin", "src/tool"], check=True)
+    subprocess.run(["git", "-C", str(git.root), "commit", "-q", "-m", "files"], check=True)
+    (git.root / "src/blob.bin").write_bytes(b"new\x00bytes")
+    (git.root / "src/tool").write_text("#!/bin/sh\necho new\n")
+    (git.root / "src/tool").chmod(0o755)
+    patch = subprocess.run(
+        ["git", "-C", str(git.root), "diff", "--binary"], capture_output=True, check=True
+    ).stdout
+    subprocess.run(
+        ["git", "-C", str(git.root), "checkout", "--", "src/blob.bin", "src/tool"], check=True
+    )
+    (git.root / "src/tool").chmod(0o644)
+    patch_path = tmp_path / "binary-seed.patch"
+    patch_path.write_bytes(patch)
+
+    adapter = ObserveFiles()
+    outcome = execute_run(
+        git,
+        CONFIG,
+        registry(adapter),
+        "change app",
+        tmp_path / "wt",
+        CRITERIA,
+        seed_patch=patch_path,
+    )
+    assert outcome.final_state is RunState.COMPLETE_LOCAL
+    assert adapter.binary == b"new\x00bytes"
+    assert adapter.executable == 0o111
+
+
+def test_out_of_scope_seed_patch_is_rolled_back_before_worker(tmp_path):
+    git = repo(tmp_path)
+    patch_path = tmp_path / "outside.patch"
+    patch_path.write_bytes(
+        b"diff --git a/README.md b/README.md\n"
+        b"new file mode 100644\n--- /dev/null\n+++ b/README.md\n@@ -0,0 +1 @@\n+outside\n"
+    )
+    adapter = Scripted()
+    outcome = execute_run(
+        git,
+        CONFIG,
+        registry(adapter),
+        "change app",
+        tmp_path / "wt",
+        CRITERIA,
+        seed_patch=patch_path,
+    )
+    assert outcome.final_state is RunState.ESCALATED
+    assert "README.md" in outcome.reason
+    assert "implementation_worker" not in adapter.seen
+    worktree = tmp_path / "wt" / "repo" / outcome.run_id
+    assert not worktree.exists()
+
+
+def test_invalid_seed_patch_stops_before_worker(tmp_path):
+    git = repo(tmp_path)
+    patch_path = tmp_path / "invalid.patch"
+    patch_path.write_bytes(b"not a git patch\n")
+    adapter = Scripted()
+    outcome = execute_run(
+        git,
+        CONFIG,
+        registry(adapter),
+        "change app",
+        tmp_path / "wt",
+        CRITERIA,
+        seed_patch=patch_path,
+    )
+    assert outcome.final_state is RunState.FAILED
+    assert "implementation_worker" not in adapter.seen
+    assert not (tmp_path / "wt" / "repo" / outcome.run_id).exists()
 
 
 def test_resumed_verification_can_complete_with_minor_finding_note(tmp_path):
@@ -1191,3 +1334,106 @@ def test_resumed_run_missing_required_dependency_fails_before_verifier(tmp_path,
     assert resumed.final_state is RunState.FAILED
     assert manifest.terminal_cause == "environment"
     assert "verifier" not in resumed_adapter.seen
+
+
+def test_ignored_out_of_scope_seed_patch_is_rolled_back_before_worker(tmp_path):
+    git = repo(tmp_path)
+    patch_path = tmp_path / "ignored.patch"
+    patch_path.write_bytes(
+        b"diff --git a/.ai/runs/escape.txt b/.ai/runs/escape.txt\n"
+        b"new file mode 100644\n--- /dev/null\n+++ b/.ai/runs/escape.txt\n"
+        b"@@ -0,0 +1 @@\n+outside\n"
+    )
+    adapter = Scripted()
+    outcome = execute_run(
+        git,
+        CONFIG,
+        registry(adapter),
+        "change app",
+        tmp_path / "wt",
+        CRITERIA,
+        seed_patch=patch_path,
+    )
+    assert outcome.final_state is RunState.ESCALATED
+    assert ".ai/runs/escape.txt" in outcome.reason
+    assert "implementation_worker" not in adapter.seen
+    assert not (tmp_path / "wt" / "repo" / outcome.run_id).exists()
+
+
+@pytest.mark.parametrize(
+    ("patch_bytes", "expected_state", "reason_fragment"),
+    [
+        (
+            (
+                b"diff --git a/.ai/runs/escape.txt b/.ai/runs/escape.txt\n"
+                b"new file mode 100644\n--- /dev/null\n+++ b/.ai/runs/escape.txt\n"
+                b"@@ -0,0 +1 @@\n+outside\n"
+            ),
+            RunState.ESCALATED,
+            ".ai/runs/escape.txt",
+        ),
+        (b"not a git patch\n", RunState.FAILED, "saved seed patch could not be applied"),
+    ],
+)
+def test_bad_seed_patch_on_approved_resume_is_terminal(
+    tmp_path, patch_bytes, expected_state, reason_fragment
+):
+    class HighRisk(Scripted):
+        def run(self, request):
+            if request.role == "classifier":
+                self.seen.append(request.role)
+                now = datetime.now(UTC)
+                return AgentResult(
+                    self.name,
+                    None,
+                    0,
+                    {"tier": "substantial", "rationale": "approval-gate fixture", "profiles": []},
+                    now,
+                    now,
+                )
+            return super().run(request)
+
+    git = repo(tmp_path)
+    config = CONFIG.model_copy(update={"approval": ApprovalPolicy(substantial=True)})
+    patch_path = tmp_path / "bad-seed.patch"
+    patch_path.write_bytes(patch_bytes)
+    first_adapter = HighRisk()
+    first = execute_run(
+        git,
+        config,
+        registry(first_adapter),
+        "change app",
+        tmp_path / "wt",
+        CRITERIA,
+        seed_patch=patch_path,
+    )
+    assert first.final_state is RunState.AWAITING_APPROVAL
+    assert "implementation_worker" not in first_adapter.seen
+
+    store = RunStore(git.root, first.run_id)
+    worktree = Path(store.read_manifest().git.worktree)
+    link_cloud_session(
+        git,
+        first.run_id,
+        "claude",
+        "session-1",
+        "environment-1",
+        restored_worktree=worktree,
+    )
+    digest = approve_run(
+        git, config, registry(first_adapter), first.run_id, restored_worktree=worktree
+    )
+
+    resumed_adapter = Scripted()
+    resumed = resume_run(
+        git,
+        config,
+        registry(resumed_adapter),
+        first.run_id,
+        expected_checkpoint_digest=digest,
+        restored_worktree=worktree,
+    )
+
+    assert resumed.final_state is expected_state
+    assert reason_fragment in resumed.reason
+    assert "implementation_worker" not in resumed_adapter.seen

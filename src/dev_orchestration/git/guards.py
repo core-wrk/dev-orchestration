@@ -117,6 +117,7 @@ def reject_disallowed_invocation(args: tuple[str, ...]) -> None:
         )
     if verb == "apply" and args not in {
         ("apply", "--binary"),
+        ("apply", "--binary", "-R"),
         ("apply", "--cached", "--binary"),
     }:
         raise ProhibitedOperationError(

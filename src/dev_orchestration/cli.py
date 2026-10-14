@@ -234,6 +234,9 @@ def run(
     auto_resume: bool = typer.Option(
         False, "--auto-resume", help="Resume after confirmed usage resets"
     ),
+    seed_patch: Path | None = typer.Option(  # noqa: B008
+        None, "--seed-patch", help="Apply a patch to the isolated worktree before implementation"
+    ),
 ) -> None:
     """Execute one local run. It never pushes, merges, or deploys."""
     criteria = list(criterion or [])
@@ -283,6 +286,7 @@ def run(
             external_plan=plan_file,
             reviewed_plan_from=review_source,
             auto_resume=auto_resume,
+            seed_patch=seed_patch,
         )
         _report_plan_review_reuse(outcome)
     except EXPECTED_ERRORS as exc:

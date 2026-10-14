@@ -59,6 +59,15 @@ from dev_orchestration.workflow.scope_check import (
     cleanup_ephemeral_paths,
     enforce_fence,
 )
+from dev_orchestration.workflow.seed_patch import (
+    PATCH_ARTIFACT as SEED_PATCH_ARTIFACT,
+)
+from dev_orchestration.workflow.seed_patch import (
+    RECEIPT_ARTIFACT as SEED_PATCH_RECEIPT,
+)
+from dev_orchestration.workflow.seed_patch import (
+    apply_seed_patch_once,
+)
 from dev_orchestration.workflow.snapshot import capture_snapshot, require_snapshot
 from dev_orchestration.workflow.stages import (
     MAX_REMEDIATION_CYCLES,
@@ -521,6 +530,8 @@ def resume_run(
         store.append_event({"event": "run_resumed", "stage": stage, "automatic": automatic})
 
         def checkpoint(next_stage: str, artifacts: list[str], cycle_number: int = cycle) -> None:
+            if store.read_manifest().seed_patch_artifact:
+                artifacts = [*artifacts, SEED_PATCH_ARTIFACT, SEED_PATCH_RECEIPT]
             record_stage(
                 store,
                 registry,
@@ -788,6 +799,24 @@ def resume_run(
                             reason="human approval required before execution",
                             repo=repo,
                             worktree=worktree,
+                        )
+                    try:
+                        seed_patch_applied = apply_seed_patch_once(
+                            store, worktree_repo, base, fence
+                        )
+                    except ScopeViolation as exc:
+                        _terminal(engine, RunState.ESCALATED, str(exc))
+                        return _outcome(engine, repo=repo, worktree=worktree)
+                    except GitCommandError as exc:
+                        _terminal(
+                            engine,
+                            RunState.FAILED,
+                            f"saved seed patch could not be applied: {exc}",
+                        )
+                        return _outcome(engine, repo=repo, worktree=worktree)
+                    if seed_patch_applied:
+                        checkpoint(
+                            "implementation_worker", [SEED_PATCH_ARTIFACT, SEED_PATCH_RECEIPT]
                         )
                     store.update_manifest(status=RunState.EXECUTING)
                     events_path = store.root / "events.jsonl"

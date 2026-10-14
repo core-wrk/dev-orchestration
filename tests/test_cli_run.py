@@ -692,7 +692,7 @@ def test_unproductive_death_saves_the_change_as_a_patch(tmp_path):
     assert "+x = 9" in saved and "added.py" in saved
 
 
-def _failed_verification_source(tmp_path, monkeypatch):
+def _failed_verification_source(tmp_path, monkeypatch, *, seed_patch=None):
     from dev_orchestration.domain.enums import Outcome
     from dev_orchestration.git.repo import GitRepo
     from dev_orchestration.workflow import runner as runner_module
@@ -725,6 +725,7 @@ def _failed_verification_source(tmp_path, monkeypatch):
         tmp_path / "worktrees",
         ["flag exists"],
         goal_id="test-restart-goal",
+        seed_patch=seed_patch,
     )
     assert outcome.final_state is RunState.FAILED
     return root, outcome.run_id, adapter
@@ -1357,3 +1358,34 @@ def test_restart_import_preserves_binary_and_executable_changes(tmp_path, monkey
     restarted = Path(child.git.worktree)
     assert (restarted / "src" / "payload.bin").read_bytes() == b"\x00\x01\xff"
     assert (restarted / "src" / "tool.sh").stat().st_mode & 0o111
+
+
+def test_restart_preserves_seed_patch_artifacts(tmp_path, monkeypatch):
+    seed_patch = tmp_path / "seed.patch"
+    seed_patch.write_bytes(
+        b"diff --git a/src/app.py b/src/app.py\n"
+        b"--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1 @@\n"
+        b"-x = 1\n+x = 7\n"
+    )
+    root, source_id, adapter = _failed_verification_source(
+        tmp_path, monkeypatch, seed_patch=seed_patch
+    )
+    source_store = RunStore(root, source_id)
+    source_manifest = source_store.read_manifest()
+    source_patch = (source_store.root / source_manifest.seed_patch_artifact).read_bytes()
+    source_receipt = (source_store.root / "execution/seed-patch-receipt.json").read_bytes()
+    adapter.seen.clear()
+    _restart_cli(monkeypatch, tmp_path, adapter)
+    monkeypatch.chdir(root)
+
+    result = CliRunner().invoke(
+        app, ["restart", source_id, "--reason", "verify saved seed patch receipt"]
+    )
+
+    assert result.exit_code == 0, result.output
+    child = _latest_manifest(root)
+    child_store = RunStore(root, child.run_id)
+    assert child.seed_patch_artifact == source_manifest.seed_patch_artifact
+    assert child.seed_patch_sha256 == source_manifest.seed_patch_sha256
+    assert (child_store.root / child.seed_patch_artifact).read_bytes() == source_patch
+    assert (child_store.root / "execution/seed-patch-receipt.json").read_bytes() == source_receipt

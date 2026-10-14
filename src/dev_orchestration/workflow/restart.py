@@ -531,6 +531,9 @@ def restart_run(
             store.write_bytes_artifact("planning/plan-v1.md", contract_text, immutable=True)
         if original.external_plan_artifact:
             copy_artifact(original.external_plan_artifact)
+        if original.seed_patch_artifact:
+            copy_artifact(original.seed_patch_artifact)
+            copy_artifact("execution/seed-patch-receipt.json")
         for history_path in (source.root / "review").glob("*.json"):
             if history_path.is_file():
                 relative = history_path.relative_to(source.root).as_posix()

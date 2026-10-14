@@ -61,6 +61,16 @@ from dev_orchestration.workflow.scope_check import (
     enforce_fence,
     enforce_ignored_writes,
 )
+from dev_orchestration.workflow.seed_patch import (
+    PATCH_ARTIFACT as SEED_PATCH_ARTIFACT,
+)
+from dev_orchestration.workflow.seed_patch import (
+    RECEIPT_ARTIFACT as SEED_PATCH_RECEIPT,
+)
+from dev_orchestration.workflow.seed_patch import (
+    apply_seed_patch_once,
+    save_seed_patch,
+)
 from dev_orchestration.workflow.snapshot import capture_snapshot
 from dev_orchestration.workflow.stages import (
     MAX_REMEDIATION_CYCLES,
@@ -708,10 +718,15 @@ def execute_run(
     continue_patch: Path | None = None,
     retry_resolution_reason: str | None = None,
     reviewed_plan_from: RunStore | None = None,
+    seed_patch: Path | None = None,
 ) -> RunOutcome:
     """Execute a run; every started run is returned in a terminal state."""
     if not request_text.strip():
         raise ContextContractError("a run requires non-empty request text")
+    try:
+        seed_patch_bytes = seed_patch.read_bytes() if seed_patch is not None else None
+    except OSError as exc:
+        raise ContextContractError(f"cannot read seed patch {seed_patch}: {exc}") from exc
     goal_id = validate_goal_id(goal_id)
     acceptance_criteria = _normalize_criteria(acceptance_criteria)
     if acceptance_criteria_source not in {"explicit", "request_fallback"}:
@@ -772,6 +787,9 @@ def execute_run(
             store.append_event(
                 {"event": "retry_resolution_reason", "detail": retry_resolution_reason}
             )
+        if seed_patch_bytes is not None:
+            digest = save_seed_patch(store, seed_patch_bytes)
+            store.update_manifest(seed_patch_artifact=SEED_PATCH_ARTIFACT, seed_patch_sha256=digest)
         if continue_patch is not None:
             store.write_bytes_artifact(
                 CONTINUED_CHANGE_ARTIFACT,
@@ -780,6 +798,8 @@ def execute_run(
             )
 
         def receipt(next_stage: str, artifacts: list[str], cycle: int = 0) -> None:
+            if store.read_manifest().seed_patch_artifact:
+                artifacts = [*artifacts, SEED_PATCH_ARTIFACT, SEED_PATCH_RECEIPT]
             record_stage(
                 store,
                 registry,
@@ -1260,6 +1280,7 @@ def execute_run(
                 worktree=worktree,
             )
 
+        apply_seed_patch_once(store, worktree_repo, base_commit, fence)
         receipt(
             "implementation_worker",
             [

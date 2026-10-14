@@ -97,6 +97,8 @@ class RunManifest(BaseModel):
     restart_source_base_commit: str | None = None
     restart_destination_base_commit: str | None = None
     external_plan_artifact: str | None = None
+    seed_patch_artifact: str | None = None
+    seed_patch_sha256: str | None = None
     plan_review_provenance: dict = Field(default_factory=dict)
     stage_attempts: dict[str, int] = Field(default_factory=dict)
     validation_repairs_reserved: int = 0
