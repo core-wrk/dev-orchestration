@@ -6,10 +6,12 @@ from dev_orchestration.domain.findings import (
     AcceptanceVerdict,
     Classification,
     Finding,
+    OutcomeExplanation,
     ReviewResult,
     Severity,
     Verification,
     next_finding_id,
+    verification_allows_completion,
 )
 
 
@@ -79,6 +81,78 @@ def test_verification_accepts_matching_verdicts():
         verdicts=[AcceptanceVerdict(criterion="a", verdict="PASS", evidence="e")],
     )
     assert result.unresolved_finding_ids == []
+
+
+def test_verification_allows_only_evidenced_minor_finding_explanations():
+    minor = Finding(id="F001", severity=Severity.MINOR, summary="small note")
+    result = Verification(
+        outcome=Outcome.CHANGES_REQUIRED,
+        criteria=["a"],
+        verdicts=[AcceptanceVerdict(criterion="a", verdict="PASS", evidence="observed")],
+        unresolved_finding_ids=["F001"],
+        outcome_explanation=[OutcomeExplanation(finding_id="F001", note="minor note")],
+    )
+    assert verification_allows_completion(result, ["a"], [minor])
+
+
+@pytest.mark.parametrize(
+    ("outcome", "verdict", "evidence", "criteria", "unresolved", "explained", "severity"),
+    [
+        (Outcome.CHANGES_REQUIRED, "FAIL", "observed", ["a"], ["F001"], ["F001"], Severity.MINOR),
+        (
+            Outcome.CHANGES_REQUIRED,
+            "UNKNOWN",
+            "observed",
+            ["a"],
+            ["F001"],
+            ["F001"],
+            Severity.MINOR,
+        ),
+        (Outcome.CHANGES_REQUIRED, "PASS", " ", ["a"], ["F001"], ["F001"], Severity.MINOR),
+        (
+            Outcome.CHANGES_REQUIRED,
+            "PASS",
+            "observed",
+            ["other"],
+            ["F001"],
+            ["F001"],
+            Severity.MINOR,
+        ),
+        (
+            Outcome.CHANGES_REQUIRED,
+            "PASS",
+            "observed",
+            ["a"],
+            ["missing"],
+            ["missing"],
+            Severity.MINOR,
+        ),
+        (
+            Outcome.CHANGES_REQUIRED,
+            "PASS",
+            "observed",
+            ["a"],
+            ["F001"],
+            ["F001"],
+            Severity.IMPORTANT,
+        ),
+        (Outcome.BLOCKED, "PASS", "observed", ["a"], ["F001"], ["F001"], Severity.MINOR),
+    ],
+)
+def test_verification_rejects_unsafe_minor_completion(
+    outcome, verdict, evidence, criteria, unresolved, explained, severity
+):
+    result = Verification(
+        outcome=outcome,
+        criteria=["a"],
+        verdicts=[AcceptanceVerdict(criterion="a", verdict=verdict, evidence=evidence)],
+        unresolved_finding_ids=unresolved,
+        outcome_explanation=[
+            OutcomeExplanation(finding_id=identifier, note="note") for identifier in explained
+        ],
+    )
+    known = [Finding(id="F001", severity=severity, summary="finding")]
+    assert not verification_allows_completion(result, criteria, known)
 
 
 def test_classification_rejects_a_tier_without_an_implemented_path():

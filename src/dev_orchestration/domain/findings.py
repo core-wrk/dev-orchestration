@@ -88,6 +88,13 @@ class AcceptanceVerdict(BaseModel):
     evidence: str
 
 
+class OutcomeExplanation(BaseModel):
+    model_config = {"frozen": True, "extra": "forbid"}
+
+    finding_id: str
+    note: str
+
+
 class Verification(BaseModel):
     model_config = {"frozen": True, "extra": "forbid"}
 
@@ -95,6 +102,7 @@ class Verification(BaseModel):
     criteria: list[str] = Field(default_factory=list)
     verdicts: list[AcceptanceVerdict] = Field(default_factory=list)
     unresolved_finding_ids: list[str] = Field(default_factory=list)
+    outcome_explanation: list[OutcomeExplanation] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def every_criterion_has_a_verdict(self) -> Self:
@@ -109,3 +117,45 @@ class Verification(BaseModel):
                 f"missing={missing}, extras={extras}, duplicates={duplicates}"
             )
         return self
+
+
+def verification_allows_completion(
+    verification: Verification,
+    criteria: list[str],
+    findings: list[Finding],
+) -> bool:
+    """Accept a PASS or a criteria-PASS with notes about known minor findings."""
+    verdict_criteria = [verdict.criterion for verdict in verification.verdicts]
+    if (
+        verification.criteria != criteria
+        or verdict_criteria != criteria
+        or any(
+            verdict.verdict != "PASS" or not verdict.evidence.strip()
+            for verdict in verification.verdicts
+        )
+    ):
+        return False
+
+    finding_by_id = {finding.id: finding for finding in findings}
+    unresolved = verification.unresolved_finding_ids
+    explained = [item.finding_id for item in verification.outcome_explanation]
+    if len(set(unresolved)) != len(unresolved) or len(set(explained)) != len(explained):
+        return False
+    if any(not item.note.strip() for item in verification.outcome_explanation):
+        return False
+    if any(identifier not in finding_by_id for identifier in [*unresolved, *explained]):
+        return False
+    if any(finding.severity is Severity.BLOCKING for finding in findings):
+        return False
+
+    if verification.outcome is Outcome.PASS:
+        return not verification.outcome_explanation and not any(
+            finding_by_id[identifier].severity is Severity.BLOCKING for identifier in unresolved
+        )
+    if verification.outcome is not Outcome.CHANGES_REQUIRED or not explained:
+        return False
+    return (
+        set(explained) == set(unresolved)
+        and all(finding.severity is Severity.MINOR for finding in findings)
+        and all(finding_by_id[identifier].severity is Severity.MINOR for identifier in explained)
+    )

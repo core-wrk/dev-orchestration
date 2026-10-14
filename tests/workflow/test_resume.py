@@ -125,6 +125,79 @@ def test_timeout_resumes_worker_without_repeating_plan(tmp_path):
     assert json.loads((first.store_root / "manifest.json").read_text())["git"]["final_commit"]
 
 
+def test_resumed_verification_can_complete_with_minor_finding_note(tmp_path):
+    class PauseVerifier(Scripted):
+        def run(self, request):
+            if request.role == "implementation_reviewer":
+                self.seen.append(request.role)
+                now = datetime.now(UTC)
+                return AgentResult(
+                    self.name,
+                    None,
+                    0,
+                    {
+                        "outcome": "PASS",
+                        "findings": [
+                            {"id": "F001", "severity": "minor", "summary": "small cleanup"}
+                        ],
+                    },
+                    now,
+                    now,
+                )
+            if request.role == "verifier":
+                self.seen.append(request.role)
+                raise AgentTimeoutError(request.role, 7, self.name)
+            return super().run(request)
+
+    class VerifyMinor(Scripted):
+        def run(self, request):
+            if request.role == "implementation_reviewer":
+                self.seen.append(request.role)
+                now = datetime.now(UTC)
+                return AgentResult(
+                    self.name,
+                    None,
+                    0,
+                    {
+                        "outcome": "PASS",
+                        "findings": [
+                            {"id": "F001", "severity": "minor", "summary": "small cleanup"}
+                        ],
+                    },
+                    now,
+                    now,
+                )
+            if request.role == "verifier":
+                self.seen.append(request.role)
+                now = datetime.now(UTC)
+                return AgentResult(
+                    self.name,
+                    None,
+                    0,
+                    {
+                        **VERIFY,
+                        "outcome": "CHANGES_REQUIRED",
+                        "unresolved_finding_ids": ["F001"],
+                        "outcome_explanation": [
+                            {"finding_id": "F001", "note": "cleanup is non-blocking"}
+                        ],
+                    },
+                    now,
+                    now,
+                )
+            return super().run(request)
+
+    git = repo(tmp_path)
+    paused = execute_run(
+        git, CONFIG, registry(PauseVerifier()), "change app", tmp_path / "wt", CRITERIA
+    )
+    assert paused.final_state is RunState.PAUSED_INTERRUPTED
+    resumed = resume_run(git, CONFIG, registry(VerifyMinor()), paused.run_id)
+    assert resumed.final_state is RunState.COMPLETE_LOCAL
+    result = json.loads((paused.store_root / "verification/final-verification.json").read_text())
+    assert result["outcome_explanation"][0]["note"] == "cleanup is non-blocking"
+
+
 def test_resume_finishes_plan_receipt_after_plan_finalization_pause(tmp_path, monkeypatch):
     git = repo(tmp_path)
     approve_plan = RunStore.approve_plan

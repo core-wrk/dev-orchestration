@@ -19,7 +19,7 @@ from dev_orchestration.config.resolver import PROTECTED_DEFAULTS
 from dev_orchestration.context.assembler import Category, ContextContractError
 from dev_orchestration.context.packet import ContextRef
 from dev_orchestration.domain.enums import Outcome, RunState, Tier
-from dev_orchestration.domain.findings import Verification
+from dev_orchestration.domain.findings import Verification, verification_allows_completion
 from dev_orchestration.domain.run import GitBlock, PauseRecord, RoleBinding
 from dev_orchestration.git.repo import EmptySnapshotError, GitCommandError, GitRepo
 from dev_orchestration.git.worktree import remove_worktree
@@ -1485,11 +1485,7 @@ def execute_run(
             acceptance_criteria,
             diff,
             _evidence(outcomes),
-            (
-                [finding.id for finding in implementation_review.findings]
-                if implementation_review is not None
-                else []
-            ),
+            implementation_review.findings if implementation_review is not None else [],
             store,
             worktree,
         )
@@ -1497,19 +1493,10 @@ def execute_run(
         cleanup_ephemeral_paths(worktree_repo.root)
         if worktree_repo.change_inventory(base_commit) != review_inventory:
             raise ContextContractError("read-only verification changed the worktree")
-        verdict_criteria = [verdict.criterion for verdict in verification.verdicts]
-        all_verdicts_pass = all(verdict.verdict == "PASS" for verdict in verification.verdicts)
-        criteria_bound = (
-            list(verification.criteria) == list(acceptance_criteria)
-            and verdict_criteria == list(acceptance_criteria)
-            and all(verdict.evidence.strip() for verdict in verification.verdicts)
-        )
-        if (
-            not criteria_bound
-            or verification.outcome is not Outcome.PASS
-            or not all_verdicts_pass
-            or set(verification.unresolved_finding_ids)
-            & set(implementation_review.blocking_ids() if implementation_review else [])
+        if not verification_allows_completion(
+            verification,
+            acceptance_criteria,
+            implementation_review.findings if implementation_review is not None else [],
         ):
             _terminal(
                 engine,

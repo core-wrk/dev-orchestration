@@ -660,6 +660,33 @@ def test_fail_or_unknown_verification_cannot_complete_local(tmp_path, verdict):
     assert outcome.final_state is RunState.FAILED
 
 
+def test_minor_only_verification_can_complete_and_retains_its_note(tmp_path):
+    git = repo(tmp_path)
+    review = {
+        "outcome": "PASS",
+        "findings": [{"id": "F001", "severity": "minor", "summary": "small cleanup"}],
+    }
+    verifier = dict(
+        VERIFY,
+        outcome="CHANGES_REQUIRED",
+        unresolved_finding_ids=["F001"],
+        outcome_explanation=[{"finding_id": "F001", "note": "cleanup is non-blocking"}],
+    )
+    outcome = execute_run(
+        git,
+        CONFIG,
+        registry(Scripted(script(review=review, verifier=verifier))),
+        "finish with minor note",
+        tmp_path / "wt",
+        CRITERIA,
+    )
+    assert outcome.final_state is RunState.COMPLETE_LOCAL
+    result = json.loads((outcome.store_root / "verification/final-verification.json").read_text())
+    assert result["outcome_explanation"] == [
+        {"finding_id": "F001", "note": "cleanup is non-blocking"}
+    ]
+
+
 def test_blocked_escalated_and_nonzero_agent_results_are_terminal(tmp_path):
     git = repo(tmp_path)
     blocked = dict(PASS, outcome="BLOCKED")

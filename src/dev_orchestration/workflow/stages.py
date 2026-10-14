@@ -459,7 +459,7 @@ def verify(
     criteria: list[str],
     current_state: str,
     validation_evidence: str,
-    unresolved: list[str],
+    findings: list[Finding],
     store: RunStore,
     worktree: Path | None = None,
 ) -> Verification:
@@ -482,7 +482,10 @@ def verify(
             ContextRef(
                 label=Category.UNRESOLVED_FINDINGS,
                 path=None,
-                content="\n".join(unresolved),
+                content=json.dumps(
+                    [finding.model_dump(mode="json") for finding in findings],
+                    indent=2,
+                ),
             ),
         ],
     )
@@ -503,6 +506,9 @@ def verify(
                 for verdict in result.verdicts
             ],
             "unresolved_finding_ids": result.unresolved_finding_ids,
+            "outcome_explanation": [
+                item.model_dump(mode="json") for item in result.outcome_explanation
+            ],
         }
     )
     return result

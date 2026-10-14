@@ -13,7 +13,11 @@ from dev_orchestration.config.models import ProjectConfig
 from dev_orchestration.context.assembler import Category, ContextContractError
 from dev_orchestration.context.packet import ContextRef
 from dev_orchestration.domain.enums import Outcome, RunState, Tier
-from dev_orchestration.domain.findings import ReviewResult, Verification
+from dev_orchestration.domain.findings import (
+    ReviewResult,
+    Verification,
+    verification_allows_completion,
+)
 from dev_orchestration.domain.run import GitBlock, PauseRecord
 from dev_orchestration.git.repo import GitCommandError, GitRepo
 from dev_orchestration.scope import ScopeFence
@@ -1017,7 +1021,7 @@ def resume_run(
                         criteria,
                         worktree_repo.change_diff(base),
                         _evidence(outcomes),
-                        [f.id for f in reviewed.findings] if reviewed else [],
+                        reviewed.findings if reviewed else [],
                         store,
                         worktree,
                     )
@@ -1043,20 +1047,10 @@ def resume_run(
                         if reviewed_paths
                         else None
                     )
-                    verdicts = [item.criterion for item in verification.verdicts]
-                    if (
-                        verification.outcome is not Outcome.PASS
-                        or verification.criteria != criteria
-                        or verdicts != criteria
-                        or any(
-                            item.verdict != "PASS" or not item.evidence.strip()
-                            for item in verification.verdicts
-                        )
-                        or (
-                            reviewed
-                            and set(verification.unresolved_finding_ids)
-                            & set(reviewed.blocking_ids())
-                        )
+                    if not verification_allows_completion(
+                        verification,
+                        criteria,
+                        reviewed.findings if reviewed else [],
                     ):
                         _terminal(
                             engine,
