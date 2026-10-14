@@ -60,6 +60,8 @@ def input_hashes(store: RunStore, registry: RoleRegistry) -> dict[str, str]:
             "restart_from": manifest.restart_from,
             "restart_reason": manifest.restart_reason,
             "restart_code_sha256": manifest.restart_code_sha256,
+            "restart_source_base_commit": manifest.restart_source_base_commit,
+            "restart_destination_base_commit": manifest.restart_destination_base_commit,
         }
     if manifest.plan_review_provenance:
         fields["plan_review_provenance"] = manifest.plan_review_provenance

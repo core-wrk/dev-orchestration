@@ -741,6 +741,14 @@ def _restart_cli(monkeypatch, tmp_path, adapter):
     )
 
 
+def _commit_file(root, relative, content, message):
+    path = root / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content)
+    subprocess.run(["git", "-C", str(root), "add", relative], check=True)
+    subprocess.run(["git", "-C", str(root), "commit", "-qm", message], check=True)
+
+
 def test_restart_cause_other_rechecks_saved_code_without_replanning(tmp_path, monkeypatch):
     root, source_id, adapter = _failed_verification_source(tmp_path, monkeypatch)
     source_manifest = RunStore(root, source_id).read_manifest()
@@ -767,6 +775,200 @@ def test_restart_cause_other_rechecks_saved_code_without_replanning(tmp_path, mo
         RunStore(root, source_id).root / "execution/final-change.patch"
     ).read_bytes() == archived_patch
     assert RunStore(root, source_id).read_manifest().status is RunState.FAILED
+
+
+def test_restart_rebases_patch_after_unrelated_docs_commit_and_records_bases(tmp_path, monkeypatch):
+    root, source_id, adapter = _failed_verification_source(tmp_path, monkeypatch)
+    source_base = RunStore(root, source_id).read_manifest().git.base_commit
+    _commit_file(root, "docs/notes.md", "unrelated note\n", "docs: add unrelated note")
+    destination_base = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "HEAD"], check=True, capture_output=True, text=True
+    ).stdout.strip()
+    _restart_cli(monkeypatch, tmp_path, adapter)
+    monkeypatch.chdir(root)
+    adapter.seen.clear()
+
+    result = CliRunner().invoke(app, ["restart", source_id, "--reason", "validate on new base"])
+
+    assert result.exit_code == 0, result.output
+    child = _latest_manifest(root)
+    assert child.git.base_commit == destination_base
+    assert child.restart_source_base_commit == source_base
+    assert child.restart_destination_base_commit == destination_base
+    assert child.restart_from == "validation"
+    assert adapter.seen == ["implementation_reviewer", "verifier"]
+    events = (RunStore(root, child.run_id).root / "events.jsonl").read_text()
+    assert f'"source_base_commit": "{source_base}"' in events
+    assert f'"destination_base_commit": "{destination_base}"' in events
+
+
+def test_restart_refuses_base_overlap_and_changed_base_shortcuts(tmp_path, monkeypatch):
+    root, source_id, adapter = _failed_verification_source(tmp_path, monkeypatch)
+    _commit_file(root, "src/app.py", "x = 9\n", "change implementation path")
+    _restart_cli(monkeypatch, tmp_path, adapter)
+    monkeypatch.chdir(root)
+
+    result = CliRunner().invoke(app, ["restart", source_id, "--reason", "try overlap"])
+
+    assert result.exit_code == 1
+    assert "paths touched by the saved patch" in result.output
+    assert len(list((root / ".ai" / "runs").glob("*/manifest.json"))) == 1
+
+
+def test_restart_refuses_patch_conflict_with_destination_file_directory_change(
+    tmp_path, monkeypatch
+):
+    from dev_orchestration.git.repo import GitRepo
+
+    root, source_id, adapter = _failed_verification_source(tmp_path, monkeypatch)
+    source_base = RunStore(root, source_id).read_manifest().git.base_commit
+    patch_tree = tmp_path / "patch-tree"
+    git = GitRepo(root)
+    git.run_git("worktree", "add", "--quiet", "--detach", str(patch_tree), source_base)
+    (patch_tree / "src" / "newdir").mkdir()
+    (patch_tree / "src" / "newdir" / "module.py").write_text("VALUE = 1\n")
+    patch_file = tmp_path / "directory.patch"
+    patch_file.write_bytes(GitRepo(patch_tree).change_patch_bytes(source_base))
+    git.run_git("worktree", "remove", "--force", str(patch_tree))
+    _commit_file(root, "src/newdir", "this path is a file\n", "add blocking path")
+    _restart_cli(monkeypatch, tmp_path, adapter)
+    monkeypatch.chdir(root)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "restart",
+            source_id,
+            "--patch",
+            str(patch_file),
+            "--reason",
+            "test destination patch conflict",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "does not apply cleanly to the current base" in result.output
+    assert len(list((root / ".ai" / "runs").glob("*/manifest.json"))) == 1
+
+
+def test_restart_detects_overlap_with_new_side_of_base_rename(tmp_path, monkeypatch):
+    from dev_orchestration.git.repo import GitRepo
+
+    root, source_id, adapter = _failed_verification_source(tmp_path, monkeypatch)
+    source_base = RunStore(root, source_id).read_manifest().git.base_commit
+    patch_tree = tmp_path / "patch-tree"
+    git = GitRepo(root)
+    git.run_git("worktree", "add", "--quiet", "--detach", str(patch_tree), source_base)
+    (patch_tree / "src" / "renamed.py").write_text("VALUE = 1\n")
+    patch_file = tmp_path / "renamed-path.patch"
+    patch_file.write_bytes(GitRepo(patch_tree).change_patch_bytes(source_base))
+    git.run_git("worktree", "remove", "--force", str(patch_tree))
+    (root / "src" / "app.py").rename(root / "src" / "renamed.py")
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+    subprocess.run(
+        ["git", "-C", str(root), "commit", "-qm", "rename implementation path"], check=True
+    )
+    _restart_cli(monkeypatch, tmp_path, adapter)
+    monkeypatch.chdir(root)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "restart",
+            source_id,
+            "--patch",
+            str(patch_file),
+            "--reason",
+            "test renamed path overlap",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "paths touched by the saved patch" in result.output
+    assert "src/renamed.py" in result.output
+    assert len(list((root / ".ai" / "runs").glob("*/manifest.json"))) == 1
+
+
+@pytest.mark.parametrize("shortcut", ["review", "verification"])
+def test_changed_base_refuses_review_and_verification_shortcuts(tmp_path, monkeypatch, shortcut):
+    root, source_id, adapter = _failed_verification_source(tmp_path, monkeypatch)
+    _commit_file(root, "docs/notes.md", "unrelated note\n", "docs: add unrelated note")
+    _restart_cli(monkeypatch, tmp_path, adapter)
+    monkeypatch.chdir(root)
+    adapter.seen.clear()
+
+    result = CliRunner().invoke(
+        app,
+        ["restart", source_id, "--from", shortcut, "--reason", "try old evidence"],
+    )
+
+    assert result.exit_code == 1
+    assert "base changed" in result.output
+    assert adapter.seen == []
+    assert len(list((root / ".ai" / "runs").glob("*/manifest.json"))) == 1
+
+
+def test_restart_refuses_a_diverged_base(tmp_path, monkeypatch):
+    root, source_id, adapter = _failed_verification_source(tmp_path, monkeypatch)
+    source_base = RunStore(root, source_id).read_manifest().git.base_commit
+    parent = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", f"{source_base}^"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    subprocess.run(["git", "-C", str(root), "checkout", "-q", "--detach", parent], check=True)
+    _commit_file(root, "docs/other.md", "separate history\n", "docs: diverged history")
+    _restart_cli(monkeypatch, tmp_path, adapter)
+    monkeypatch.chdir(root)
+
+    result = CliRunner().invoke(app, ["restart", source_id, "--reason", "try divergence"])
+
+    assert result.exit_code == 1
+    assert "base diverged" in result.output
+    assert len(list((root / ".ai" / "runs").glob("*/manifest.json"))) == 1
+
+
+def test_changed_base_requires_fresh_validation_even_when_old_validation_passed(
+    tmp_path, monkeypatch
+):
+    root, source_id, adapter = _failed_verification_source(tmp_path, monkeypatch)
+    _commit_file(root, "src/library.py", "VALUE = (\n", "library: add syntax error")
+    _fail_restart_validation(monkeypatch)
+    _restart_cli(monkeypatch, tmp_path, adapter)
+    monkeypatch.chdir(root)
+    adapter.seen.clear()
+
+    result = CliRunner().invoke(app, ["restart", source_id, "--reason", "validate changed base"])
+
+    assert result.exit_code == 1
+    child = _latest_manifest(root)
+    assert child.terminal_cause == "restart_validation_failed"
+    assert not list(
+        (RunStore(root, child.run_id).root / "review").glob("implementation-review-*.json")
+    )
+    assert adapter.seen == []
+
+
+@pytest.mark.parametrize("relative", [".ai/project.yaml", ".ai/context.md"])
+def test_restart_refuses_changed_policy_or_context(tmp_path, monkeypatch, relative):
+    root, source_id, adapter = _failed_verification_source(tmp_path, monkeypatch)
+    if relative == ".ai/project.yaml":
+        content = (root / relative).read_text() + "\n# changed policy input\n"
+    else:
+        content = "new persistent context\n"
+    _commit_file(root, relative, content, "change restart input")
+    _restart_cli(monkeypatch, tmp_path, adapter)
+    monkeypatch.chdir(root)
+
+    result = CliRunner().invoke(app, ["restart", source_id, "--reason", "try changed inputs"])
+
+    assert result.exit_code == 1
+    assert any(
+        message in result.output
+        for message in ("configuration changed", "declared context changed", "saved request")
+    )
+    assert len(list((root / ".ai" / "runs").glob("*/manifest.json"))) == 1
 
 
 def test_restart_verification_shortcut_requires_and_reuses_exact_evidence(tmp_path, monkeypatch):

@@ -94,6 +94,8 @@ class RunManifest(BaseModel):
     restart_from: Literal["validation", "review", "verification", "remediation"] | None = None
     restart_reason: str | None = None
     restart_code_sha256: str | None = None
+    restart_source_base_commit: str | None = None
+    restart_destination_base_commit: str | None = None
     external_plan_artifact: str | None = None
     plan_review_provenance: dict = Field(default_factory=dict)
     stage_attempts: dict[str, int] = Field(default_factory=dict)

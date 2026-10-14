@@ -59,6 +59,47 @@ def _patch_code_digest(repo: GitRepo, base_commit: str, patch: bytes) -> str:
                 remove_worktree(repo, worktree)
 
 
+def _patch_paths(repo: GitRepo, base_commit: str, patch: bytes) -> set[str]:
+    """Return every path touched by a patch, including both sides of renames."""
+    with tempfile.TemporaryDirectory(prefix="dev-orch-restart-paths-") as scratch:
+        worktree = Path(scratch) / "checkout"
+        repo.run_git("worktree", "add", "--quiet", "--detach", str(worktree), base_commit)
+        try:
+            checkout = GitRepo(worktree)
+            checkout.apply_patch_bytes(patch)
+            return set(checkout.change_inventory(base_commit))
+        finally:
+            if worktree.exists():
+                from dev_orchestration.git.worktree import remove_worktree
+
+                remove_worktree(repo, worktree)
+
+
+def _require_compatible_base(repo: GitRepo, source_base: str, patch: bytes) -> str:
+    destination_base = repo.current_commit()
+    if destination_base == source_base:
+        return destination_base
+    if not repo.is_ancestor(source_base, destination_base):
+        raise ResumeRefused("repository base diverged; start a new run against the current base")
+    changed_paths = set(repo.change_inventory(source_base))
+    patch_paths = _patch_paths(repo, source_base, patch)
+    overlap = sorted(changed_paths & patch_paths)
+    if overlap:
+        raise ResumeRefused(
+            "repository base changed paths touched by the saved patch: " + ", ".join(overlap)
+        )
+    return destination_base
+
+
+def _destination_patch_digest(repo: GitRepo, base_commit: str, patch: bytes) -> str:
+    try:
+        return _patch_code_digest(repo, base_commit, patch)
+    except GitCommandError as exc:
+        raise ResumeRefused(
+            f"saved patch does not apply cleanly to the current base: {exc}"
+        ) from exc
+
+
 def _version(path: str) -> int:
     try:
         return int(Path(path).stem.rsplit("-v", 1)[1])
@@ -99,8 +140,8 @@ def _source_contract(
         raise ResumeRefused("source request is missing")
     if not manifest.git.base_commit or not manifest.git.branch:
         raise ResumeRefused("source run has no recorded base and branch")
-    if repo.current_commit() != manifest.git.base_commit:
-        raise ResumeRefused("repository base changed; start a new run against the current base")
+    if not repo.is_ancestor(manifest.git.base_commit, repo.current_commit()):
+        raise ResumeRefused("repository base diverged; start a new run against the current base")
     if not manifest.config_layers or manifest.config_layers[0] != config.model_dump(mode="json"):
         raise ResumeRefused("project configuration changed since the source run")
     if resolve_run_policy(manifest.config_layers) != manifest.resolved_config:
@@ -286,9 +327,12 @@ def restart_status(
         manifest = source.read_manifest()
         if worktree is None:
             patch = (source.root / "execution/final-change.patch").read_bytes()
-            digest = _patch_code_digest(repo, manifest.git.base_commit or "", patch)
+            base = _require_compatible_base(repo, manifest.git.base_commit or "", patch)
+            digest = _destination_patch_digest(repo, base, patch)
         else:
-            digest = _code_digest(capture_snapshot(GitRepo(worktree), manifest.git.base_commit))
+            patch = GitRepo(worktree).change_patch_bytes(manifest.git.base_commit)
+            base = _require_compatible_base(repo, manifest.git.base_commit or "", patch)
+            digest = _destination_patch_digest(repo, base, patch)
         stages = ["validation"]
         blockers = []
         try:
@@ -352,7 +396,16 @@ def restart_run(
     if not patch_bytes.strip():
         raise ResumeRefused("source has no implementation changes to restart")
 
-    source_digest = _patch_code_digest(repo, original.git.base_commit or "", patch_bytes)
+    source_base = original.git.base_commit or ""
+    destination_base = _require_compatible_base(repo, source_base, patch_bytes)
+    base_changed = destination_base != source_base
+    destination_digest = _destination_patch_digest(repo, destination_base, patch_bytes)
+    if base_changed and from_stage in {"review", "verification"}:
+        raise ResumeRefused(
+            "base changed; review and verification shortcuts require fresh validation"
+        )
+
+    source_digest = _patch_code_digest(repo, source_base, patch_bytes)
     if from_stage == "review":
         _validation_evidence(source, source_digest)
     elif from_stage == "verification":
@@ -378,10 +431,12 @@ def restart_run(
     try:
         worktree_repo = GitRepo(worktree)
         worktree_repo.apply_patch_bytes(patch_bytes)
-        enforce_fence(worktree_repo, original.git.base_commit or "", fence)
-        snapshot = capture_snapshot(worktree_repo, original.git.base_commit or "")
+        enforce_fence(worktree_repo, destination_base, fence)
+        snapshot = capture_snapshot(worktree_repo, destination_base)
         code_digest = _code_digest(snapshot)
-        if code_digest != source_digest:
+        if code_digest != destination_digest:
+            raise ResumeRefused("archived patch changed while preparing the restart")
+        if not base_changed and code_digest != source_digest:
             raise ResumeRefused("archived patch changed while preparing the restart")
         if from_stage == "review":
             _validation_evidence(source, code_digest)
@@ -419,6 +474,8 @@ def restart_run(
                 "restart_from": from_stage,
                 "restart_reason": reason.strip(),
                 "restart_code_sha256": code_digest,
+                "restart_source_base_commit": source_base,
+                "restart_destination_base_commit": destination_base,
                 "stage_attempts": {},
                 "validation_repairs_reserved": 0,
                 "validation_artifact": None,
@@ -434,6 +491,8 @@ def restart_run(
                 "mode": mode,
                 "reason": reason.strip(),
                 "code_sha256": code_digest,
+                "source_base_commit": source_base,
+                "destination_base_commit": destination_base,
             }
         )
 
