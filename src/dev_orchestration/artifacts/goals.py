@@ -12,7 +12,9 @@ from dev_orchestration.domain.enums import RunState
 from dev_orchestration.domain.run import RunManifest
 from dev_orchestration.git.repo import GitRepo
 
-MAX_FAILED_ATTEMPTS = 3
+MAX_PRODUCT_FAILURES = 3
+MAX_NON_PRODUCT_FAILURES = 6
+MAX_REPEATED_NON_PRODUCT_FAILURES = 2
 _GOAL_ID = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}\Z")
 _HUMAN_DECISION_CAUSES = frozenset(
     {
@@ -62,6 +64,12 @@ def _requires_human_decision(manifest: RunManifest) -> bool:
         return True
     reason = (manifest.terminal_reason or "").lower()
     return any(marker in reason for marker in _HUMAN_DECISION_REASONS)
+
+
+def _failure_class(manifest: RunManifest) -> str:
+    # Pre-Goal-7 manifests have no class; preserve their history and count them
+    # conservatively as product failures.
+    return manifest.failure_class or "product"
 
 
 class GoalLedger:
@@ -148,12 +156,6 @@ class GoalLedger:
             )
 
         failed = [item for item in current if item.status in {RunState.FAILED, RunState.ESCALATED}]
-        if len(failed) >= MAX_FAILED_ATTEMPTS:
-            ids = ", ".join(item.run_id for item in failed)
-            raise GoalError(
-                f"goal {goal_id} reached its {MAX_FAILED_ATTEMPTS}-attempt limit ({ids}); "
-                "resolve the failures and use `dev-orch goal-reopen` with a reason"
-            )
         resolved_runs = {
             event.get("run_id")
             for event in events
@@ -177,6 +179,43 @@ class GoalLedger:
                     f"({item.terminal_reason or item.terminal_cause}); "
                     "resolve it and explicitly reopen the goal"
                 )
+        product = [item for item in failed if _failure_class(item) == "product"]
+        non_product = [item for item in failed if _failure_class(item) != "product"]
+        ordered_failures = sorted(
+            failed,
+            key=lambda item: (
+                item.goal_attempt or 0,
+                item.created_at or datetime.min.replace(tzinfo=UTC),
+            ),
+        )
+        repeated = (
+            len(ordered_failures) >= MAX_REPEATED_NON_PRODUCT_FAILURES
+            and _failure_class(ordered_failures[-1]) != "product"
+            and _failure_class(ordered_failures[-2]) != "product"
+            and ordered_failures[-1].failure_class == ordered_failures[-2].failure_class
+            and ordered_failures[-1].failure_signature
+            and ordered_failures[-1].failure_signature == ordered_failures[-2].failure_signature
+        )
+        if len(product) >= MAX_PRODUCT_FAILURES:
+            ids = ", ".join(item.run_id for item in failed)
+            raise GoalError(
+                f"goal {goal_id} reached its {MAX_PRODUCT_FAILURES}-product-failure limit "
+                f"({MAX_PRODUCT_FAILURES}-attempt limit; {ids}); "
+                "resolve the failures and use `dev-orch goal-reopen` with a reason"
+            )
+        if len(non_product) >= MAX_NON_PRODUCT_FAILURES or repeated:
+            item = ordered_failures[-1]
+            limit = (
+                "two consecutive non-product failures share the same cause signature"
+                if repeated
+                else f"the {MAX_NON_PRODUCT_FAILURES}-non-product-failure limit"
+            )
+            raise GoalError(
+                f"goal {goal_id} reached {limit} at run {item.run_id}; correct the setup or "
+                "evidence, then use `dev-orch goal-reopen` with a human reason"
+            )
+        if blocked:
+            item = blocked[-1]
             self._append(
                 goal_id,
                 {

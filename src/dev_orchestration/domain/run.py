@@ -81,6 +81,11 @@ class RunManifest(BaseModel):
     completed_at: datetime | None = None
     terminal_reason: str | None = None
     terminal_cause: str | None = None
+    failure_class: (
+        Literal["product", "evidence", "environment", "framework", "human_decision"] | None
+    ) = None
+    failure_reason: str | None = None
+    failure_signature: str | None = None
     retry_of: str | None = None
     goal_id: str | None = None
     goal_attempt: int | None = None

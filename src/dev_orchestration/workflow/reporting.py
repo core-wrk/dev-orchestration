@@ -44,6 +44,11 @@ def describe_status(
     ]
     if manifest.git.branch:
         lines.append(f"Branch: {manifest.git.branch}")
+    if manifest.status in {RunState.FAILED, RunState.ESCALATED}:
+        lines.append(f"Failure class: {manifest.failure_class or 'product (legacy)'}")
+        reason = manifest.failure_reason or manifest.terminal_reason
+        if reason:
+            lines.append(f"Failure reason: {reason}")
     if checkpoint is not None:
         lines.append(f"Next role: {checkpoint.get('next_stage', 'unknown')}")
     if manifest.pause is not None:

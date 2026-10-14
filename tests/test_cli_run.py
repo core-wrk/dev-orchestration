@@ -137,6 +137,21 @@ def test_status_never_prints_raw_json(tmp_path, monkeypatch):
     assert '{"' not in result.output and "schema_version" not in result.output
 
 
+def test_status_shows_failure_class_and_reason(tmp_path, monkeypatch):
+    root = repo(tmp_path)
+    run = store(root, "20260829-101500_standard_failed", RunState.FAILED)
+    run.update_manifest(
+        failure_class="environment",
+        failure_reason="validation dependency is missing",
+        terminal_reason="validation dependency is missing",
+    )
+    monkeypatch.chdir(root)
+    result = CliRunner().invoke(app, ["status", run.run_id])
+    assert result.exit_code == 0
+    assert "Failure class: environment" in result.output
+    assert "Failure reason: validation dependency is missing" in result.output
+
+
 def test_status_shows_repeated_validation_evidence_paths(tmp_path, monkeypatch):
     root = repo(tmp_path)
     run = store(root, "20260829-101500_standard_retry", RunState.FAILED)

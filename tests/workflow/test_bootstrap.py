@@ -146,6 +146,89 @@ def test_reopening_a_goal_starts_a_new_attempt_generation(repo):
         assert reservation.attempt == 1
 
 
+def _record_goal_failure(
+    repo, goal_id, run_id, attempt, failure_class=None, signature=None, cause="validation_failed"
+):
+    store = RunStore(repo.root, run_id)
+    store.initialize(
+        RunManifest(
+            run_id=run_id,
+            repository=str(repo.root),
+            workflow="standard",
+            tier=Tier.STANDARD,
+            project_class=ProjectClass.INTERNAL_UTILITY,
+            goal_id=goal_id,
+            goal_attempt=attempt,
+            status=RunState.FAILED,
+            terminal_reason="observed failure",
+            terminal_cause=cause,
+            failure_class=failure_class,
+            failure_reason="observed failure" if failure_class else None,
+            failure_signature=signature,
+        )
+    )
+    store.append_event({"event": "run_cleanup_complete"})
+
+
+def test_goal_ledger_applies_non_product_limit_and_legacy_product_fallback(repo):
+    for attempt in range(1, 7):
+        _record_goal_failure(
+            repo,
+            "six-nonproduct",
+            f"nonproduct-{attempt}",
+            attempt,
+            "environment",
+            f"validation:lint-{attempt}",
+        )
+    with (
+        pytest.raises(GoalError, match="correct the setup or evidence"),
+        GoalLedger(repo.root).reserve("six-nonproduct"),
+    ):
+        pass
+
+    for attempt in range(1, 4):
+        _record_goal_failure(repo, "legacy-product", f"legacy-{attempt}", attempt)
+    with (
+        pytest.raises(GoalError, match="3-attempt limit"),
+        GoalLedger(repo.root).reserve("legacy-product"),
+    ):
+        pass
+
+
+def test_goal_ledger_stops_repeated_non_product_signature_but_allows_distinct_causes(repo):
+    _record_goal_failure(repo, "repeat-sig", "repeat-one", 1, "evidence", "verifier:criteria")
+    _record_goal_failure(repo, "repeat-sig", "repeat-two", 2, "evidence", "verifier:criteria")
+    with (
+        pytest.raises(GoalError, match="two consecutive non-product failures"),
+        GoalLedger(repo.root).reserve("repeat-sig"),
+    ):
+        pass
+
+    _record_goal_failure(repo, "distinct-sig", "distinct-one", 1, "environment", "provider:a")
+    _record_goal_failure(repo, "distinct-sig", "distinct-two", 2, "environment", "provider:b")
+    with GoalLedger(repo.root).reserve("distinct-sig") as reservation:
+        assert reservation.attempt == 3
+
+
+def test_plan_review_exhaustion_keeps_human_decision_precedence(repo):
+    _record_goal_failure(
+        repo,
+        "governance-precedence",
+        "plan-exhausted",
+        1,
+        "product",
+        "plan-review:findings",
+        "plan_review_exhausted",
+    )
+    _record_goal_failure(repo, "governance-precedence", "product-two", 2)
+    _record_goal_failure(repo, "governance-precedence", "product-three", 3)
+    with (
+        pytest.raises(GoalError, match="human decision"),
+        GoalLedger(repo.root).reserve("governance-precedence"),
+    ):
+        pass
+
+
 def test_legacy_run_needs_explicit_goal_association_before_it_counts(repo):
     store = RunStore(repo.root, "legacy-run")
     store.initialize(

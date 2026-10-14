@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import re
 import subprocess
 import tempfile
 from datetime import UTC, datetime
@@ -264,11 +265,52 @@ def _terminal(
     state: RunState,
     reason: str,
     cause: str = "other",
+    failure_class: str | None = None,
+    failure_signature: str | None = None,
 ) -> None:
     store = engine.store
-    store.update_manifest(terminal_reason=reason, terminal_cause=cause)
+    is_failure = state in {RunState.FAILED, RunState.ESCALATED}
+    if is_failure:
+        if failure_class is None:
+            if cause == "environment":
+                failure_class = "environment"
+            elif cause in {
+                "implementation_review_escalated",
+                "scope_violation",
+                "safety_escalation",
+                "restart_governance_blocked",
+            }:
+                failure_class = "human_decision"
+            else:
+                # Review exhaustion is a product defect and independently requires
+                # a human resolution through the existing governance cause.
+                failure_class = "product"
+        normalized = reason.replace(store.run_id, "<run>")
+        normalized = re.sub(
+            r"(?:/private)?/(?:tmp|var/folders)/[^\s:]+", "<temporary-path>", normalized
+        )
+        normalized = re.sub(r"\b\d{8}-\d{6}_[a-z]+_[a-z0-9_-]+\b", "<run>", normalized)
+        normalized = re.sub(r"\b\d{4}-\d{2}-\d{2}T[^\s]+", "<time>", normalized)
+        failure_signature = failure_signature or f"{cause}:{normalized.strip().lower()}"
+    else:
+        failure_class = None
+        failure_signature = None
+    store.update_manifest(
+        terminal_reason=reason,
+        terminal_cause=cause,
+        failure_class=failure_class,
+        failure_reason=reason if is_failure else None,
+        failure_signature=failure_signature,
+    )
     store.append_event(
-        {"event": "run_terminal", "state": str(state), "detail": reason, "cause": cause}
+        {
+            "event": "run_terminal",
+            "state": str(state),
+            "detail": reason,
+            "cause": cause,
+            "failure_class": failure_class,
+            "failure_signature": failure_signature,
+        }
     )
     if engine.state not in {
         RunState.COMPLETE_LOCAL,
@@ -1351,6 +1393,8 @@ def execute_run(
                 RunState.FAILED,
                 "required validation failed after repair",
                 "validation_failed",
+                failure_signature="validation:"
+                + ",".join(outcome.name for outcome in outcomes if not outcome.passed),
             )
             return _outcome(engine, repo=repo, worktree=worktree)
 
@@ -1445,6 +1489,8 @@ def execute_run(
                     RunState.FAILED,
                     "required validation failed after repair",
                     "validation_failed",
+                    failure_signature="validation:"
+                    + ",".join(outcome.name for outcome in outcomes if not outcome.passed),
                 )
                 return _outcome(engine, repo=repo, worktree=worktree)
             diff = worktree_repo.change_diff(base_commit)
@@ -1519,10 +1565,23 @@ def execute_run(
             acceptance_criteria,
             implementation_review.findings if implementation_review is not None else [],
         ):
+            evidence_only = (
+                all(outcome.passed for outcome in outcomes)
+                and verification.criteria == acceptance_criteria
+                and not any(verdict.verdict == "FAIL" for verdict in verification.verdicts)
+                and not any(
+                    finding.severity.value == "blocking"
+                    for finding in (
+                        implementation_review.findings if implementation_review is not None else []
+                    )
+                )
+            )
             _terminal(
                 engine,
                 RunState.FAILED,
                 "final verification did not provide an unqualified PASS for the supplied criteria",
+                failure_class="evidence" if evidence_only else "product",
+                failure_signature="verification:acceptance-criteria",
             )
             return _outcome(engine, verification, repo=repo, worktree=worktree)
 
@@ -1634,7 +1693,17 @@ def execute_run(
         _terminal(engine, RunState.FAILED, str(exc), "environment")
         return _outcome(engine, repo=repo, worktree=worktree)
     except (OSError, subprocess.SubprocessError) as exc:
-        _terminal(engine, RunState.ESCALATED, f"provider invocation failed: {exc}")
+        _terminal(
+            engine,
+            RunState.ESCALATED,
+            f"provider invocation failed: {exc}",
+            "environment",
+            failure_class="environment",
+            failure_signature="provider-invocation:"
+            + ",".join(
+                sorted({binding.adapter for binding in store.read_manifest().roles.values()})
+            ),
+        )
         return _outcome(engine, repo=repo, worktree=worktree)
     except Exception as exc:  # noqa: BLE001 - guarantee a durable terminal state
         _terminal(engine, RunState.FAILED, f"unexpected workflow failure: {exc}")

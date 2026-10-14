@@ -198,6 +198,10 @@ def recover_legacy(
                         "status": RunState.PAUSED_INTERRUPTED,
                         "completed_at": None,
                         "terminal_reason": None,
+                        "terminal_cause": None,
+                        "failure_class": None,
+                        "failure_reason": None,
+                        "failure_signature": None,
                         "pause": None,
                         "auto_resume": False,
                         "git": GitBlock(

@@ -464,6 +464,9 @@ def restart_run(
                 "completed_at": None,
                 "terminal_reason": None,
                 "terminal_cause": None,
+                "failure_class": None,
+                "failure_reason": None,
+                "failure_signature": None,
                 "retry_of": None,
                 "checkpoint": None,
                 "auto_resume": False,
@@ -604,6 +607,11 @@ def restart_run(
                 status=RunState.ESCALATED,
                 terminal_cause=cause,
                 terminal_reason=str(exc),
+                failure_class="human_decision"
+                if cause == "restart_governance_blocked"
+                else "product",
+                failure_reason=str(exc),
+                failure_signature=f"{cause}:{'scope' if isinstance(exc, ScopeViolation) else 'restart'}",
             )
             store.append_event({"event": cause, "detail": str(exc)})
         cleanup_worktree_if_unproductive(Engine(store), repo, worktree)

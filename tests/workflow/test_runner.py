@@ -722,6 +722,7 @@ def test_blocked_escalated_and_nonzero_agent_results_are_terminal(tmp_path):
         CRITERIA,
     )
     assert escalated.final_state is RunState.ESCALATED
+    assert RunStore(git.root, escalated.run_id).read_manifest().failure_class == "human_decision"
     nonzero = execute_run(
         git,
         CONFIG,
@@ -731,6 +732,7 @@ def test_blocked_escalated_and_nonzero_agent_results_are_terminal(tmp_path):
         CRITERIA,
     )
     assert nonzero.final_state is RunState.ESCALATED
+    assert RunStore(git.root, nonzero.run_id).read_manifest().failure_reason
 
 
 def test_three_failed_attempts_stop_the_goal_until_human_reopen(tmp_path):

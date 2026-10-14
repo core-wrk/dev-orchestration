@@ -337,6 +337,9 @@ def bootstrap_run(
                 completed_at=datetime.now(UTC),
                 terminal_reason=str(exc),
                 terminal_cause="bootstrap_failed",
+                failure_class="environment",
+                failure_reason=str(exc),
+                failure_signature="bootstrap:worktree-create",
             )
             store.append_event({"event": "bootstrap_failed", "detail": str(exc)})
             from dev_orchestration.workflow.engine import Engine
@@ -354,6 +357,10 @@ def bootstrap_run(
             status=RunState.FAILED,
             completed_at=datetime.now(UTC),
             terminal_reason=reason,
+            terminal_cause="bootstrap_integrity_failed",
+            failure_class="environment",
+            failure_reason=reason,
+            failure_signature="bootstrap:base-commit-moved",
         )
         store.append_event({"event": "bootstrap_failed", "detail": reason})
         from dev_orchestration.workflow.engine import Engine
@@ -367,6 +374,10 @@ def bootstrap_run(
             status=RunState.FAILED,
             completed_at=datetime.now(UTC),
             terminal_reason=reason,
+            terminal_cause="bootstrap_integrity_failed",
+            failure_class="environment",
+            failure_reason=reason,
+            failure_signature="bootstrap:base-ancestry",
         )
         store.append_event({"event": "bootstrap_failed", "detail": reason})
         from dev_orchestration.workflow.engine import Engine
