@@ -274,7 +274,11 @@ def _use_local_worktree(monkeypatch, tmp_path):
 
 
 def _latest_manifest(root):
-    manifests = sorted((root / ".ai" / "runs").glob("*/manifest.json"))
+    manifests = sorted(
+        path
+        for path in (root / ".ai" / "runs").glob("*/manifest.json")
+        if path.parent.name != ".goals"
+    )
     return RunManifest.model_validate_json(manifests[-1].read_text(encoding="utf-8"))
 
 
@@ -919,6 +923,142 @@ def test_remediation_restart_uses_fresh_review_and_bounded_worker_path(tmp_path,
         "implementation_reviewer",
         "verifier",
     ]
+
+
+def _fail_restart_validation(monkeypatch, *, passes_after_repair=False):
+    from dev_orchestration.workflow import recovery as recovery_module
+    from dev_orchestration.workflow.validation import ValidationOutcome
+
+    calls = 0
+
+    def validate(_commands, _tier, cwd):
+        nonlocal calls
+        calls += 1
+        passed = passes_after_repair and calls > 1
+        return [
+            ValidationOutcome(
+                name="unit",
+                command="check app",
+                exit_code=0 if passed else 1,
+                passed=passed,
+                stdout_tail="",
+                stderr_tail="",
+            )
+        ]
+
+    monkeypatch.setattr(recovery_module, "run_validations", validate)
+
+
+def _restart_with_validation_failure(root, source_id, adapter, monkeypatch, tmp_path):
+    from dev_orchestration.adapters.base import AgentResult
+
+    _restart_cli(monkeypatch, tmp_path, adapter)
+    monkeypatch.chdir(root)
+    original_run = adapter.run
+    worker_calls = 0
+
+    def restart_worker(request):
+        nonlocal worker_calls
+        if request.role == "implementation_worker":
+            worker_calls += 1
+            adapter.seen.append(request.role)
+            (request.cwd / "src" / "app.py").write_text("x = 3\n")
+            if getattr(adapter, "interrupt_repair", False) and worker_calls == 1:
+                from dev_orchestration.adapters.base import AgentTimeoutError
+
+                raise AgentTimeoutError(request.role, 1, "fake")
+            now = datetime.now(UTC)
+            return AgentResult("fake", None, 0, "done", now, now)
+        return original_run(request)
+
+    adapter.run = restart_worker
+    adapter.seen.clear()
+    result = CliRunner().invoke(
+        app,
+        ["restart", source_id, "--from", "remediation", "--reason", "repair validation"],
+    )
+    return result, worker_calls
+
+
+def test_remediation_restart_repairs_failed_validation_before_fresh_review(tmp_path, monkeypatch):
+    root, source_id, adapter = _failed_verification_source(tmp_path, monkeypatch)
+    _fail_restart_validation(monkeypatch, passes_after_repair=True)
+
+    result, worker_calls = _restart_with_validation_failure(
+        root, source_id, adapter, monkeypatch, tmp_path
+    )
+
+    assert result.exit_code == 0, result.output
+    child = _latest_manifest(root)
+    assert child.status is RunState.COMPLETE_LOCAL
+    assert child.validation_repairs_reserved == 1
+    assert worker_calls == 1
+    assert adapter.seen == [
+        "implementation_worker",
+        "implementation_reviewer",
+        "verifier",
+    ]
+
+
+def test_check_only_restart_does_not_repair_failed_validation(tmp_path, monkeypatch):
+    root, source_id, adapter = _failed_verification_source(tmp_path, monkeypatch)
+    _fail_restart_validation(monkeypatch)
+    _restart_cli(monkeypatch, tmp_path, adapter)
+    monkeypatch.chdir(root)
+    adapter.seen.clear()
+
+    result = CliRunner().invoke(app, ["restart", source_id, "--reason", "check saved code"])
+
+    assert result.exit_code == 1
+    child = _latest_manifest(root)
+    assert child.restart_mode == "check_only"
+    assert child.terminal_cause == "restart_validation_failed"
+    assert child.validation_repairs_reserved == 0
+    assert adapter.seen == []
+
+
+def test_remediation_restart_stops_after_ineffective_validation_repair(tmp_path, monkeypatch):
+    root, source_id, adapter = _failed_verification_source(tmp_path, monkeypatch)
+    _fail_restart_validation(monkeypatch)
+
+    result, worker_calls = _restart_with_validation_failure(
+        root, source_id, adapter, monkeypatch, tmp_path
+    )
+
+    assert result.exit_code == 1
+    child = _latest_manifest(root)
+    assert child.status is RunState.FAILED
+    assert child.terminal_cause == "validation_failed"
+    assert child.validation_repairs_reserved == 1
+    assert worker_calls == 1
+    assert adapter.seen == ["implementation_worker"]
+
+
+def test_interrupted_remediation_validation_repair_resumes_reserved_attempt(tmp_path, monkeypatch):
+    root, source_id, adapter = _failed_verification_source(tmp_path, monkeypatch)
+    _fail_restart_validation(monkeypatch, passes_after_repair=True)
+    adapter.interrupt_repair = True
+
+    first, first_worker_calls = _restart_with_validation_failure(
+        root, source_id, adapter, monkeypatch, tmp_path
+    )
+
+    assert first.exit_code == 1
+    paused = _latest_manifest(root)
+    assert paused.status is RunState.PAUSED_INTERRUPTED
+    assert paused.validation_repairs_reserved == 1
+    assert first_worker_calls == 1
+    adapter.interrupt_repair = False
+    adapter.seen.clear()
+
+    resumed = CliRunner().invoke(app, ["resume", paused.run_id])
+
+    assert resumed.exit_code == 0, resumed.output
+    complete = _latest_manifest(root)
+    assert complete.status is RunState.COMPLETE_LOCAL
+    assert complete.validation_repairs_reserved == 1
+    assert adapter.seen == ["implementation_worker", "implementation_reviewer", "verifier"]
+    assert (RunStore(root, complete.run_id).root / "execution/validation-repair-v1.json").is_file()
 
 
 def test_restart_rejects_a_review_shortcut_after_the_diff_changes(tmp_path, monkeypatch):

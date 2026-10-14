@@ -847,7 +847,7 @@ def resume_run(
                     )
                     artifact = _save_validation(store, outcomes, cycle)
                     if not all_passed(outcomes):
-                        if current.restart_mode is not None:
+                        if current.restart_mode == "check_only":
                             _terminal(
                                 engine,
                                 RunState.FAILED,

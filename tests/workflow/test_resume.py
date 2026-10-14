@@ -650,7 +650,11 @@ def test_abrupt_worker_crash_requires_explicit_partial_work_adoption(tmp_path):
             tmp_path / "wt",
             CRITERIA,
         )
-    run_id = next((git.root / ".ai/runs").iterdir()).name
+    run_id = next(
+        path.name
+        for path in (git.root / ".ai/runs").iterdir()
+        if path.is_dir() and path.name != ".goals"
+    )
     adapter = Scripted()
     with pytest.raises(ResumeRefused, match="--adopt-worktree"):
         resume_run(git, CONFIG, registry(adapter), run_id)
@@ -691,7 +695,11 @@ def test_crash_after_checkpoint_starts_next_unfinished_stage(
             tmp_path / "wt",
             CRITERIA,
         )
-    run_id = next((git.root / ".ai/runs").iterdir()).name
+    run_id = next(
+        path.name
+        for path in (git.root / ".ai/runs").iterdir()
+        if path.is_dir() and path.name != ".goals"
+    )
     store = RunStore(git.root, run_id)
     approved_digest = store.read_manifest().plan_sha256
     monkeypatch.setattr(runner_module, "record_stage", actual_record_stage)
@@ -1048,7 +1056,11 @@ def test_pause_after_validation_repair_revalidates_without_rerunning_worker(tmp_
         )
     assert first_adapter.worker_calls == 2
 
-    run_id = next((git.root / ".ai/runs").iterdir()).name
+    run_id = next(
+        path.name
+        for path in (git.root / ".ai/runs").iterdir()
+        if path.is_dir() and path.name != ".goals"
+    )
     store = RunStore(git.root, run_id)
     assert store.latest_checkpoint()["next_stage"] == "validation"
     assert "execution/validation-repair-v1.json" in store.latest_checkpoint()["artifacts"]
