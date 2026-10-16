@@ -308,6 +308,17 @@ def test_verification_keeps_supplied_criteria_authoritative_when_diff_edits_a_do
     assert criteria_ref.content == criteria[0]
     assert "Production call sites may now be refactored." in state_ref.content
     assert "Treat the supplied acceptance criteria as authoritative" in request.prompt
+    normalized_prompt = " ".join(request.prompt.split())
+    assert (
+        "The top-level outcome must be one of PASS, CHANGES_REQUIRED, BLOCKED, or ESCALATE"
+        in normalized_prompt
+    )
+    assert "FAIL and UNKNOWN are criterion verdicts only and never top-level outcomes" in (
+        normalized_prompt
+    )
+    assert "A top-level PASS requires every criterion verdict to be PASS" in normalized_prompt
+    assert "choose an allowed non-PASS outcome" in normalized_prompt
+    assert "actual FAIL, BLOCKED, or ESCALATE outcome" not in normalized_prompt
     assert "identify them in the evidence for the relevant acceptance criterion" in " ".join(
         request.prompt.split()
     )

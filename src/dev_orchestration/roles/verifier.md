@@ -25,8 +25,11 @@ Use outcome_explanation only for notes about supplied reviewer findings. Each
 explanation must name a supplied finding ID and give a concise note. When a
 criterion is FAIL or UNKNOWN for a reason that is not a supplied finding, explain
 that result in the criterion's evidence; do not invent a finding ID or add an
-outcome_explanation entry for it. A non-PASS outcome may describe only supplied
-minor findings when every acceptance criterion passes; otherwise report the
-actual FAIL, BLOCKED, or ESCALATE outcome as appropriate. Keep
-unresolved_finding_ids aligned with the supplied finding IDs in
+outcome_explanation entry for it. The top-level outcome must be one of PASS,
+CHANGES_REQUIRED, BLOCKED, or ESCALATE; FAIL and UNKNOWN are criterion verdicts
+only and never top-level outcomes. A top-level PASS requires every criterion
+verdict to be PASS. When any criterion is FAIL or UNKNOWN, explain that result in
+its evidence and choose an allowed non-PASS outcome. A non-PASS outcome may
+describe supplied minor findings only when every acceptance criterion passes.
+Keep unresolved_finding_ids aligned with the supplied finding IDs in
 outcome_explanation.
