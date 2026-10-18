@@ -101,6 +101,7 @@ def repo(tmp_path):
     subprocess.run(["git", "-C", str(root), "config", "user.name", "T"], check=True)
     (root / "src").mkdir()
     (root / "src" / "app.py").write_text("x = 1\n")
+    (root / "src" / "app.py").chmod(0o644)
     (root / ".gitignore").write_text(".ai/runs/\n")
     subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
     subprocess.run(["git", "-C", str(root), "commit", "-q", "-m", "init"], check=True)
@@ -158,6 +159,42 @@ def test_resumed_worker_with_no_change_fails_before_validation(tmp_path):
     assert (first.store_root / "execution/no-progress/implementation-worker.json").is_file()
 
 
+def test_resumed_staged_edit_restored_to_base_fails_before_validation(tmp_path):
+    class PauseBeforeWriting(Scripted):
+        def run(self, request):
+            if request.role == "implementation_worker":
+                self.seen.append(request.role)
+                raise AgentTimeoutError(request.role, 7, self.name)
+            return super().run(request)
+
+    class StageThenRestore(Scripted):
+        def run(self, request):
+            if request.role == "implementation_worker":
+                self.seen.append(request.role)
+                app = request.cwd / "src" / "app.py"
+                app.write_text("x = 2\n")
+                subprocess.run(["git", "-C", str(request.cwd), "add", "src/app.py"], check=True)
+                app.write_text("x = 1\n")
+                now = datetime.now(UTC)
+                return AgentResult(self.name, None, 0, "restored", now, now)
+            return super().run(request)
+
+    git = repo(tmp_path)
+    first = execute_run(
+        git, CONFIG, registry(PauseBeforeWriting()), "change app", tmp_path / "wt", CRITERIA
+    )
+    assert first.final_state is RunState.PAUSED_INTERRUPTED
+
+    adapter = StageThenRestore()
+    resumed = resume_run(git, CONFIG, registry(adapter), first.run_id)
+
+    manifest = RunStore(git.root, first.run_id).read_manifest()
+    assert resumed.final_state is RunState.FAILED
+    assert manifest.terminal_cause == "worker_no_changes"
+    assert adapter.seen == ["implementation_worker"]
+    assert not (first.store_root / "execution/validation-v1.json").exists()
+
+
 def test_resumed_worker_keeps_saved_partial_change_when_it_adds_nothing(tmp_path):
     class PartialThenPause(Scripted):
         def run(self, request):
@@ -187,12 +224,14 @@ def test_resumed_worker_keeps_saved_partial_change_when_it_adds_nothing(tmp_path
     assert resumed.final_state is RunState.COMPLETE_LOCAL
     assert adapter.seen[-2:] == ["implementation_reviewer", "verifier"]
     manifest = RunStore(git.root, first.run_id).read_manifest()
-    assert manifest.terminal_cause is None
+    assert manifest.terminal_cause is None, "saved partial work must not be treated as no progress"
     assert manifest.git.final_commit is not None
-    assert not (first.store_root / "execution/no-progress/implementation-worker.json").exists()
+    assert not (first.store_root / "execution/no-progress/implementation-worker.json").exists(), (
+        "saved partial work must not record worker no progress"
+    )
 
 
-def test_resumed_unchanged_remediation_stops_before_validation(tmp_path):
+def _assert_resumed_remediation_no_progress(tmp_path, remediation_action):
     class PauseDuringRemediation(Scripted):
         worker_calls = 0
 
@@ -222,10 +261,23 @@ def test_resumed_unchanged_remediation_stops_before_validation(tmp_path):
                 return AgentResult(self.name, None, 0, review, now, now)
             return super().run(request)
 
-    class NoOpRemediation(Scripted):
+    class NoProgressRemediation(Scripted):
         def run(self, request):
             if request.role == "implementation_worker":
                 self.seen.append(request.role)
+                if remediation_action == "stage_identical":
+                    subprocess.run(["git", "-C", str(request.cwd), "add", "src/app.py"], check=True)
+                elif remediation_action == "commit_identical":
+                    worktree_repo = GitRepo(request.cwd)
+                    worktree_repo.run_git("commit", "--allow-empty", "-m", "no tree change")
+                elif remediation_action == "cache":
+                    cache = request.cwd / ".pytest_cache" / "v" / "cache"
+                    cache.mkdir(parents=True)
+                    (cache / "nodeids").write_text("cache")
+                elif remediation_action == "chmod":
+                    app = request.cwd / "src" / "app.py"
+                    assert app.stat().st_mode & 0o777 == 0o644
+                    app.chmod(0o600)
                 now = datetime.now(UTC)
                 return AgentResult(self.name, None, 0, "I made no changes", now, now)
             return super().run(request)
@@ -241,16 +293,32 @@ def test_resumed_unchanged_remediation_stops_before_validation(tmp_path):
     )
     assert first.final_state is RunState.PAUSED_INTERRUPTED
 
-    adapter = NoOpRemediation()
+    adapter = NoProgressRemediation()
     resumed = resume_run(git, CONFIG, registry(adapter), first.run_id)
 
     manifest = RunStore(git.root, first.run_id).read_manifest()
     assert resumed.final_state is RunState.FAILED
-    assert manifest.terminal_cause == "remediation_no_progress"
+    assert manifest.terminal_cause == "remediation_no_progress", remediation_action
     assert manifest.failure_class == "product"
     assert adapter.seen == ["implementation_worker"]
     assert (first.store_root / "execution/no-progress/remediation-v1.json").is_file()
-    assert not (first.store_root / "execution/validation-v2.json").exists()
+    assert not (first.store_root / "execution/validation-v2.json").exists(), remediation_action
+
+
+def test_resumed_staging_identical_content_is_no_progress(tmp_path):
+    _assert_resumed_remediation_no_progress(tmp_path, "stage_identical")
+
+
+def test_resumed_empty_commit_is_no_progress(tmp_path):
+    _assert_resumed_remediation_no_progress(tmp_path, "commit_identical")
+
+
+def test_resumed_cache_file_is_no_progress(tmp_path):
+    _assert_resumed_remediation_no_progress(tmp_path, "cache")
+
+
+def test_resumed_permission_change_is_no_progress(tmp_path):
+    _assert_resumed_remediation_no_progress(tmp_path, "chmod")
 
 
 def test_interrupted_planner_receives_scope_fence_before_and_after_resume(tmp_path):
@@ -340,6 +408,7 @@ def test_seed_patch_receipt_worker_visibility_and_resume_once(tmp_path):
     resumed = resume_run(git, CONFIG, registry(resumed_adapter), first.run_id)
     assert resumed.final_state is RunState.COMPLETE_LOCAL
     assert resumed_adapter.seed_contents == ["x = 99\n"]
+    assert not (store.root / "execution/no-progress/implementation-worker.json").exists()
     applied = [
         line
         for line in (store.root / "events.jsonl").read_text().splitlines()
@@ -742,6 +811,7 @@ def test_continued_patch_is_checkpointed_before_classifier_and_applied_on_resume
     assert resumed.final_state is RunState.COMPLETE_LOCAL
     assert "implementation_worker" not in adapter.seen
     assert Path(store.read_manifest().git.worktree, "src/app.py").read_text() == "x = 3\n"
+    assert not (store.root / "execution/no-progress/implementation-worker.json").exists()
 
 
 def _pause_continuation_at_approval(tmp_path, continue_patch=None):

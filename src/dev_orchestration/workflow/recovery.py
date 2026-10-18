@@ -41,7 +41,7 @@ from dev_orchestration.workflow.runner import (
     RunOutcome,
     _approval_required,
     _approval_summary,
-    _deliverable_entries,
+    _deliverable_patch,
     _effective_tier,
     _evidence,
     _implementation_review_required,
@@ -853,7 +853,7 @@ def resume_run(
                         )
                         checkpoint("validation", [CONTINUED_CHANGE_ARTIFACT])
                     else:
-                        before_worker = _deliverable_entries(worktree_repo, base)
+                        before_worker = _deliverable_patch(worktree_repo, base)
                         _run_worktree_stage(
                             worktree_repo,
                             base,
@@ -871,7 +871,7 @@ def resume_run(
                                 )
                             ),
                         )
-                        after_worker = _deliverable_entries(worktree_repo, base)
+                        after_worker = _deliverable_patch(worktree_repo, base)
                         if not after_worker:
                             _record_no_progress(
                                 engine,
@@ -1022,7 +1022,7 @@ def resume_run(
                         raise ResumeRefused("remediation budget exhausted")
                     store.update_manifest(status=RunState.REMEDIATION)
                     blocking = [f for f in reviewed.findings if f.id in reviewed.blocking_ids()]
-                    before_remediation = _deliverable_entries(worktree_repo, base)
+                    before_remediation = _deliverable_patch(worktree_repo, base)
                     _run_worktree_stage(
                         worktree_repo,
                         base,
@@ -1037,7 +1037,7 @@ def resume_run(
                             cycle=cycle,
                         ),
                     )
-                    after_remediation = _deliverable_entries(worktree_repo, base)
+                    after_remediation = _deliverable_patch(worktree_repo, base)
                     if after_remediation == before_remediation:
                         _record_no_progress(
                             engine,

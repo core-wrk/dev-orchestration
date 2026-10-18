@@ -321,15 +321,13 @@ def _terminal(
         engine.transition(state)
 
 
-def _deliverable_entries(worktree_repo: GitRepo, base_commit: str) -> dict:
-    """Return content and mode fingerprints for every visible change from the base."""
-    return capture_snapshot(worktree_repo, base_commit)["entries"]
+def _deliverable_patch(worktree_repo: GitRepo, base_commit: str) -> bytes:
+    """Return the binary-safe patch representing every visible change from the base."""
+    return worktree_repo.change_patch_bytes(base_commit)
 
 
-def _entry_digest(entries: dict) -> str:
-    return hashlib.sha256(
-        json.dumps(entries, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+def _patch_digest(patch: bytes) -> str:
+    return hashlib.sha256(patch).hexdigest()
 
 
 def _record_no_progress(
@@ -337,8 +335,8 @@ def _record_no_progress(
     *,
     cause: str,
     stage: str,
-    before: dict,
-    after: dict,
+    before: bytes,
+    after: bytes,
     cycle: int | None = None,
 ) -> None:
     """Record a stable no-progress failure while leaving any partial patch recoverable."""
@@ -356,12 +354,13 @@ def _record_no_progress(
             "cause": cause,
             "stage": stage,
             "cycle": cycle,
-            "comparison": "empty_change_set" if is_empty else "unchanged",
+            "comparison": "empty_change_patch" if is_empty else "unchanged_change_patch",
+            "comparison_format": "git-change-patch-bytes",
             "changed": not unchanged,
-            "before_digest": _entry_digest(before),
-            "after_digest": _entry_digest(after),
-            "before_paths": sorted(before),
-            "after_paths": sorted(after),
+            "before_digest": _patch_digest(before),
+            "after_digest": _patch_digest(after),
+            "before_bytes": len(before),
+            "after_bytes": len(after),
         },
         immutable=True,
     )
@@ -376,7 +375,7 @@ def _record_no_progress(
     signature = (
         f"{cause}:empty-change-set"
         if cause == "worker_no_changes"
-        else f"{cause}:{_entry_digest(after)}"
+        else f"{cause}:{_patch_digest(after)}"
     )
     _terminal(
         engine,
@@ -1422,7 +1421,7 @@ def execute_run(
             store.append_event({"event": "change_continued", "source_run": retry_of})
             receipt("validation", [CONTINUED_CHANGE_ARTIFACT])
         else:
-            before_worker = _deliverable_entries(worktree_repo, base_commit)
+            before_worker = _deliverable_patch(worktree_repo, base_commit)
             _run_worktree_stage(
                 worktree_repo,
                 base_commit,
@@ -1438,7 +1437,7 @@ def execute_run(
                     scope_context,
                 ),
             )
-            after_worker = _deliverable_entries(worktree_repo, base_commit)
+            after_worker = _deliverable_patch(worktree_repo, base_commit)
             if not after_worker:
                 _record_no_progress(
                     engine,
@@ -1534,7 +1533,7 @@ def execute_run(
                 if finding.id in implementation_review.blocking_ids()
             ]
             current_state = diff or "No committed or working-tree diff was observed."
-            before_remediation = _deliverable_entries(worktree_repo, base_commit)
+            before_remediation = _deliverable_patch(worktree_repo, base_commit)
             _run_worktree_stage(
                 worktree_repo,
                 base_commit,
@@ -1549,7 +1548,7 @@ def execute_run(
                     cycle=cycle,
                 ),
             )
-            after_remediation = _deliverable_entries(worktree_repo, base_commit)
+            after_remediation = _deliverable_patch(worktree_repo, base_commit)
             if after_remediation == before_remediation:
                 _record_no_progress(
                     engine,

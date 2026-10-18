@@ -608,7 +608,12 @@ def test_review_remediation_cannot_reserve_a_second_validation_repair(tmp_path):
     assert "verifier" not in adapter.seen
 
 
-def test_unchanged_implementation_remediation_stops_before_another_review(tmp_path):
+@pytest.mark.parametrize(
+    "remediation_action", ["noop", "stage_identical", "empty_commit", "cache", "chmod"]
+)
+def test_unchanged_implementation_remediation_stops_before_another_review(
+    tmp_path, remediation_action
+):
     class NoProgressRemediation(Scripted):
         reviewer_calls = 0
 
@@ -619,6 +624,16 @@ def test_unchanged_implementation_remediation_stops_before_another_review(tmp_pa
             ):
                 self.seen.append(request.role)
                 self.requests.append(request)
+                if remediation_action == "stage_identical":
+                    subprocess.run(["git", "-C", str(request.cwd), "add", "src/app.py"], check=True)
+                elif remediation_action == "empty_commit":
+                    GitRepo(request.cwd).run_git("commit", "--allow-empty", "-m", "no change")
+                elif remediation_action == "cache":
+                    cache = request.cwd / ".pytest_cache" / "v" / "cache"
+                    cache.mkdir(parents=True)
+                    (cache / "nodeids").write_text("cache")
+                elif remediation_action == "chmod":
+                    (request.cwd / "src" / "app.py").chmod(0o600)
                 now = datetime.now(UTC)
                 return AgentResult("fake", None, 0, "I made no changes", now, now)
             if request.role == "implementation_reviewer":
@@ -912,6 +927,7 @@ def test_scope_violation_escalates_for_uncommitted_out_of_scope_file(tmp_path):
     assert "vendor/sneaky.py" in outcome.reason
     manifest = RunStore(git.root, outcome.run_id).read_manifest()
     assert manifest.terminal_cause == "scope_violation"
+    assert not (outcome.store_root / "execution/no-progress/implementation-worker.json").exists()
     next_adapter = Scripted(script())
     with pytest.raises(GoalError, match="human decision"):
         execute_run(
@@ -1418,7 +1434,35 @@ def test_run_that_changes_nothing_cannot_complete_local(tmp_path):
         (outcome.store_root / "execution/no-progress/implementation-worker.json").read_text()
     )
     assert evidence["stage"] == "implementation_worker"
-    assert evidence["after_paths"] == []
+    assert evidence["comparison"] == "empty_change_patch"
+    assert evidence["comparison_format"] == "git-change-patch-bytes"
+    assert evidence["after_bytes"] == 0
+
+
+def test_staged_edit_restored_to_base_is_empty_worker_output(tmp_path):
+    class StageThenRestore(Scripted):
+        def run(self, request):
+            if request.role == "implementation_worker":
+                self.seen.append(request.role)
+                app = request.cwd / "src" / "app.py"
+                app.write_text("x = 2\n")
+                subprocess.run(["git", "-C", str(request.cwd), "add", "src/app.py"], check=True)
+                app.write_text("x = 1\n")
+                now = datetime.now(UTC)
+                return AgentResult("fake", None, 0, "restored", now, now)
+            return super().run(request)
+
+    git = repo(tmp_path)
+    adapter = StageThenRestore(script())
+    outcome = execute_run(
+        git, CONFIG, registry(adapter), "try and restore an edit", tmp_path / "wt", CRITERIA
+    )
+
+    manifest = RunStore(git.root, outcome.run_id).read_manifest()
+    assert outcome.final_state is RunState.FAILED
+    assert manifest.terminal_cause == "worker_no_changes"
+    assert adapter.seen == ["classifier", "planner", "plan_reviewer", "implementation_worker"]
+    assert not (outcome.store_root / "execution/validation-v1.json").exists()
 
 
 def test_seed_patch_counts_as_deliverable_when_worker_is_a_noop(tmp_path):
@@ -1448,6 +1492,7 @@ def test_seed_patch_counts_as_deliverable_when_worker_is_a_noop(tmp_path):
     assert adapter.seen[-2:] == ["implementation_reviewer", "verifier"]
     manifest = json.loads((outcome.store_root / "manifest.json").read_text())
     assert manifest["git"]["final_commit"] is not None
+    assert not (outcome.store_root / "execution/no-progress/implementation-worker.json").exists()
 
 
 @pytest.mark.parametrize("change_kind", ["binary", "deletion", "mode", "empty_untracked"])
@@ -1480,6 +1525,7 @@ def test_binary_deletion_mode_and_empty_untracked_changes_are_deliverable(tmp_pa
     )
 
     assert outcome.final_state is RunState.COMPLETE_LOCAL
+    assert not (outcome.store_root / "execution/no-progress/implementation-worker.json").exists()
 
 
 def test_verifier_that_judges_no_criteria_cannot_complete_local(tmp_path):
@@ -1756,6 +1802,7 @@ def test_continued_patch_counts_as_deliverable_without_new_worker_changes(tmp_pa
     assert outcome.final_state is RunState.COMPLETE_LOCAL
     assert "implementation_worker" not in adapter.seen
     assert "change_continued" in {event["event"] for event in events(outcome)}
+    assert not (outcome.store_root / "execution/no-progress/implementation-worker.json").exists()
 
 
 def test_trivial_run_repairs_validation_without_adding_implementation_review(tmp_path):
