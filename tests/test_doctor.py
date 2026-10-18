@@ -9,6 +9,7 @@ import dev_orchestration.doctor as doctor_module
 from dev_orchestration.adapters.base import AdapterStatus, FakeAdapter
 from dev_orchestration.config.models import ProjectConfig
 from dev_orchestration.doctor import Check, render, run_checks
+from dev_orchestration.init_repo import render_agents_md, render_project_yaml
 
 
 def test_render_marks_passing_and_failing_checks():
@@ -234,6 +235,97 @@ def test_agents_md_missing_reports_next_action(tmp_path):
     agents_check = _by_name(checks, "AGENTS.md")
     assert agents_check.ok is False
     assert "dev-orch init" in agents_check.detail
+
+
+def _contract_fixture(tmp_path):
+    config = ProjectConfig.model_validate(
+        {
+            "project": {"name": "sample", "class": "internal_utility"},
+            "scope": {
+                "include": ["src/**", "docs/**"],
+                "exclude": ["vendor/**", "private/**"],
+            },
+            "validation": {
+                "lint": {"command": "ruff check src"},
+                "test": {"command": "pytest -q"},
+            },
+        }
+    )
+    agents = render_agents_md(config)
+    yaml_text = render_project_yaml(config)
+    return config, agents, yaml_text
+
+
+def _write_contract_fixture(tmp_path, agents, yaml_text):
+    _init_repo(tmp_path)
+    (tmp_path / ".ai").mkdir()
+    (tmp_path / ".ai" / "project.yaml").write_text(yaml_text)
+    (tmp_path / "AGENTS.md").write_text(agents)
+    _commit_all(tmp_path)
+
+
+def test_doctor_accepts_matching_generated_contract_with_reordered_lists_and_custom_prose(
+    tmp_path,
+):
+    _config, agents, yaml_text = _contract_fixture(tmp_path)
+    agents = agents.replace(
+        "_One or two sentences: what this repository is for. Written during onboarding._",
+        "This repository has a custom purpose description.",
+    )
+    agents = agents.replace("- `src/**`\n- `docs/**`", "- `docs/**`\n- `src/**`").replace(
+        "- `vendor/**`\n- `private/**`", "- `private/**`\n- `vendor/**`"
+    )
+    agents = agents.replace(
+        "- `lint`: `ruff check src`\n- `test`: `pytest -q`",
+        "- `test`: `pytest -q`\n- `lint`: `ruff check src`",
+    )
+    _write_contract_fixture(tmp_path, agents, yaml_text)
+
+    check = _by_name(
+        run_checks(tmp_path, codex=FakeAdapter(), claude=FakeAdapter()), "AGENTS.md contract"
+    )
+
+    assert check.ok is True
+    assert check.detail == ""
+
+
+def test_doctor_reports_scope_and_validation_drift_with_both_values(tmp_path):
+    _config, agents, yaml_text = _contract_fixture(tmp_path)
+    agents = agents.replace("- `src/**`", "- `app/**`").replace(
+        "- `lint`: `ruff check src`", "- `lint`: `ruff check .`"
+    )
+    _write_contract_fixture(tmp_path, agents, yaml_text)
+
+    check = _by_name(
+        run_checks(tmp_path, codex=FakeAdapter(), claude=FakeAdapter()), "AGENTS.md contract"
+    )
+
+    assert check.ok is False
+    assert "scope.include" in check.detail
+    assert "app/**" in check.detail and "src/**" in check.detail
+    assert "validation:lint" in check.detail
+    assert "ruff check ." in check.detail and "ruff check src" in check.detail
+    assert "reconcile" in check.detail.lower()
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [
+        lambda text: text.replace("## Validation", "## Checks"),
+        lambda text: text + "\n## Scope\nModifiable:\n- `elsewhere/`\n",
+    ],
+    ids=["unrecognized-section", "duplicate-section"],
+)
+def test_doctor_reports_incomplete_contract_when_sections_are_unreadable(tmp_path, edit):
+    _config, agents, yaml_text = _contract_fixture(tmp_path)
+    _write_contract_fixture(tmp_path, edit(agents), yaml_text)
+
+    check = _by_name(
+        run_checks(tmp_path, codex=FakeAdapter(), claude=FakeAdapter()), "AGENTS.md contract"
+    )
+
+    assert check.ok is False
+    assert "incomplete" in check.detail.lower()
 
 
 def test_malformed_project_yaml_fails_config_check_without_raising(tmp_path):

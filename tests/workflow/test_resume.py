@@ -125,6 +125,134 @@ def test_timeout_resumes_worker_without_repeating_plan(tmp_path):
     assert json.loads((first.store_root / "manifest.json").read_text())["git"]["final_commit"]
 
 
+def test_resumed_worker_with_no_change_fails_before_validation(tmp_path):
+    class PauseBeforeWriting(Scripted):
+        def run(self, request):
+            if request.role == "implementation_worker":
+                self.seen.append(request.role)
+                raise AgentTimeoutError(request.role, 7, self.name)
+            return super().run(request)
+
+    class NoOpWorker(Scripted):
+        def run(self, request):
+            if request.role == "implementation_worker":
+                self.seen.append(request.role)
+                now = datetime.now(UTC)
+                return AgentResult(self.name, None, 0, "I made no changes", now, now)
+            return super().run(request)
+
+    git = repo(tmp_path)
+    first = execute_run(
+        git, CONFIG, registry(PauseBeforeWriting()), "change app", tmp_path / "wt", CRITERIA
+    )
+    assert first.final_state is RunState.PAUSED_INTERRUPTED
+
+    adapter = NoOpWorker()
+    resumed = resume_run(git, CONFIG, registry(adapter), first.run_id)
+
+    manifest = RunStore(git.root, first.run_id).read_manifest()
+    assert resumed.final_state is RunState.FAILED
+    assert manifest.terminal_cause == "worker_no_changes"
+    assert manifest.failure_class == "product"
+    assert adapter.seen == ["implementation_worker"]
+    assert (first.store_root / "execution/no-progress/implementation-worker.json").is_file()
+
+
+def test_resumed_worker_keeps_saved_partial_change_when_it_adds_nothing(tmp_path):
+    class PartialThenPause(Scripted):
+        def run(self, request):
+            if request.role == "implementation_worker":
+                self.seen.append(request.role)
+                (request.cwd / "src" / "app.py").write_text("x = 9\n")
+                raise AgentTimeoutError(request.role, 7, self.name)
+            return super().run(request)
+
+    class NoOpWorker(Scripted):
+        def run(self, request):
+            if request.role == "implementation_worker":
+                self.seen.append(request.role)
+                now = datetime.now(UTC)
+                return AgentResult(self.name, None, 0, "I made no changes", now, now)
+            return super().run(request)
+
+    git = repo(tmp_path)
+    first = execute_run(
+        git, CONFIG, registry(PartialThenPause()), "change app", tmp_path / "wt", CRITERIA
+    )
+    assert first.final_state is RunState.PAUSED_INTERRUPTED
+
+    adapter = NoOpWorker()
+    resumed = resume_run(git, CONFIG, registry(adapter), first.run_id)
+
+    assert resumed.final_state is RunState.COMPLETE_LOCAL
+    assert adapter.seen[-2:] == ["implementation_reviewer", "verifier"]
+    manifest = RunStore(git.root, first.run_id).read_manifest()
+    assert manifest.terminal_cause is None
+    assert manifest.git.final_commit is not None
+    assert not (first.store_root / "execution/no-progress/implementation-worker.json").exists()
+
+
+def test_resumed_unchanged_remediation_stops_before_validation(tmp_path):
+    class PauseDuringRemediation(Scripted):
+        worker_calls = 0
+
+        def run(self, request):
+            if request.role == "implementation_worker":
+                self.seen.append(request.role)
+                self.worker_calls += 1
+                if self.worker_calls == 1:
+                    (request.cwd / "src" / "app.py").write_text("x = 2\n")
+                    now = datetime.now(UTC)
+                    return AgentResult(self.name, None, 0, "done", now, now)
+                raise AgentTimeoutError(request.role, 7, self.name)
+            if request.role == "implementation_reviewer":
+                self.seen.append(request.role)
+                now = datetime.now(UTC)
+                review = {
+                    "outcome": "CHANGES_REQUIRED",
+                    "findings": [
+                        {
+                            "id": "x",
+                            "severity": "blocking",
+                            "summary": "fix app",
+                            "evidence_required": "tests",
+                        }
+                    ],
+                }
+                return AgentResult(self.name, None, 0, review, now, now)
+            return super().run(request)
+
+    class NoOpRemediation(Scripted):
+        def run(self, request):
+            if request.role == "implementation_worker":
+                self.seen.append(request.role)
+                now = datetime.now(UTC)
+                return AgentResult(self.name, None, 0, "I made no changes", now, now)
+            return super().run(request)
+
+    git = repo(tmp_path)
+    first = execute_run(
+        git,
+        CONFIG,
+        registry(PauseDuringRemediation()),
+        "change app",
+        tmp_path / "wt",
+        CRITERIA,
+    )
+    assert first.final_state is RunState.PAUSED_INTERRUPTED
+
+    adapter = NoOpRemediation()
+    resumed = resume_run(git, CONFIG, registry(adapter), first.run_id)
+
+    manifest = RunStore(git.root, first.run_id).read_manifest()
+    assert resumed.final_state is RunState.FAILED
+    assert manifest.terminal_cause == "remediation_no_progress"
+    assert manifest.failure_class == "product"
+    assert adapter.seen == ["implementation_worker"]
+    assert (first.store_root / "execution/no-progress/remediation-v1.json").is_file()
+    assert not (first.store_root / "execution/validation-v2.json").exists()
+
+
 def test_interrupted_planner_receives_scope_fence_before_and_after_resume(tmp_path):
     class InterruptPlannerOnce(Scripted):
         def __init__(self):
@@ -1324,6 +1452,8 @@ def test_pause_after_validation_repair_revalidates_without_rerunning_worker(tmp_
                 self.worker_calls += 1
                 value = "x = 1\n" if self.worker_calls == 1 else "x = 9\n"
                 (request.cwd / "src" / "app.py").write_text(value)
+                if self.worker_calls == 1:
+                    (request.cwd / "src" / "initial-attempt.txt").write_text("attempted\n")
                 now = datetime.now(UTC)
                 return AgentResult(self.name, None, 0, "done", now, now)
             return super().run(request)

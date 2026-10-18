@@ -321,6 +321,73 @@ def _terminal(
         engine.transition(state)
 
 
+def _deliverable_entries(worktree_repo: GitRepo, base_commit: str) -> dict:
+    """Return content and mode fingerprints for every visible change from the base."""
+    return capture_snapshot(worktree_repo, base_commit)["entries"]
+
+
+def _entry_digest(entries: dict) -> str:
+    return hashlib.sha256(
+        json.dumps(entries, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def _record_no_progress(
+    engine: Engine,
+    *,
+    cause: str,
+    stage: str,
+    before: dict,
+    after: dict,
+    cycle: int | None = None,
+) -> None:
+    """Record a stable no-progress failure while leaving any partial patch recoverable."""
+    is_empty = not after
+    unchanged = before == after
+    artifact_name = (
+        "implementation-worker.json"
+        if stage == "implementation_worker"
+        else f"remediation-v{cycle}.json"
+    )
+    artifact = f"execution/no-progress/{artifact_name}"
+    engine.store.write_json_artifact(
+        artifact,
+        {
+            "cause": cause,
+            "stage": stage,
+            "cycle": cycle,
+            "comparison": "empty_change_set" if is_empty else "unchanged",
+            "changed": not unchanged,
+            "before_digest": _entry_digest(before),
+            "after_digest": _entry_digest(after),
+            "before_paths": sorted(before),
+            "after_paths": sorted(after),
+        },
+        immutable=True,
+    )
+    engine.store.append_event(
+        {"event": "no_progress_detected", "cause": cause, "stage": stage, "artifact": artifact}
+    )
+    reason = (
+        "implementation worker produced no deliverable changes"
+        if cause == "worker_no_changes"
+        else f"implementation remediation cycle {cycle} produced no deliverable progress"
+    )
+    signature = (
+        f"{cause}:empty-change-set"
+        if cause == "worker_no_changes"
+        else f"{cause}:{_entry_digest(after)}"
+    )
+    _terminal(
+        engine,
+        RunState.FAILED,
+        reason,
+        cause,
+        failure_class="product",
+        failure_signature=signature,
+    )
+
+
 # COMPLETE_LOCAL is deliberately excluded from cleanup: that worktree and its
 # branch are the run's deliverable, left for a human to review, diff, and
 # merge by hand. Only the terminal states that produced nothing worth keeping
@@ -582,6 +649,7 @@ _PATCH_WORTHY_CAUSES = frozenset(
     {
         "implementation_review_exhausted",
         "implementation_review_escalated",
+        "remediation_no_progress",
         "validation_failed",
         "validation_failed_after_remediation",
     }
@@ -1354,6 +1422,7 @@ def execute_run(
             store.append_event({"event": "change_continued", "source_run": retry_of})
             receipt("validation", [CONTINUED_CHANGE_ARTIFACT])
         else:
+            before_worker = _deliverable_entries(worktree_repo, base_commit)
             _run_worktree_stage(
                 worktree_repo,
                 base_commit,
@@ -1369,6 +1438,16 @@ def execute_run(
                     scope_context,
                 ),
             )
+            after_worker = _deliverable_entries(worktree_repo, base_commit)
+            if not after_worker:
+                _record_no_progress(
+                    engine,
+                    cause="worker_no_changes",
+                    stage="implementation_worker",
+                    before=before_worker,
+                    after=after_worker,
+                )
+                return _outcome(engine, repo=repo, worktree=worktree)
             receipt("validation", ["execution/worker-result.json"])
 
         engine.transition(RunState.VALIDATING)
@@ -1455,6 +1534,7 @@ def execute_run(
                 if finding.id in implementation_review.blocking_ids()
             ]
             current_state = diff or "No committed or working-tree diff was observed."
+            before_remediation = _deliverable_entries(worktree_repo, base_commit)
             _run_worktree_stage(
                 worktree_repo,
                 base_commit,
@@ -1469,6 +1549,17 @@ def execute_run(
                     cycle=cycle,
                 ),
             )
+            after_remediation = _deliverable_entries(worktree_repo, base_commit)
+            if after_remediation == before_remediation:
+                _record_no_progress(
+                    engine,
+                    cause="remediation_no_progress",
+                    stage="implementation_remediation",
+                    before=before_remediation,
+                    after=after_remediation,
+                    cycle=cycle,
+                )
+                return _outcome(engine, repo=repo, worktree=worktree)
             receipt("validation", [f"execution/remediation-v{cycle}.json"], cycle)
             engine.transition(RunState.VALIDATING)
             outcomes = _run_validation_stage(

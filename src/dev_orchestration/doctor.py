@@ -1,6 +1,7 @@
 """Environment diagnosis. Every failure names its next action."""
 
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -148,10 +149,122 @@ def _repository_checks(cwd: Path) -> list[Check]:
             "" if agents_md_ok else "missing; run `dev-orch init`",
         )
     )
+    checks.append(_agents_contract_check(repo.root / "AGENTS.md", config))
     for name, command in config.validation.items():
         checks.append(Check(f"validation:{name}", True, command.command))
     checks.extend(_proportionality_checks(config))
     return checks
+
+
+def _section_lines(text: str, title: str) -> list[str]:
+    headings = list(re.finditer(r"^## ([^\n]+)\s*$", text, flags=re.MULTILINE))
+    matching = [match for match in headings if match.group(1) == title]
+    if len(matching) != 1:
+        reason = "missing" if not matching else "duplicated"
+        raise ValueError(f"{title} section is {reason}")
+    start = matching[0].end()
+    following = next(
+        (match.start() for match in headings if match.start() > matching[0].start()),
+        len(text),
+    )
+    return text[start:following].splitlines()
+
+
+def _code_bullets(lines: list[str], label: str) -> list[str]:
+    markers = [index for index, line in enumerate(lines) if line.strip() == label]
+    if len(markers) != 1:
+        reason = "missing" if not markers else "duplicated"
+        raise ValueError(f"{label.rstrip(':')} list marker is {reason}")
+    values = []
+    empty_list = False
+    for line in lines[markers[0] + 1 :]:
+        if not line.strip():
+            if values:
+                break
+            continue
+        if not line.startswith("- "):
+            break
+        if line == "- (none)":
+            empty_list = True
+            continue
+        match = re.fullmatch(r"- `([^`]+)`", line)
+        if not match:
+            raise ValueError(f"unrecognized entry in {label.rstrip(':')} list")
+        if match.group(1) != "(none)":
+            values.append(match.group(1))
+    if empty_list and values:
+        raise ValueError(f"{label.rstrip(':')} list mixes entries with '(none)'")
+    if not values and not empty_list:
+        raise ValueError(f"{label.rstrip(':')} list is empty or unrecognized")
+    return values
+
+
+def _validation_commands(lines: list[str]) -> dict[str, str]:
+    values: dict[str, str] = {}
+    started = False
+    for line in lines:
+        if not line.strip() and not started:
+            continue
+        if not line.startswith("- "):
+            if started:
+                break
+            raise ValueError("Validation command list is missing or unrecognized")
+        started = True
+        if line == "- (none — unproven yet — an unproven command is not a gate)":
+            continue
+        match = re.fullmatch(r"- `([^`]+)`: `(.*)`", line)
+        if not match:
+            raise ValueError("unrecognized entry in Validation command list")
+        name, command = match.groups()
+        if name in values:
+            raise ValueError(f"Validation command {name!r} is duplicated")
+        values[name] = command
+    if not started:
+        raise ValueError("Validation command list is missing or unrecognized")
+    return values
+
+
+def _agents_contract_check(path: Path, config: ProjectConfig) -> Check:
+    """Compare only the repeated scope and validation settings in generated AGENTS.md."""
+    if not path.is_file():
+        return Check("AGENTS.md contract", False, "incomplete: AGENTS.md is missing")
+    try:
+        text = path.read_text(encoding="utf-8")
+        scope = _section_lines(text, "Scope")
+        validation = _section_lines(text, "Validation")
+        agents_include = _code_bullets(scope, "Modifiable:")
+        agents_exclude = _code_bullets(scope, "Never modifiable:")
+        agents_validation = _validation_commands(validation)
+    except (OSError, UnicodeError, ValueError) as exc:
+        return Check("AGENTS.md contract", False, f"incomplete: {exc}")
+
+    mismatches = []
+    for field, agents_value, config_value in (
+        ("scope.include", sorted(agents_include), sorted(config.scope.include)),
+        ("scope.exclude", sorted(agents_exclude), sorted(config.scope.exclude)),
+    ):
+        if agents_value != config_value:
+            mismatches.append(
+                f"{field}: AGENTS.md={agents_value!r}; .ai/project.yaml={config_value!r}"
+            )
+    all_names = sorted(set(agents_validation) | set(config.validation))
+    for name in all_names:
+        agents_command = agents_validation.get(name, "<missing>")
+        config_command = (
+            config.validation[name].command if name in config.validation else "<missing>"
+        )
+        if agents_command != config_command:
+            mismatches.append(
+                f"validation:{name}: AGENTS.md={agents_command!r}; "
+                f".ai/project.yaml={config_command!r}"
+            )
+    if mismatches:
+        return Check(
+            "AGENTS.md contract",
+            False,
+            "; ".join(mismatches) + ". Reconcile these values manually.",
+        )
+    return Check("AGENTS.md contract", True)
 
 
 # Controls the runner actually reads. Anything else in a profile's `controls` map is

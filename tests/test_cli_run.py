@@ -12,6 +12,7 @@ from dev_orchestration.adapters.registry import RoleRegistry
 from dev_orchestration.artifacts.store import PlanOverwriteError, RunStore
 from dev_orchestration.cli import app
 from dev_orchestration.config.models import RoleConfig
+from dev_orchestration.context.assembler import Category
 from dev_orchestration.domain.enums import ProjectClass, RunState, Tier
 from dev_orchestration.domain.run import RunManifest
 from dev_orchestration.workflow.reporting import describe_status, list_runs
@@ -1262,6 +1263,14 @@ def test_remediation_restart_uses_fresh_review_and_bounded_worker_path(tmp_path,
 
     def find_once(request):
         nonlocal findings_pending
+        if (
+            request.role == "implementation_worker"
+            and Category.BLOCKING_FINDINGS in request.context.labels()
+        ):
+            adapter.seen.append(request.role)
+            (request.cwd / "src" / "app.py").write_text("x = 3\n")
+            now = datetime.now(UTC)
+            return AgentResult("fake", None, 0, "fixed the reviewed issue", now, now)
         if request.role == "implementation_reviewer" and findings_pending:
             findings_pending = False
             adapter.seen.append(request.role)

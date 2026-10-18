@@ -41,10 +41,12 @@ from dev_orchestration.workflow.runner import (
     RunOutcome,
     _approval_required,
     _approval_summary,
+    _deliverable_entries,
     _effective_tier,
     _evidence,
     _implementation_review_required,
     _outcome,
+    _record_no_progress,
     _run_validation_stage,
     _run_worktree_stage,
     _save_validation,
@@ -851,6 +853,7 @@ def resume_run(
                         )
                         checkpoint("validation", [CONTINUED_CHANGE_ARTIFACT])
                     else:
+                        before_worker = _deliverable_entries(worktree_repo, base)
                         _run_worktree_stage(
                             worktree_repo,
                             base,
@@ -868,6 +871,16 @@ def resume_run(
                                 )
                             ),
                         )
+                        after_worker = _deliverable_entries(worktree_repo, base)
+                        if not after_worker:
+                            _record_no_progress(
+                                engine,
+                                cause="worker_no_changes",
+                                stage="implementation_worker",
+                                before=before_worker,
+                                after=after_worker,
+                            )
+                            return _outcome(engine, repo=repo, worktree=worktree)
                         checkpoint("validation", ["execution/worker-result.json"])
                     stage = "validation"
                 elif stage == "validation":
@@ -1009,6 +1022,7 @@ def resume_run(
                         raise ResumeRefused("remediation budget exhausted")
                     store.update_manifest(status=RunState.REMEDIATION)
                     blocking = [f for f in reviewed.findings if f.id in reviewed.blocking_ids()]
+                    before_remediation = _deliverable_entries(worktree_repo, base)
                     _run_worktree_stage(
                         worktree_repo,
                         base,
@@ -1023,6 +1037,17 @@ def resume_run(
                             cycle=cycle,
                         ),
                     )
+                    after_remediation = _deliverable_entries(worktree_repo, base)
+                    if after_remediation == before_remediation:
+                        _record_no_progress(
+                            engine,
+                            cause="remediation_no_progress",
+                            stage="implementation_remediation",
+                            before=before_remediation,
+                            after=after_remediation,
+                            cycle=cycle,
+                        )
+                        return _outcome(engine, repo=repo, worktree=worktree)
                     stage = "validation"
                     checkpoint(stage, [f"execution/remediation-v{cycle}.json"], cycle)
                 elif stage == "verifier":

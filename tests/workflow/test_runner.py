@@ -519,6 +519,7 @@ def test_failed_validation_gets_one_repair_then_uses_normal_review_path(tmp_path
                 self.worker_calls += 1
                 if self.worker_calls == 1:
                     (request.cwd / "src" / "app.py").write_text("x = 1\n")
+                    (request.cwd / "src" / "initial-attempt.txt").write_text("attempted\n")
             return result
 
     git = repo(tmp_path)
@@ -564,6 +565,8 @@ def test_review_remediation_cannot_reserve_a_second_validation_repair(tmp_path):
                     (request.cwd / "src" / "app.py").write_text(
                         "x = 2\n" if self.worker_calls == 2 else "x = 1\n"
                     )
+                    if self.worker_calls == 1:
+                        (request.cwd / "src" / "initial-attempt.txt").write_text("attempted\n")
                 payloads = self.script[request.role]
                 payload = payloads.pop(0) if len(payloads) > 1 else payloads[0]
                 now = datetime.now(UTC)
@@ -603,6 +606,51 @@ def test_review_remediation_cannot_reserve_a_second_validation_repair(tmp_path):
     assert (outcome.store_root / "execution/validation-repair-v1.json").is_file()
     assert not (outcome.store_root / "execution/validation-repair-v2.json").exists()
     assert "verifier" not in adapter.seen
+
+
+def test_unchanged_implementation_remediation_stops_before_another_review(tmp_path):
+    class NoProgressRemediation(Scripted):
+        reviewer_calls = 0
+
+        def run(self, request):
+            if (
+                request.role == "implementation_worker"
+                and Category.BLOCKING_FINDINGS in request.context.labels()
+            ):
+                self.seen.append(request.role)
+                self.requests.append(request)
+                now = datetime.now(UTC)
+                return AgentResult("fake", None, 0, "I made no changes", now, now)
+            if request.role == "implementation_reviewer":
+                self.seen.append(request.role)
+                self.reviewer_calls += 1
+                now = datetime.now(UTC)
+                return AgentResult(
+                    "fake", None, 0, BLOCKING if self.reviewer_calls == 1 else PASS, now, now
+                )
+            return super().run(request)
+
+    git = repo(tmp_path)
+    adapter = NoProgressRemediation(script())
+
+    outcome = execute_run(
+        git, CONFIG, registry(adapter), "repair the reviewed issue", tmp_path / "wt", CRITERIA
+    )
+
+    manifest = RunManifest.model_validate_json(
+        (outcome.store_root / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert outcome.final_state is RunState.FAILED
+    assert manifest.terminal_cause == "remediation_no_progress"
+    assert manifest.failure_class == "product"
+    assert manifest.failure_signature.startswith("remediation_no_progress:")
+    assert adapter.seen.count("implementation_worker") == 2
+    assert adapter.seen.count("implementation_reviewer") == 1
+    assert "verifier" not in adapter.seen
+    assert (outcome.store_root / "execution/no-progress/remediation-v1.json").is_file()
+    patch = (outcome.store_root / "execution/final-change.patch").read_bytes()
+    assert b"x = 2" in patch
+    assert git.verify_patch(manifest.git.base_commit, patch)
 
 
 def test_unignored_validation_cache_is_cleaned_and_does_not_trip_the_fence(tmp_path):
@@ -982,7 +1030,7 @@ def test_escalation_with_a_clean_worktree_removes_it(tmp_path):
     outcome = execute_run(
         git,
         CONFIG,
-        registry(NoOpWorker(script(review=dict(PASS, outcome="ESCALATE")))),
+        registry(Scripted(script(review=dict(PASS, outcome="ESCALATE")))),
         "escalate before writing anything",
         tmp_path / "wt",
         CRITERIA,
@@ -1356,13 +1404,82 @@ def test_invalid_review_source_does_not_bootstrap_a_new_run(tmp_path):
 
 def test_run_that_changes_nothing_cannot_complete_local(tmp_path):
     git = repo(tmp_path)
-    outcome = execute_run(
-        git, CONFIG, registry(NoOpWorker(script())), "add a flag", tmp_path / "wt", CRITERIA
-    )
+    adapter = NoOpWorker(script())
+    outcome = execute_run(git, CONFIG, registry(adapter), "add a flag", tmp_path / "wt", CRITERIA)
     assert outcome.final_state is RunState.FAILED
-    assert "no change" in outcome.reason
+    assert "no deliverable changes" in outcome.reason
     manifest = json.loads((outcome.store_root / "manifest.json").read_text())
     assert manifest["git"]["final_commit"] is None
+    assert manifest["terminal_cause"] == "worker_no_changes"
+    assert manifest["failure_class"] == "product"
+    assert manifest["failure_signature"] == "worker_no_changes:empty-change-set"
+    assert adapter.seen == ["classifier", "planner", "plan_reviewer", "implementation_worker"]
+    evidence = json.loads(
+        (outcome.store_root / "execution/no-progress/implementation-worker.json").read_text()
+    )
+    assert evidence["stage"] == "implementation_worker"
+    assert evidence["after_paths"] == []
+
+
+def test_seed_patch_counts_as_deliverable_when_worker_is_a_noop(tmp_path):
+    git = repo(tmp_path)
+    seed = tmp_path / "seed.patch"
+    seed.write_text(
+        "diff --git a/src/app.py b/src/app.py\n"
+        "--- a/src/app.py\n"
+        "+++ b/src/app.py\n"
+        "@@ -1 +1 @@\n"
+        "-x = 1\n"
+        "+x = 99\n"
+    )
+
+    adapter = NoOpWorker(script())
+    outcome = execute_run(
+        git,
+        CONFIG,
+        registry(adapter),
+        "continue a seeded change",
+        tmp_path / "wt",
+        CRITERIA,
+        seed_patch=seed,
+    )
+
+    assert outcome.final_state is RunState.COMPLETE_LOCAL
+    assert adapter.seen[-2:] == ["implementation_reviewer", "verifier"]
+    manifest = json.loads((outcome.store_root / "manifest.json").read_text())
+    assert manifest["git"]["final_commit"] is not None
+
+
+@pytest.mark.parametrize("change_kind", ["binary", "deletion", "mode", "empty_untracked"])
+def test_binary_deletion_mode_and_empty_untracked_changes_are_deliverable(tmp_path, change_kind):
+    class DeliverableWorker(Scripted):
+        def run(self, request):
+            if request.role == "implementation_worker":
+                self.seen.append(request.role)
+                self.requests.append(request)
+                if change_kind == "binary":
+                    (request.cwd / "src" / "blob.bin").write_bytes(b"\x00\xff")
+                elif change_kind == "deletion":
+                    (request.cwd / "src" / "app.py").unlink()
+                elif change_kind == "mode":
+                    (request.cwd / "src" / "app.py").chmod(0o755)
+                else:
+                    (request.cwd / "src" / "empty.txt").write_bytes(b"")
+                now = datetime.now(UTC)
+                return AgentResult("fake", None, 0, "done", now, now)
+            return super().run(request)
+
+    git = repo(tmp_path)
+    outcome = execute_run(
+        git,
+        CONFIG,
+        registry(DeliverableWorker(script())),
+        f"make a {change_kind} change",
+        tmp_path / "wt",
+        CRITERIA,
+    )
+
+    assert outcome.final_state is RunState.COMPLETE_LOCAL
 
 
 def test_verifier_that_judges_no_criteria_cannot_complete_local(tmp_path):
@@ -1609,6 +1726,38 @@ def test_validation_repair_runs_for_continued_patch(tmp_path):
     assert adapter.seen[-2:] == ["implementation_reviewer", "verifier"]
 
 
+def test_continued_patch_counts_as_deliverable_without_new_worker_changes(tmp_path):
+    git = repo(tmp_path)
+    plan_path = tmp_path / "approved-plan.md"
+    plan_path.write_text("# Approved plan\n")
+    patch_path = tmp_path / "saved.patch"
+    patch_path.write_text(
+        "diff --git a/src/app.py b/src/app.py\n"
+        "--- a/src/app.py\n"
+        "+++ b/src/app.py\n"
+        "@@ -1 +1 @@\n"
+        "-x = 1\n"
+        "+x = 3\n"
+    )
+    adapter = NoOpWorker(script())
+
+    outcome = execute_run(
+        git,
+        CONFIG,
+        registry(adapter),
+        "continue the saved change",
+        tmp_path / "wt",
+        CRITERIA,
+        external_plan=plan_path,
+        retry_of="source-run",
+        continue_patch=patch_path,
+    )
+
+    assert outcome.final_state is RunState.COMPLETE_LOCAL
+    assert "implementation_worker" not in adapter.seen
+    assert "change_continued" in {event["event"] for event in events(outcome)}
+
+
 def test_trivial_run_repairs_validation_without_adding_implementation_review(tmp_path):
     class RepairingWorker(Scripted):
         worker_calls = 0
@@ -1619,6 +1768,8 @@ def test_trivial_run_repairs_validation_without_adding_implementation_review(tmp
                 self.worker_calls += 1
                 value = "x = 1\n" if self.worker_calls == 1 else "x = 2\n"
                 (request.cwd / "src" / "app.py").write_text(value)
+                if self.worker_calls == 1:
+                    (request.cwd / "src" / "initial-attempt.txt").write_text("attempted\n")
             return result
 
     git = repo(tmp_path)
