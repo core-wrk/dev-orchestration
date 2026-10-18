@@ -613,6 +613,42 @@ def test_retry_reuses_the_approved_plan_of_an_implementation_stage_death(tmp_pat
     assert "planner" not in adapter.seen and "plan_reviewer" in adapter.seen
 
 
+def test_retry_reimplements_after_worker_no_changes(tmp_path, monkeypatch):
+    root, adapter = _retry_fixture(tmp_path, monkeypatch, None, cause="worker_no_changes")
+
+    result = CliRunner().invoke(app, ["retry", "20260829-101500_standard_dead"])
+
+    assert result.exit_code == 0, result.output
+    manifest = _latest_manifest(root)
+    assert manifest.retry_of == "20260829-101500_standard_dead"
+    assert manifest.goal_attempt == 2
+    assert "implementation_worker" in adapter.seen
+    events = (root / ".ai" / "runs" / manifest.run_id / "events.jsonl").read_text()
+    assert "change_continued" not in events
+
+
+def test_retry_continues_saved_patch_after_remediation_no_progress(tmp_path, monkeypatch):
+    source_root = tmp_path / "patch-source"
+    source_root.mkdir()
+    repo(source_root)
+    patch = _saved_change(source_root)
+    import shutil
+
+    shutil.rmtree(source_root)
+    root, adapter = _retry_fixture(tmp_path, monkeypatch, patch, cause="remediation_no_progress")
+
+    result = CliRunner().invoke(app, ["retry", "20260829-101500_standard_dead"])
+
+    assert result.exit_code == 0, result.output
+    manifest = _latest_manifest(root)
+    assert manifest.retry_of == "20260829-101500_standard_dead"
+    assert manifest.goal_attempt == 2
+    assert "implementation_worker" not in adapter.seen
+    events = (root / ".ai" / "runs" / manifest.run_id / "events.jsonl").read_text()
+    assert "change_continued" in events
+    assert (Path(manifest.git.worktree) / "src" / "app.py").read_text() == "x = 3\n"
+
+
 @pytest.mark.parametrize(
     "cause,retry_of,fragment",
     [

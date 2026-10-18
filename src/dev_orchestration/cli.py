@@ -509,6 +509,8 @@ _RETRYABLE_CAUSES = {
     "implementation_review_escalated",
     "validation_failed",
     "validation_failed_after_remediation",
+    "worker_no_changes",
+    "remediation_no_progress",
 }
 
 
