@@ -289,6 +289,103 @@ def test_doctor_accepts_matching_generated_contract_with_reordered_lists_and_cus
     assert check.detail == ""
 
 
+def test_doctor_accepts_matching_generated_contract_with_blank_lines_in_lists(tmp_path):
+    _config, agents, yaml_text = _contract_fixture(tmp_path)
+    agents = agents.replace("- `src/**`\n- `docs/**`", "- `src/**`\n\n- `docs/**`")
+    agents = agents.replace("- `vendor/**`\n- `private/**`", "- `vendor/**`\n\n- `private/**`")
+    agents = agents.replace(
+        "- `lint`: `ruff check src`\n- `test`: `pytest -q`",
+        "- `lint`: `ruff check src`\n\n- `test`: `pytest -q`",
+    )
+    _write_contract_fixture(tmp_path, agents, yaml_text)
+    before = {name: (tmp_path / name).read_bytes() for name in ("AGENTS.md", ".ai/project.yaml")}
+
+    check = _by_name(
+        run_checks(tmp_path, codex=FakeAdapter(), claude=FakeAdapter()), "AGENTS.md contract"
+    )
+
+    assert check.ok is True
+    assert check.detail == ""
+    assert {
+        name: (tmp_path / name).read_bytes() for name in ("AGENTS.md", ".ai/project.yaml")
+    } == before
+
+
+@pytest.mark.parametrize(
+    "edit, expected",
+    [
+        (
+            lambda text: text.replace(
+                "- `src/**`\n- `docs/**`", "- `src/**`\n\n- `extra/**`\n- `docs/**`"
+            ),
+            "scope.include",
+        ),
+        (
+            lambda text: text.replace(
+                "- `lint`: `ruff check src`\n- `test`: `pytest -q`",
+                "- `lint`: `ruff check src`\n\n- `extra`: `extra-check`\n- `test`: `pytest -q`",
+            ),
+            "validation:extra",
+        ),
+    ],
+    ids=["scope-entry-after-blank-line", "validation-entry-after-blank-line"],
+)
+def test_doctor_detects_contract_drift_after_blank_lines(tmp_path, edit, expected):
+    _config, agents, yaml_text = _contract_fixture(tmp_path)
+    _write_contract_fixture(tmp_path, edit(agents), yaml_text)
+
+    check = _by_name(
+        run_checks(tmp_path, codex=FakeAdapter(), claude=FakeAdapter()), "AGENTS.md contract"
+    )
+
+    assert check.ok is False
+    assert expected in check.detail
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [
+        lambda text: text.replace(
+            "- `lint`: `ruff check src`\n- `test`: `pytest -q`",
+            "- `lint`: `ruff check src`\n- `lint`: `pytest -q`",
+        ),
+        lambda text: text.replace("- `lint`: `ruff check src`", "- lint: `ruff check src`"),
+    ],
+    ids=["duplicate-command", "unrecognized-entry"],
+)
+def test_doctor_reports_incomplete_contract_for_unreadable_command_entries(tmp_path, edit):
+    _config, agents, yaml_text = _contract_fixture(tmp_path)
+    _write_contract_fixture(tmp_path, edit(agents), yaml_text)
+
+    check = _by_name(
+        run_checks(tmp_path, codex=FakeAdapter(), claude=FakeAdapter()), "AGENTS.md contract"
+    )
+
+    assert check.ok is False
+    assert "incomplete" in check.detail.lower()
+
+
+def test_doctor_accepts_generated_contract_with_empty_validation(tmp_path):
+    config = ProjectConfig.model_validate(
+        {
+            "project": {"name": "sample", "class": "internal_utility"},
+            "scope": {"include": ["src/**"], "exclude": ["vendor/**"]},
+            "validation": {},
+        }
+    )
+    agents = render_agents_md(config)
+    yaml_text = render_project_yaml(config)
+    assert "- (none proven yet — an unproven command is not a gate)" in agents
+    _write_contract_fixture(tmp_path, agents, yaml_text)
+
+    check = _by_name(
+        run_checks(tmp_path, codex=FakeAdapter(), claude=FakeAdapter()), "AGENTS.md contract"
+    )
+
+    assert check.ok is True
+    assert check.detail == ""
+
+
 def test_doctor_reports_scope_and_validation_drift_with_both_values(tmp_path):
     _config, agents, yaml_text = _contract_fixture(tmp_path)
     agents = agents.replace("- `src/**`", "- `app/**`").replace(
@@ -309,14 +406,22 @@ def test_doctor_reports_scope_and_validation_drift_with_both_values(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "edit",
+    "edit, expected_detail",
     [
-        lambda text: text.replace("## Validation", "## Checks"),
-        lambda text: text + "\n## Scope\nModifiable:\n- `elsewhere/`\n",
+        (
+            lambda text: text.replace("## Validation", "## Checks"),
+            "incomplete: Validation section is missing",
+        ),
+        (
+            lambda text: text + "\n## Scope\nModifiable:\n- `elsewhere/`\n",
+            "incomplete: Scope section is duplicated",
+        ),
     ],
     ids=["unrecognized-section", "duplicate-section"],
 )
-def test_doctor_reports_incomplete_contract_when_sections_are_unreadable(tmp_path, edit):
+def test_doctor_reports_incomplete_contract_when_sections_are_unreadable(
+    tmp_path, edit, expected_detail
+):
     _config, agents, yaml_text = _contract_fixture(tmp_path)
     _write_contract_fixture(tmp_path, edit(agents), yaml_text)
 
@@ -325,7 +430,7 @@ def test_doctor_reports_incomplete_contract_when_sections_are_unreadable(tmp_pat
     )
 
     assert check.ok is False
-    assert "incomplete" in check.detail.lower()
+    assert check.detail == expected_detail
 
 
 def test_malformed_project_yaml_fails_config_check_without_raising(tmp_path):

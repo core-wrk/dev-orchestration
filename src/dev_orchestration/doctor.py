@@ -179,8 +179,6 @@ def _code_bullets(lines: list[str], label: str) -> list[str]:
     empty_list = False
     for line in lines[markers[0] + 1 :]:
         if not line.strip():
-            if values:
-                break
             continue
         if not line.startswith("- "):
             break
@@ -202,25 +200,31 @@ def _code_bullets(lines: list[str], label: str) -> list[str]:
 def _validation_commands(lines: list[str]) -> dict[str, str]:
     values: dict[str, str] = {}
     started = False
+    empty_list = False
     for line in lines:
-        if not line.strip() and not started:
+        if not line.strip():
             continue
         if not line.startswith("- "):
             if started:
                 break
             raise ValueError("Validation command list is missing or unrecognized")
         started = True
-        if line == "- (none — unproven yet — an unproven command is not a gate)":
+        if line == "- (none proven yet — an unproven command is not a gate)":
+            empty_list = True
             continue
         match = re.fullmatch(r"- `([^`]+)`: `(.*)`", line)
         if not match:
             raise ValueError("unrecognized entry in Validation command list")
         name, command = match.groups()
+        if empty_list:
+            raise ValueError("Validation command list mixes entries with '(none)'")
         if name in values:
             raise ValueError(f"Validation command {name!r} is duplicated")
         values[name] = command
     if not started:
         raise ValueError("Validation command list is missing or unrecognized")
+    if empty_list and values:
+        raise ValueError("Validation command list mixes entries with '(none)'")
     return values
 
 
