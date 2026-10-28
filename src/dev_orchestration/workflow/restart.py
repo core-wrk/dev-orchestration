@@ -17,7 +17,12 @@ from dev_orchestration.workflow.bootstrap import (
     resolve_run_policy,
     resolve_runtime_context,
 )
-from dev_orchestration.workflow.checkpoints import input_hashes, record_stage
+from dev_orchestration.workflow.checkpoints import (
+    input_hashes,
+    project_config_matches,
+    record_stage,
+    validation_files_default_omission,
+)
 from dev_orchestration.workflow.engine import Engine
 from dev_orchestration.workflow.recovery import ResumeRefused, _verify_human_approval, resume_run
 from dev_orchestration.workflow.runner import RunOutcome, cleanup_worktree_if_unproductive
@@ -174,7 +179,7 @@ def _source_contract(
     if not manifest.config_layers:
         raise ResumeRefused("source run has no saved project configuration; restart is unavailable")
     validation_changes = None
-    if manifest.config_layers[0] != config.model_dump(mode="json"):
+    if not project_config_matches(manifest.config_layers[0], config):
         if allow_validation_command_changes:
             validation_changes = _validation_command_changes(manifest.config_layers[0], config)
         if validation_changes is None:
@@ -185,14 +190,26 @@ def _source_contract(
         raise ResumeRefused("source run still has an active provider")
     if manifest.checkpoint is None:
         raise ResumeRefused("source run has no durable stage evidence; restart is ambiguous")
+    if config.validation_files and not manifest.validation_input_hashes:
+        raise ResumeRefused("saved validation input hashes are missing")
     try:
         latest = source.verify_checkpoint()
         current_inputs = input_hashes(source, registry)
         saved_inputs = latest["inputs"]
+        if "validation_input_hashes" not in saved_inputs:
+            current_inputs.pop("validation_input_hashes", None)
         if validation_changes is not None:
             current_inputs.pop(".ai/project.yaml", None)
             saved_inputs = dict(saved_inputs)
             saved_inputs.pop(".ai/project.yaml", None)
+        if (
+            ".ai/project.yaml" in current_inputs
+            and ".ai/project.yaml" in saved_inputs
+            and current_inputs[".ai/project.yaml"] != saved_inputs[".ai/project.yaml"]
+            and project_config_matches(manifest.config_layers[0], config)
+            and validation_files_default_omission(repo, manifest.git.base_commit or "")
+        ):
+            current_inputs[".ai/project.yaml"] = saved_inputs[".ai/project.yaml"]
         if current_inputs != saved_inputs:
             raise ResumeRefused("saved request, policy, role binding, or declared context changed")
     except CheckpointError as exc:

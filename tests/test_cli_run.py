@@ -1500,6 +1500,27 @@ def test_validation_restart_command_change_validator_rejects_other_config_edits(
     assert _validation_command_changes(original.model_dump(mode="json"), changed_scope) is None
 
 
+def test_reliability_saved_inputs_restart_accepts_omitted_empty_default(tmp_path, monkeypatch):
+    root, source_id, adapter = _failed_verification_source(tmp_path, monkeypatch)
+    config_path = root / ".ai" / "project.yaml"
+    config_path.write_text(config_path.read_text() + "validation_files: []\n")
+    _commit_file(
+        root,
+        ".ai/project.yaml",
+        config_path.read_text(),
+        "record empty validation files default",
+    )
+    _restart_cli(monkeypatch, tmp_path, adapter)
+    monkeypatch.chdir(root)
+
+    result = CliRunner().invoke(
+        app, ["restart", source_id, "--from", "validation", "--reason", "rerun validation"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert _latest_manifest(root).status is RunState.COMPLETE_LOCAL
+
+
 def test_remediation_restart_repairs_failed_validation_before_fresh_review(tmp_path, monkeypatch):
     root, source_id, adapter = _failed_verification_source(tmp_path, monkeypatch)
     _fail_restart_validation(monkeypatch, passes_after_repair=True)
