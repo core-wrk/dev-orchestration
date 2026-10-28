@@ -13,7 +13,7 @@ from pydantic import BaseModel
 
 from dev_orchestration.config.models import ValidationCommand
 from dev_orchestration.domain.enums import Tier
-from dev_orchestration.git.repo import GitRepo
+from dev_orchestration.git.repo import GitCommandError, GitRepo
 
 TAIL_CHARS = 4000
 
@@ -80,55 +80,52 @@ def validation_environment(
             f"worktree root is unavailable for validation cleanup: {exc}"
         ) from exc
     try:
-        for relative in link_paths:
-            target = worktree_root / relative
-            source = (base_root / relative).resolve() if base_root is not None else None
-            if (
-                source is not None
-                and source.is_dir()
-                and not target.exists()
-                and not target.is_symlink()
-            ):
-                try:
+        try:
+            for relative in link_paths:
+                target = worktree_root / relative
+                source = (base_root / relative).resolve() if base_root is not None else None
+                if (
+                    source is not None
+                    and source.is_dir()
+                    and not target.exists()
+                    and not target.is_symlink()
+                ):
                     target.parent.mkdir(parents=True, exist_ok=True)
                     target.symlink_to(source, target_is_directory=True)
-                except OSError as exc:
-                    if relative not in required_paths:
-                        raise
-                    raise ValidationEnvironmentError(
-                        f"required validation directory {relative!r} could not be linked: {exc}"
-                    ) from exc
-                else:
                     linked.append((relative, source))
-        for relative in required_paths:
-            target = worktree_root / relative
-            if not target.is_dir() or not os.access(target, os.R_OK | os.X_OK):
-                raise ValidationEnvironmentError(
-                    f"required validation directory {relative!r} is missing or inaccessible"
-                )
-        if validation_files and base_root is None:
-            raise ValidationEnvironmentError("validation files require a base repository")
-        for relative in validation_files:
-            source = base_root / relative
-            target = worktree_root / relative
-            if source.is_symlink() or not source.is_file():
-                raise ValidationEnvironmentError(
-                    f"declared validation file {relative!r} is missing or is not an ordinary file"
-                )
-            if target.exists() or target.is_symlink():
-                raise ValidationEnvironmentError(
-                    f"declared validation file target {relative!r} already exists in the worktree"
-                )
-            parent = worktree_root
-            for part in PurePosixPath(relative).parts[:-1]:
-                parent = parent / part
-                if parent.is_symlink():
+            for relative in required_paths:
+                target = worktree_root / relative
+                if not target.is_dir() or not os.access(target, os.R_OK | os.X_OK):
                     raise ValidationEnvironmentError(
-                        f"declared validation file target {relative!r} crosses a worktree symlink"
+                        f"required validation directory {relative!r} is missing or inaccessible"
                     )
-            target.parent.mkdir(parents=True, exist_ok=True)
-            copied.append(relative)
-            shutil.copyfile(source, target)
+            if validation_files and base_root is None:
+                raise ValidationEnvironmentError("validation files require a base repository")
+            for relative in validation_files:
+                source = base_root / relative
+                target = worktree_root / relative
+                if source.is_symlink() or not source.is_file():
+                    raise ValidationEnvironmentError(
+                        f"declared validation file {relative!r} is missing or is not an ordinary file"
+                    )
+                if target.exists() or target.is_symlink():
+                    raise ValidationEnvironmentError(
+                        f"declared validation file target {relative!r} already exists in the worktree"
+                    )
+                parent = worktree_root
+                for part in PurePosixPath(relative).parts[:-1]:
+                    parent = parent / part
+                    if parent.is_symlink():
+                        raise ValidationEnvironmentError(
+                            f"declared validation file target {relative!r} crosses a worktree symlink"
+                        )
+                target.parent.mkdir(parents=True, exist_ok=True)
+                copied.append(relative)
+                shutil.copyfile(source, target)
+        except OSError as exc:
+            raise ValidationEnvironmentError(
+                f"validation environment could not be prepared: {exc}"
+            ) from exc
         yield
     finally:
         cleanup_errors: list[str] = []
@@ -164,7 +161,8 @@ def validation_environment(
 
 def validation_file_hashes(repo: GitRepo, paths: list[str]) -> dict[str, str]:
     """Validate configured ignored inputs and return their content hashes."""
-    ignored = set(repo.ignored_paths())
+    if not paths:
+        return {}
     hashes: dict[str, str] = {}
     root = repo.root.resolve()
     for relative in paths:
@@ -187,15 +185,50 @@ def validation_file_hashes(repo: GitRepo, paths: list[str]) -> dict[str, str]:
             raise ValidationEnvironmentError(
                 f"declared validation file {relative!r} is unavailable or outside the repository"
             )
-        if repo.is_tracked(relative):
+        try:
+            tracked = repo.is_tracked(relative)
+        except (GitCommandError, OSError, subprocess.SubprocessError) as exc:
+            raise ValidationEnvironmentError(
+                f"declared validation file {relative!r} could not be checked for tracking: {exc}"
+            ) from exc
+        if tracked:
             raise ValidationEnvironmentError(
                 f"declared validation file {relative!r} is tracked; use validation_links or a tracked source"
             )
-        if relative not in ignored:
+        try:
+            ignored = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(repo.root),
+                    "check-ignore",
+                    "--quiet",
+                    "--no-index",
+                    "--",
+                    relative,
+                ],
+                capture_output=True,
+                timeout=120,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise ValidationEnvironmentError(
+                f"declared validation file {relative!r} could not be checked against Git ignore rules: {exc}"
+            ) from exc
+        if ignored.returncode not in {0, 1}:
+            raise ValidationEnvironmentError(
+                f"declared validation file {relative!r} could not be checked against Git ignore rules"
+            )
+        if ignored.returncode != 0:
             raise ValidationEnvironmentError(
                 f"declared validation file {relative!r} must be Git-ignored and untracked"
             )
-        hashes[relative] = hashlib.sha256(source.read_bytes()).hexdigest()
+        try:
+            hashes[relative] = hashlib.sha256(source.read_bytes()).hexdigest()
+        except OSError as exc:
+            raise ValidationEnvironmentError(
+                f"declared validation file {relative!r} could not be read: {exc}"
+            ) from exc
     return hashes
 
 
@@ -238,16 +271,9 @@ def run_validations(
                 )
             )
         except OSError as exc:
-            outcomes.append(
-                ValidationOutcome(
-                    name=name,
-                    command=spec.command,
-                    exit_code=None,
-                    passed=False,
-                    stdout_tail="",
-                    stderr_tail=str(exc),
-                )
-            )
+            raise ValidationEnvironmentError(
+                f"validation command {name!r} could not be started: {exc}"
+            ) from exc
         else:
             outcomes.append(
                 ValidationOutcome(

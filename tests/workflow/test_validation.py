@@ -5,8 +5,12 @@ import subprocess
 import pytest
 from pydantic import ValidationError
 
+import dev_orchestration.workflow.validation as validation_module
 from dev_orchestration.config.models import ProjectConfig, ValidationCommand
 from dev_orchestration.domain.enums import Tier
+from dev_orchestration.git.repo import GitRepo
+from dev_orchestration.scope import ScopeFence
+from dev_orchestration.workflow.runner import _run_validation_stage
 from dev_orchestration.workflow.validation import (
     ValidationEnvironmentError,
     ValidationOutcome,
@@ -31,6 +35,20 @@ def test_passing_and_failing_commands_record_exit_codes(tmp_path):
 def test_commands_not_required_for_tier_do_not_run(tmp_path):
     commands = {"high": ValidationCommand(command="exit 1", required_for=[Tier.HIGH_RISK])}
     assert run_validations(commands, Tier.STANDARD, tmp_path) == []
+
+
+def test_reliability_environment_shell_launch_error_is_typed(monkeypatch, tmp_path):
+    def fail_shell(command, **kwargs):
+        if command[0] == "/bin/sh":
+            raise FileNotFoundError("synthetic shell launch failure")
+        return original_run(command, **kwargs)
+
+    original_run = subprocess.run
+    monkeypatch.setattr(validation_module.subprocess, "run", fail_shell)
+    command = ValidationCommand(command="true", required_for=[Tier.STANDARD])
+
+    with pytest.raises(ValidationEnvironmentError, match="could not be started"):
+        run_validations({"unit": command}, Tier.STANDARD, tmp_path)
 
 
 def test_output_timeout_and_cwd_are_recorded(tmp_path):
@@ -288,8 +306,6 @@ def test_validation_file_hashes_require_ignored_untracked_regular_files(tmp_path
     (root / "ops" / "template.pptx").write_bytes(b"synthetic")
     subprocess.run(["git", "-C", str(root), "add", ".gitignore"], check=True)
     subprocess.run(["git", "-C", str(root), "commit", "-qm", "init"], check=True)
-    from dev_orchestration.git.repo import GitRepo
-
     hashes = validation_file_hashes(GitRepo(root), ["ops/template.pptx"])
     assert len(hashes["ops/template.pptx"]) == 64
     (root / "ops" / "template.pptx").write_bytes(b"changed")
@@ -299,3 +315,53 @@ def test_validation_file_hashes_require_ignored_untracked_regular_files(tmp_path
     (root / "ops" / "template.pptx").symlink_to(root / ".gitignore")
     with pytest.raises(ValidationEnvironmentError, match="symlinks"):
         validation_file_hashes(GitRepo(root), ["ops/template.pptx"])
+
+
+def test_reliability_environment_hashes_only_declared_inputs(tmp_path, monkeypatch):
+    root = tmp_path / "repo"
+    root.mkdir()
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run(["git", "-C", str(root), "config", "user.email", "t@t.t"], check=True)
+    subprocess.run(["git", "-C", str(root), "config", "user.name", "T"], check=True)
+    (root / ".gitignore").write_text("ops/template.pptx\nunrelated.bin\n")
+    (root / "ops").mkdir()
+    (root / "ops" / "template.pptx").write_bytes(b"synthetic")
+    with (root / "unrelated.bin").open("wb") as unrelated:
+        unrelated.truncate(64 * 1024 * 1024 + 1)
+    subprocess.run(["git", "-C", str(root), "add", ".gitignore"], check=True)
+    subprocess.run(["git", "-C", str(root), "commit", "-qm", "init"], check=True)
+
+    def forbidden_inventory(self):
+        raise AssertionError("unrelated ignored files were inventoried")
+
+    monkeypatch.setattr(GitRepo, "ignored_paths", forbidden_inventory)
+    repo = GitRepo(root)
+    assert validation_file_hashes(repo, []) == {}
+    assert set(validation_file_hashes(repo, ["ops/template.pptx"])) == {"ops/template.pptx"}
+
+
+def test_reliability_environment_validation_removes_ignored_output(tmp_path):
+    root = tmp_path / "worktree"
+    root.mkdir()
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run(["git", "-C", str(root), "config", "user.email", "t@t.t"], check=True)
+    subprocess.run(["git", "-C", str(root), "config", "user.name", "T"], check=True)
+    (root / ".gitignore").write_text("coverage.xml\n")
+    subprocess.run(["git", "-C", str(root), "add", ".gitignore"], check=True)
+    subprocess.run(["git", "-C", str(root), "commit", "-qm", "init"], check=True)
+    repo = GitRepo(root)
+
+    def validation():
+        (root / "coverage.xml").write_text("synthetic coverage output")
+        return "validated"
+
+    result = _run_validation_stage(
+        repo,
+        repo.current_commit(),
+        ScopeFence(include=["**"], exclude=[]),
+        validation,
+        link_paths=(),
+    )
+
+    assert result == "validated"
+    assert not (root / "coverage.xml").exists()

@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+import dev_orchestration.workflow.validation as validation_module
 from dev_orchestration.adapters.base import (
     AdapterStatus,
     AgentInterruptedError,
@@ -1698,6 +1699,41 @@ def test_provider_execution_failure_is_recorded_as_environment_failure(tmp_path)
     assert outcome.final_state is RunState.ESCALATED
     assert manifest.failure_class == "environment"
     assert manifest.terminal_cause == "environment"
+
+
+def test_reliability_environment_shell_launch_failure_skips_validation_repair(
+    tmp_path, monkeypatch
+):
+    git = repo(tmp_path)
+    adapter = Scripted()
+    original_run = subprocess.run
+
+    def fail_validation_shell(command, **kwargs):
+        if command[0] == "/bin/sh":
+            raise FileNotFoundError("synthetic shell launch failure")
+        return original_run(command, **kwargs)
+
+    monkeypatch.setattr(validation_module.subprocess, "run", fail_validation_shell)
+    outcome = execute_run(git, CONFIG, registry(adapter), "change app", tmp_path / "wt", CRITERIA)
+    manifest = RunStore(git.root, outcome.run_id).read_manifest()
+
+    assert outcome.final_state is RunState.FAILED
+    assert manifest.failure_class == "environment"
+    assert adapter.seen.count("implementation_worker") == 1
+
+
+def test_reliability_environment_nonzero_validation_exit_remains_product_failure(tmp_path):
+    git = repo(tmp_path)
+    adapter = Scripted()
+    validation = CONFIG.validation["unit"].model_copy(update={"command": "exit 3"})
+    config = CONFIG.model_copy(update={"validation": {"unit": validation}})
+
+    outcome = execute_run(git, config, registry(adapter), "change app", tmp_path / "wt", CRITERIA)
+    manifest = RunStore(git.root, outcome.run_id).read_manifest()
+
+    assert outcome.final_state is RunState.FAILED
+    assert manifest.failure_class == "product"
+    assert adapter.seen.count("implementation_worker") == 2
 
 
 def test_pause_before_classification_refuses_changed_selected_spec_before_provider(tmp_path):
