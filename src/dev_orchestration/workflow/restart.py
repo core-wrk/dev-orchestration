@@ -28,7 +28,12 @@ from dev_orchestration.workflow.recovery import ResumeRefused, _verify_human_app
 from dev_orchestration.workflow.runner import RunOutcome, cleanup_worktree_if_unproductive
 from dev_orchestration.workflow.scope_check import ScopeViolation, enforce_fence
 from dev_orchestration.workflow.snapshot import capture_snapshot
-from dev_orchestration.workflow.validation import ValidationOutcome, all_passed
+from dev_orchestration.workflow.validation import (
+    ValidationEnvironmentError,
+    ValidationOutcome,
+    all_passed,
+    validation_file_hashes,
+)
 
 _FINAL_STATES = {RunState.FAILED, RunState.ESCALATED}
 _GOVERNANCE_CAUSES = {
@@ -192,6 +197,19 @@ def _source_contract(
         raise ResumeRefused("source run has no durable stage evidence; restart is ambiguous")
     if config.validation_files and not manifest.validation_input_hashes:
         raise ResumeRefused("saved validation input hashes are missing")
+    if manifest.validation_input_hashes:
+        try:
+            current_validation_hashes = validation_file_hashes(repo, config.validation_files)
+        except ValidationEnvironmentError as exc:
+            raise ResumeRefused(
+                f"declared validation inputs are unavailable; restore the recorded bytes for "
+                f"recovery, or start a fresh run for intentionally different inputs: {exc}"
+            ) from exc
+        if current_validation_hashes != manifest.validation_input_hashes:
+            raise ResumeRefused(
+                "declared validation inputs changed since the source run; restore the recorded "
+                "bytes for recovery, or start a fresh run for intentionally different inputs"
+            )
     try:
         latest = source.verify_checkpoint()
         current_inputs = input_hashes(source, registry)

@@ -534,7 +534,8 @@ def resume_run(
             current_hashes = validation_file_hashes(repo, project_config.validation_files)
             if current_hashes != manifest.validation_input_hashes:
                 raise ResumeRefused(
-                    "declared validation files changed since the run began; restart from validation"
+                    "declared validation files changed since the run began; restore the recorded "
+                    "bytes for recovery, or start a fresh run for intentionally different inputs"
                 )
         if (
             manifest.status is RunState.APPROVED
