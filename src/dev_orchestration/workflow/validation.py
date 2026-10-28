@@ -3,6 +3,7 @@
 import hashlib
 import os
 import shutil
+import stat
 import subprocess
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -15,6 +16,36 @@ from dev_orchestration.domain.enums import Tier
 from dev_orchestration.git.repo import GitRepo
 
 TAIL_CHARS = 4000
+
+
+def _unlink_worktree_entry(
+    root_fd: int, relative: str, expected_symlink: Path | None = None
+) -> None:
+    """Remove an entry through the original worktree directory, never through symlink parents."""
+    parts = PurePosixPath(relative).parts
+    parent_fd = os.dup(root_fd)
+    try:
+        for part in parts[:-1]:
+            next_fd = os.open(
+                part,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=parent_fd,
+            )
+            os.close(parent_fd)
+            parent_fd = next_fd
+        name = parts[-1]
+        try:
+            info = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return
+        if expected_symlink is not None:
+            if not stat.S_ISLNK(info.st_mode):
+                return
+            if Path(os.readlink(name, dir_fd=parent_fd)) != expected_symlink:
+                return
+        os.unlink(name, dir_fd=parent_fd)
+    finally:
+        os.close(parent_fd)
 
 
 class ValidationEnvironmentError(RuntimeError):
@@ -40,8 +71,14 @@ def validation_environment(
     its own set (e.g. ``node_modules``, ``functions/node_modules``) via
     ``ProjectConfig.validation_links``.
     """
-    linked: list[tuple[Path, Path]] = []
-    copied: list[Path] = []
+    linked: list[tuple[str, Path]] = []
+    copied: list[str] = []
+    try:
+        root_fd = os.open(worktree_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError as exc:
+        raise ValidationEnvironmentError(
+            f"worktree root is unavailable for validation cleanup: {exc}"
+        ) from exc
     try:
         for relative in link_paths:
             target = worktree_root / relative
@@ -62,7 +99,7 @@ def validation_environment(
                         f"required validation directory {relative!r} could not be linked: {exc}"
                     ) from exc
                 else:
-                    linked.append((target, source))
+                    linked.append((relative, source))
         for relative in required_paths:
             target = worktree_root / relative
             if not target.is_dir() or not os.access(target, os.R_OK | os.X_OK):
@@ -90,15 +127,39 @@ def validation_environment(
                         f"declared validation file target {relative!r} crosses a worktree symlink"
                     )
             target.parent.mkdir(parents=True, exist_ok=True)
-            copied.append(target)
+            copied.append(relative)
             shutil.copyfile(source, target)
         yield
     finally:
-        for target in copied:
-            target.unlink(missing_ok=True)
-        for target, source in linked:
-            if target.is_symlink() and target.resolve() == source:
-                target.unlink()
+        cleanup_errors: list[str] = []
+        try:
+            current_root = os.stat(worktree_root, follow_symlinks=False)
+            original_root = os.fstat(root_fd)
+            if (current_root.st_dev, current_root.st_ino) != (
+                original_root.st_dev,
+                original_root.st_ino,
+            ):
+                cleanup_errors.append("worktree root was replaced during validation")
+        except OSError as exc:
+            cleanup_errors.append(str(exc))
+        try:
+            for relative in copied:
+                try:
+                    _unlink_worktree_entry(root_fd, relative)
+                except OSError as exc:
+                    cleanup_errors.append(f"{relative}: {exc}")
+            for relative, source in linked:
+                try:
+                    _unlink_worktree_entry(root_fd, relative, expected_symlink=source)
+                except OSError as exc:
+                    cleanup_errors.append(f"{relative}: {exc}")
+            if cleanup_errors:
+                raise ValidationEnvironmentError(
+                    "validation environment cleanup could not safely remove a worktree entry: "
+                    + "; ".join(cleanup_errors)
+                )
+        finally:
+            os.close(root_fd)
 
 
 def validation_file_hashes(repo: GitRepo, paths: list[str]) -> dict[str, str]:
