@@ -1509,6 +1509,70 @@ def test_reliability_saved_inputs_classifier_pause_resumes_without_recorded_hash
     )
 
 
+def test_reliability_contract_profiles_match_fresh_and_classifier_resume(tmp_path):
+    class ProfiledTrivial(Scripted):
+        def run(self, request):
+            self.seen.append(request.role)
+            if request.role == "classifier":
+                payload = {"tier": "trivial", "rationale": "localized", "profiles": ["auth"]}
+            elif request.role == "implementation_worker":
+                (request.cwd / "src" / "app.py").write_text("x = 2\n")
+                payload = "done"
+            else:
+                return super().run(request)
+            now = datetime.now(UTC)
+            return AgentResult(self.name, None, 0, payload, now, now)
+
+    class ClassifierTimeout(ProfiledTrivial):
+        def run(self, request):
+            if request.role == "classifier":
+                self.seen.append(request.role)
+                raise AgentTimeoutError(request.role, 7, self.name)
+            return super().run(request)
+
+    config_data = CONFIG.model_dump(mode="json")
+    config_data["profiles"] = {
+        "available": ["auth"],
+        "definitions": {"auth": {"controls": {"security_review": "required"}}},
+    }
+    config = ProjectConfig.model_validate(config_data)
+
+    (tmp_path / "fresh").mkdir()
+    fresh_git = repo(tmp_path / "fresh")
+    fresh = execute_run(
+        fresh_git,
+        config,
+        registry(ProfiledTrivial()),
+        "change app",
+        tmp_path / "fresh-wt",
+        CRITERIA,
+    )
+    assert fresh.final_state is RunState.COMPLETE_LOCAL
+    fresh_contract = (
+        RunStore(fresh_git.root, fresh.run_id).root / "planning/task-contract.md"
+    ).read_text()
+
+    (tmp_path / "resumed").mkdir()
+    resumed_git = repo(tmp_path / "resumed")
+    paused = execute_run(
+        resumed_git,
+        config,
+        registry(ClassifierTimeout()),
+        "change app",
+        tmp_path / "resumed-wt",
+        CRITERIA,
+    )
+    assert paused.final_state is RunState.PAUSED_INTERRUPTED
+    resumed = resume_run(resumed_git, config, registry(ProfiledTrivial()), paused.run_id)
+    assert resumed.final_state is RunState.COMPLETE_LOCAL
+    resumed_contract = (
+        RunStore(resumed_git.root, paused.run_id).root / "planning/task-contract.md"
+    ).read_text()
+
+    assert resumed_contract == fresh_contract
+    assert "profiles.auth.controls.security_review" in resumed_contract
+
+
 @pytest.mark.parametrize("seeded", [False, True])
 def test_trivial_run_resumes_before_and_after_contract_checkpoint(tmp_path, seeded):
     class ClassifierTimeout(Scripted):

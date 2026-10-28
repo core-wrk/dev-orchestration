@@ -699,6 +699,12 @@ def resume_run(
                         config_layers=layers,
                         resolved_config=policy,
                     )
+                    protected = ContextRef(
+                        label=Category.INVARIANTS,
+                        path="framework:protected",
+                        content=json.dumps(policy, sort_keys=True),
+                    )
+                    invariants = [*runtime.invariants, protected]
                     store.write_json_artifact(
                         "context.json",
                         {
