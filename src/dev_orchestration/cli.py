@@ -32,6 +32,7 @@ from dev_orchestration.git.repo import (
 from dev_orchestration.init_repo import (
     FileExistsRefusal,
     UncommittedContractFileError,
+    gsd_planning_warning,
     initialize_repo,
 )
 from dev_orchestration.roles.loader import MissingTemplateError
@@ -177,6 +178,9 @@ def init(
         raise typer.Exit(1) from exc
     for path in written:
         typer.echo(f"wrote {path.relative_to(repo.root)}")
+    warning = gsd_planning_warning(repo.root)
+    if warning:
+        typer.echo(f"warning: {warning}", err=True)
 
 
 class NoSuchRunError(RuntimeError):

@@ -1,5 +1,6 @@
 """Typed configuration. Invalid config must fail before any agent runs."""
 
+from pathlib import PurePosixPath
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -101,6 +102,7 @@ class ProjectConfig(BaseModel):
     validation: dict[str, ValidationCommand] = Field(default_factory=dict)
     validation_links: list[str] = Field(default_factory=lambda: [".venv"])
     required_validation_links: list[str] = Field(default_factory=list)
+    validation_files: list[str] = Field(default_factory=list)
     git: GitPolicy = Field(default_factory=GitPolicy)
     context: ContextPolicy = Field(default_factory=ContextPolicy)
     approval: ApprovalPolicy = Field(default_factory=ApprovalPolicy)
@@ -115,6 +117,25 @@ class ProjectConfig(BaseModel):
                 "required_validation_links must also appear in validation_links: "
                 + ", ".join(sorted(missing))
             )
+        files = self.validation_files
+        if len(files) != len(set(files)):
+            raise ValueError("validation_files must not contain duplicates")
+        links = [PurePosixPath(value) for value in self.validation_links]
+        reserved = {".ai", ".git", ".venv", ".worktrees", ".superpowers"}
+        for value in files:
+            path = PurePosixPath(value)
+            if (
+                not value
+                or "\\" in value
+                or path.is_absolute()
+                or path.as_posix() != value
+                or not path.parts
+                or any(part in {"", ".", ".."} for part in path.parts)
+                or path.parts[0] in reserved
+            ):
+                raise ValueError(f"validation file path is unsafe: {value!r}")
+            if any(path == link or path in link.parents or link in path.parents for link in links):
+                raise ValueError(f"validation file {value!r} overlaps a validation_links path")
         return self
 
 

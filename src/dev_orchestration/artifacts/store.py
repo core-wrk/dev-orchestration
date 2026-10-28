@@ -182,10 +182,11 @@ class RunStore:
             raise CheckpointError(f"checkpoint {name} is missing")
         return json.loads(path.read_text(encoding="utf-8"))
 
-    def verify_checkpoint(self) -> dict:
+    def verify_checkpoint(self, *, allow_unreceipted_outputs: set[str] | None = None) -> dict:
         receipt = self.latest_checkpoint()
         if receipt is None:
             raise CheckpointError("run has no recovery checkpoint")
+        allowed = allow_unreceipted_outputs or set()
         for name, digest in receipt["artifacts"].items():
             if Path(name).is_absolute() or ".." in Path(name).parts:
                 raise CheckpointError(f"invalid checkpoint artifact {name}")
@@ -212,7 +213,7 @@ class RunStore:
         for pattern in output_patterns:
             for path in self.root.glob(pattern):
                 name = path.relative_to(self.root).as_posix()
-                if name not in completed:
+                if name not in completed and name not in allowed:
                     raise CheckpointError(
                         f"unreceipted stage output {name}; inspect the interrupted attempt"
                     )

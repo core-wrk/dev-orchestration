@@ -851,36 +851,38 @@ def test_blocked_escalated_and_nonzero_agent_results_are_terminal(tmp_path):
         CRITERIA,
     )
     assert nonzero.final_state is RunState.ESCALATED
-    assert RunStore(git.root, nonzero.run_id).read_manifest().failure_reason
+    nonzero_manifest = RunStore(git.root, nonzero.run_id).read_manifest()
+    assert nonzero_manifest.failure_reason
+    assert nonzero_manifest.failure_class == "environment"
+    assert nonzero_manifest.terminal_cause == "environment"
 
 
-def test_three_failed_attempts_stop_the_goal_until_human_reopen(tmp_path):
+def test_three_product_failures_stop_the_goal_until_human_reopen(tmp_path):
     git = repo(tmp_path)
     goal_id = "epic-088"
     for expected_attempt in range(1, 4):
         outcome = execute_run(
             git,
             CONFIG,
-            registry(NonzeroWorker(script())),
+            registry(NoOpWorker(script(review=BLOCKING))),
             "add a flag",
             tmp_path / "wt",
             CRITERIA,
             goal_id=goal_id,
         )
         manifest = RunStore(git.root, outcome.run_id).read_manifest()
-        assert outcome.final_state is RunState.ESCALATED
+        assert outcome.final_state is RunState.FAILED
         assert manifest.goal_attempt == expected_attempt
+        assert manifest.failure_class == "product"
+        assert manifest.terminal_cause == "worker_no_changes"
         assert not Path(manifest.git.worktree).exists()
         assert not git.branch_exists(manifest.git.branch)
-        patch = (outcome.store_root / "execution/failure-change.patch").read_bytes()
-        assert patch
-        assert git.verify_patch(manifest.git.base_commit, patch)
 
     assert len(list((git.root / ".ai/runs").glob("*/manifest.json"))) == 3
     assert git.run_git("branch", "--list", "ai/*") == ""
     worktree_entries = git.run_git("worktree", "list", "--porcelain").splitlines()
     assert sum(line.startswith("worktree ") for line in worktree_entries) == 1
-    blocked_adapter = NonzeroWorker(script())
+    blocked_adapter = NoOpWorker(script(review=BLOCKING))
     with pytest.raises(GoalError, match="3-attempt limit"):
         execute_run(
             git,

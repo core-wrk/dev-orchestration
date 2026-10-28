@@ -2,7 +2,12 @@ import pytest
 import yaml
 
 from dev_orchestration.config.models import ProjectConfig
-from dev_orchestration.init_repo import FileExistsRefusal, initialize_repo, render_project_yaml
+from dev_orchestration.init_repo import (
+    FileExistsRefusal,
+    gsd_planning_warning,
+    initialize_repo,
+    render_project_yaml,
+)
 
 CONFIG = ProjectConfig.model_validate(
     {
@@ -192,3 +197,13 @@ def test_agents_md_stays_within_the_persistent_budget(tmp_path):
     assert size <= CONFIG.context.persistent_budget_bytes, (
         f"AGENTS.md is {size} bytes, over the configured persistent budget"
     )
+
+
+def test_gsd_state_produces_a_non_blocking_import_warning(tmp_path):
+    assert gsd_planning_warning(tmp_path) is None
+    (tmp_path / ".planning").mkdir()
+    warning = gsd_planning_warning(tmp_path)
+    assert warning is not None
+    assert "GSD owns planning" in warning
+    assert "dev-orch owns execution" in warning
+    assert "external plan" in warning

@@ -1,8 +1,14 @@
+import json
 from datetime import UTC, datetime
 
 import pytest
 
-from dev_orchestration.adapters.base import AdapterStatus, AgentResult
+from dev_orchestration.adapters.base import (
+    AdapterStatus,
+    AgentInterruptedError,
+    AgentResult,
+    AgentTimeoutError,
+)
 from dev_orchestration.adapters.registry import RoleRegistry
 from dev_orchestration.artifacts.store import RunStore
 from dev_orchestration.config.models import RoleConfig
@@ -11,6 +17,7 @@ from dev_orchestration.context.packet import ContextRef
 from dev_orchestration.domain.enums import Outcome, ProjectClass, Tier
 from dev_orchestration.domain.findings import Finding, Severity
 from dev_orchestration.domain.run import RunManifest
+from dev_orchestration.roles.loader import load_role_prompt
 from dev_orchestration.workflow.stages import (
     MAX_REMEDIATION_CYCLES,
     FindingIdentityAmbiguity,
@@ -103,6 +110,64 @@ def test_classifier_receives_selected_specification_and_exact_criteria(store):
     assert '["keep this criterion exactly"]' in rendered
 
 
+def test_codex_classifier_timeout_retries_once_with_configured_budget(store):
+    class TimeoutOnce(Scripted):
+        def run(self, request):
+            self.requests.append(request)
+            if len(self.requests) == 1:
+                raise AgentTimeoutError("classifier", request.timeout_seconds, "fake")
+            now = datetime.now(UTC)
+            return AgentResult(
+                "fake", None, 0, {"tier": "trivial", "rationale": "small", "profiles": []}, now, now
+            )
+
+    adapter = TimeoutOnce([])
+    codex_registry = RoleRegistry(
+        {"classifier": RoleConfig(adapter="codex", model="m", timeout_seconds=90)},
+        {"codex": adapter},
+    )
+    result = classify(codex_registry, "small change", ProjectClass.INTERNAL_UTILITY, store)
+    assert result.tier is Tier.TRIVIAL
+    assert [request.timeout_seconds for request in adapter.requests] == [60, 90]
+    events = [json.loads(line) for line in (store.root / "events.jsonl").read_text().splitlines()]
+    assert [
+        event["event"] for event in events if event["event"].startswith("classifier_attempt")
+    ] == ["classifier_attempt_failed", "classifier_attempt_succeeded"]
+
+
+def test_codex_classifier_second_timeout_and_interrupt_are_not_swallowed(store):
+    class AlwaysTimeout(Scripted):
+        def run(self, request):
+            self.requests.append(request)
+            raise AgentTimeoutError("classifier", request.timeout_seconds, "fake")
+
+    adapter = AlwaysTimeout([])
+    codex_registry = RoleRegistry(
+        {"classifier": RoleConfig(adapter="codex", timeout_seconds=90)}, {"codex": adapter}
+    )
+    with pytest.raises(AgentTimeoutError):
+        classify(codex_registry, "small change", ProjectClass.INTERNAL_UTILITY, store)
+    assert [request.timeout_seconds for request in adapter.requests] == [60, 90]
+    events = [json.loads(line) for line in (store.root / "events.jsonl").read_text().splitlines()]
+    attempts = [event for event in events if event.get("event") == "classifier_attempt_failed"]
+    assert [event["attempt"] for event in attempts] == [1, 2]
+
+    class Interrupted(Scripted):
+        def run(self, request):
+            self.requests.append(request)
+            raise AgentInterruptedError("classifier", "fake", 2)
+
+    interrupted = Interrupted([])
+    with pytest.raises(AgentInterruptedError):
+        classify(
+            registry(interrupted, "classifier"),
+            "small change",
+            ProjectClass.INTERNAL_UTILITY,
+            store,
+        )
+    assert len(interrupted.requests) == 1
+
+
 def test_planning_and_reconciliation_keep_plan_versions(store):
     first = plan(registry(Scripted(["# v1\n"]), "planner"), "brief", [], [], store)
     second = reconcile(
@@ -110,6 +175,23 @@ def test_planning_and_reconciliation_keep_plan_versions(store):
     )
     assert (
         first.name == "plan-v1.md" and second.name == "plan-v2.md" and first.read_text() == "# v1\n"
+    )
+
+
+def test_planner_and_reconciler_prompts_preserve_small_explicit_designs(store):
+    planner = Scripted(["# Plan\n"])
+    plan(
+        registry(planner, "planner"),
+        "Update smoke_test.py to refuse when clients/smoketest-co* exists; do not add an ownership manifest or hashes.",
+        [],
+        [],
+        store,
+    )
+    assert "explicitly requested design" in planner.requests[0].prompt
+    assert "ownership maps" in planner.requests[0].prompt
+    assert "smallest complete design" in planner.requests[0].prompt
+    assert "dropping a criterion or crossing the approved scope" in load_role_prompt(
+        "plan_reconciler"
     )
 
 

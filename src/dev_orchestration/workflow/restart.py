@@ -107,6 +107,30 @@ def _version(path: str) -> int:
         return -1
 
 
+def _validation_command_changes(saved_config: dict, current_config: ProjectConfig) -> dict | None:
+    """Return changed validation commands only, or None for any broader edit."""
+    try:
+        old = ProjectConfig.model_validate(saved_config).model_dump(mode="json")
+    except ValueError:
+        return None
+    new = current_config.model_dump(mode="json")
+    old_validation = old.pop("validation", {})
+    new_validation = new.pop("validation", {})
+    if old != new or set(old_validation) != set(new_validation):
+        return None
+    changes = {}
+    for name in old_validation:
+        old_gate = dict(old_validation[name])
+        new_gate = dict(new_validation[name])
+        old_command = old_gate.pop("command", None)
+        new_command = new_gate.pop("command", None)
+        if old_gate != new_gate:
+            return None
+        if old_command != new_command:
+            changes[name] = {"from": old_command, "to": new_command}
+    return changes or None
+
+
 def _receipt_for(store: RunStore, *, next_stage: str) -> dict | None:
     receipts = []
     for path in (store.root / "checkpoints").glob("*.json"):
@@ -120,7 +144,12 @@ def _receipt_for(store: RunStore, *, next_stage: str) -> dict | None:
 
 
 def _source_contract(
-    repo: GitRepo, config: ProjectConfig, registry: RoleRegistry, run_id: str
+    repo: GitRepo,
+    config: ProjectConfig,
+    registry: RoleRegistry,
+    run_id: str,
+    *,
+    allow_validation_command_changes: bool = False,
 ) -> tuple[RunStore, dict, Path | None]:
     source = RunStore(repo.root, run_id)
     if source.root.resolve().parent != RunStore.runs_directory(repo.root).resolve():
@@ -142,8 +171,14 @@ def _source_contract(
         raise ResumeRefused("source run has no recorded base and branch")
     if not repo.is_ancestor(manifest.git.base_commit, repo.current_commit()):
         raise ResumeRefused("repository base diverged; start a new run against the current base")
-    if not manifest.config_layers or manifest.config_layers[0] != config.model_dump(mode="json"):
-        raise ResumeRefused("project configuration changed since the source run")
+    if not manifest.config_layers:
+        raise ResumeRefused("source run has no saved project configuration; restart is unavailable")
+    validation_changes = None
+    if manifest.config_layers[0] != config.model_dump(mode="json"):
+        if allow_validation_command_changes:
+            validation_changes = _validation_command_changes(manifest.config_layers[0], config)
+        if validation_changes is None:
+            raise ResumeRefused("project configuration changed since the source run")
     if resolve_run_policy(manifest.config_layers) != manifest.resolved_config:
         raise ResumeRefused("protected policy changed since the source run")
     if source.active_provider_alive():
@@ -152,7 +187,13 @@ def _source_contract(
         raise ResumeRefused("source run has no durable stage evidence; restart is ambiguous")
     try:
         latest = source.verify_checkpoint()
-        if input_hashes(source, registry) != latest["inputs"]:
+        current_inputs = input_hashes(source, registry)
+        saved_inputs = latest["inputs"]
+        if validation_changes is not None:
+            current_inputs.pop(".ai/project.yaml", None)
+            saved_inputs = dict(saved_inputs)
+            saved_inputs.pop(".ai/project.yaml", None)
+        if current_inputs != saved_inputs:
             raise ResumeRefused("saved request, policy, role binding, or declared context changed")
     except CheckpointError as exc:
         raise ResumeRefused(str(exc)) from exc
@@ -323,8 +364,14 @@ def restart_status(
 ) -> str:
     """Describe safe restart stages without invoking an agent."""
     try:
-        source, _, worktree = _source_contract(repo, config, registry, run_id)
+        source, _, worktree = _source_contract(
+            repo, config, registry, run_id, allow_validation_command_changes=True
+        )
         manifest = source.read_manifest()
+        saved_config = ProjectConfig.model_validate(manifest.config_layers[0])
+        validation_commands_changed = saved_config.model_dump(mode="json") != config.model_dump(
+            mode="json"
+        )
         if worktree is None:
             patch = (source.root / "execution/final-change.patch").read_bytes()
             base = _require_compatible_base(repo, manifest.git.base_commit or "", patch)
@@ -335,6 +382,12 @@ def restart_status(
             digest = _destination_patch_digest(repo, base, patch)
         stages = ["validation"]
         blockers = []
+        if validation_commands_changed:
+            detail = (
+                "Restart: eligible --from validation; review, verification, and remediation "
+                "require unchanged configuration"
+            )
+            return detail
         try:
             _validation_evidence(source, digest)
             if manifest.tier.value in {"standard", "substantial"}:
@@ -375,8 +428,19 @@ def restart_run(
         raise ResumeRefused("--from must be validation, review, verification, or remediation")
     if not reason.strip():
         raise ResumeRefused("restart requires a non-empty --reason")
-    source, _, source_worktree = _source_contract(repo, project_config, registry, run_id)
+    source, _, source_worktree = _source_contract(
+        repo,
+        project_config,
+        registry,
+        run_id,
+        allow_validation_command_changes=from_stage == "validation",
+    )
     original = source.read_manifest()
+    validation_command_changes = (
+        _validation_command_changes(original.config_layers[0], project_config)
+        if original.config_layers
+        else None
+    )
     if not original.goal_id:
         raise ResumeRefused(
             f"legacy run {run_id} has no goal ID; associate it with `dev-orch goal-associate` first"
@@ -483,6 +547,13 @@ def restart_run(
                 "validation_repairs_reserved": 0,
                 "validation_artifact": None,
                 "roles": original.roles,
+                "config_layers": [
+                    project_config.model_dump(mode="json"),
+                    *original.config_layers[1:],
+                ],
+                "resolved_config": resolve_run_policy(
+                    [project_config.model_dump(mode="json"), *original.config_layers[1:]]
+                ),
             }
         )
         store.update_manifest(**manifest_data)
@@ -498,6 +569,10 @@ def restart_run(
                 "destination_base_commit": destination_base,
             }
         )
+        if validation_command_changes is not None:
+            store.append_event(
+                {"event": "validation_commands_changed", "commands": validation_command_changes}
+            )
 
         def copy_artifact(source_relative: str, target_relative: str | None = None) -> str:
             target = target_relative or source_relative

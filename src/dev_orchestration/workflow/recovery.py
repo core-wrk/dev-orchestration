@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -28,6 +29,7 @@ from dev_orchestration.workflow.bootstrap import (
 )
 from dev_orchestration.workflow.checkpoints import input_hashes, record_stage
 from dev_orchestration.workflow.engine import Engine
+from dev_orchestration.workflow.invoke import AgentInvocationError
 from dev_orchestration.workflow.legacy import recover_legacy
 from dev_orchestration.workflow.plan_reuse import (
     RECEIPT as PLAN_REVIEW_RECEIPT,
@@ -46,6 +48,7 @@ from dev_orchestration.workflow.runner import (
     _evidence,
     _implementation_review_required,
     _outcome,
+    _persist_task_contract,
     _record_no_progress,
     _run_validation_stage,
     _run_worktree_stage,
@@ -91,6 +94,7 @@ from dev_orchestration.workflow.validation import (
     all_passed,
     run_validations,
     validation_environment,
+    validation_file_hashes,
 )
 
 
@@ -130,13 +134,16 @@ def _latest_plan(store: RunStore) -> Path:
 
 def _approved(store: RunStore) -> str:
     manifest = store.read_manifest()
+    is_contract = manifest.plan_origin == "task_contract"
     path = store.root / (
-        "planning/task-contract.md"
-        if manifest.plan_origin == "task_contract"
-        else "planning/approved-plan.md"
+        "planning/task-contract.md" if is_contract else "planning/approved-plan.md"
     )
     if not path.is_file():
-        raise ResumeRefused("approved plan is missing")
+        raise ResumeRefused(
+            "saved trivial task contract is missing; start a new run"
+            if is_contract
+            else "approved plan is missing; start a new run because this run has no recoverable plan"
+        )
     content = path.read_text(encoding="utf-8")
     if (
         manifest.plan_sha256
@@ -190,14 +197,39 @@ def _check_run(
                 raise ResumeRefused("provider account changed or cannot be verified")
     if store.active_provider_alive():
         raise ResumeRefused("recorded provider process is still alive")
+    latest_checkpoint = store.latest_checkpoint()
+    allowed_unreceipted = (
+        {"planning/task-contract.md"}
+        if latest_checkpoint is not None and latest_checkpoint.get("next_stage") == "classifier"
+        else set()
+    )
     try:
-        receipt = store.verify_checkpoint()
+        receipt = store.verify_checkpoint(allow_unreceipted_outputs=allowed_unreceipted)
     except CheckpointError as exc:
         raise ResumeRefused(str(exc)) from exc
     try:
         current_inputs = input_hashes(store, registry)
     except CheckpointError as exc:
         raise ResumeRefused(f"saved run input changed: {exc}") from exc
+    if current_inputs != receipt["inputs"]:
+        contract_path = "planning/task-contract.md"
+        if (
+            receipt.get("next_stage") == "classifier"
+            and manifest.plan_origin == "task_contract"
+            and manifest.approved_plan_version == "task-contract"
+            and contract_path not in receipt["artifacts"]
+        ):
+            try:
+                current_inputs = input_hashes(
+                    store,
+                    registry,
+                    manifest_overrides={
+                        "plan_origin": "generated",
+                        "approved_plan_version": None,
+                    },
+                )
+            except CheckpointError as exc:
+                raise ResumeRefused(f"saved run input changed: {exc}") from exc
     if current_inputs != receipt["inputs"]:
         raise ResumeRefused("saved request, policy, role binding, or context changed")
     if not manifest.config_layers or manifest.config_layers[0] != project_config.model_dump(
@@ -481,6 +513,12 @@ def resume_run(
         )
     with store.claim():
         manifest = store.read_manifest()
+        if manifest.validation_input_hashes:
+            current_hashes = validation_file_hashes(repo, project_config.validation_files)
+            if current_hashes != manifest.validation_input_hashes:
+                raise ResumeRefused(
+                    "declared validation files changed since the run began; restart from validation"
+                )
         if (
             manifest.status is RunState.APPROVED
             and manifest.cloud_session is not None
@@ -652,12 +690,29 @@ def resume_run(
                             },
                         },
                     )
+                    input_hashes = validation_file_hashes(repo, project_config.validation_files)
+                    if (
+                        current.validation_input_hashes
+                        and input_hashes != current.validation_input_hashes
+                    ):
+                        raise ValidationEnvironmentError(
+                            "declared validation files changed since the run began; restart from validation"
+                        )
+                    store.update_manifest(validation_input_hashes=input_hashes)
                     stage = (
                         "planner"
                         if effective in {Tier.STANDARD, Tier.SUBSTANTIAL}
                         else "implementation_worker"
                     )
-                    checkpoint(stage, ["classification.json", "context.json"])
+                    artifacts = ["classification.json", "context.json"]
+                    if stage == "implementation_worker":
+                        checkpoint("classifier", artifacts)
+                        approved = _task_contract(
+                            request_text, project_config, criteria, invariants
+                        )
+                        _persist_task_contract(store, approved)
+                        artifacts.append("planning/task-contract.md")
+                    checkpoint(stage, artifacts)
                 elif stage == "planner":
                     if current.external_plan_artifact:
                         version, _ = store.import_external_plan(
@@ -760,18 +815,7 @@ def resume_run(
                     )
                     stage = "implementation_worker"
                 elif stage == "implementation_worker":
-                    if (
-                        current.plan_origin == "task_contract"
-                        and not (store.root / "planning/task-contract.md").is_file()
-                    ):
-                        approved = _task_contract(
-                            request_text, project_config, criteria, invariants
-                        )
-                        store.write_text_artifact(
-                            "planning/task-contract.md", approved, immutable=True
-                        )
-                    else:
-                        approved = _approved(store)
+                    approved = _approved(store)
                     approval_required = _approval_required(
                         project_config, current.tier, current.active_profiles
                     )
@@ -895,6 +939,8 @@ def resume_run(
                         repo.root,
                         tuple(project_config.validation_links),
                         tuple(project_config.required_validation_links),
+                        tuple(project_config.validation_files),
+                        current.validation_input_hashes,
                     )
                     artifact = _save_validation(store, outcomes, cycle)
                     if not all_passed(outcomes):
@@ -1202,6 +1248,24 @@ def resume_run(
             return _outcome(engine, repo=repo, worktree=worktree)
         except ValidationEnvironmentError as exc:
             _terminal(engine, RunState.FAILED, str(exc), "environment")
+            return _outcome(engine, repo=repo, worktree=worktree)
+        except AgentInvocationError as exc:
+            _terminal(
+                engine,
+                RunState.ESCALATED,
+                str(exc),
+                "environment",
+                failure_class="environment",
+            )
+            return _outcome(engine, repo=repo, worktree=worktree)
+        except (OSError, subprocess.SubprocessError) as exc:
+            _terminal(
+                engine,
+                RunState.ESCALATED,
+                f"provider invocation failed: {exc}",
+                "environment",
+                failure_class="environment",
+            )
             return _outcome(engine, repo=repo, worktree=worktree)
         except (ContextContractError, CheckpointError, ResumeRefused) as exc:
             restart_mode = store.read_manifest().restart_mode

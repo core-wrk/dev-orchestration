@@ -1,4 +1,5 @@
 import inspect
+import subprocess
 
 import pytest
 from pydantic import ValidationError
@@ -11,6 +12,7 @@ from dev_orchestration.workflow.validation import (
     all_passed,
     run_validations,
     validation_environment,
+    validation_file_hashes,
 )
 
 
@@ -177,3 +179,63 @@ def test_optional_missing_venv_does_not_block_node_validation_environment(tmp_pa
     worktree.mkdir()
     with validation_environment(base, worktree):
         assert not (worktree / ".venv").exists()
+
+
+def test_declared_validation_files_are_copied_then_removed(tmp_path):
+    base = tmp_path / "base"
+    worktree = tmp_path / "worktree"
+    (base / "ops").mkdir(parents=True)
+    worktree.mkdir()
+    (base / "ops" / "template.pptx").write_bytes(b"synthetic")
+    with validation_environment(base, worktree, validation_files=("ops/template.pptx",)):
+        assert (worktree / "ops" / "template.pptx").read_bytes() == b"synthetic"
+        outcome = run_validations(
+            {
+                "fixture": ValidationCommand(
+                    command="test -f ops/template.pptx", required_for=[Tier.STANDARD]
+                )
+            },
+            Tier.STANDARD,
+            worktree,
+        )
+        assert outcome[0].passed is True
+    assert not (worktree / "ops" / "template.pptx").exists()
+
+
+def test_declared_validation_file_refuses_to_overwrite_worktree_path(tmp_path):
+    base = tmp_path / "base"
+    worktree = tmp_path / "worktree"
+    (base / "ops").mkdir(parents=True)
+    (worktree / "ops").mkdir(parents=True)
+    (base / "ops" / "template.pptx").write_bytes(b"source")
+    (worktree / "ops" / "template.pptx").write_bytes(b"tracked")
+    with (
+        pytest.raises(ValidationEnvironmentError, match="already exists"),
+        validation_environment(base, worktree, validation_files=("ops/template.pptx",)),
+    ):
+        pass
+    assert (worktree / "ops" / "template.pptx").read_bytes() == b"tracked"
+
+
+def test_validation_file_hashes_require_ignored_untracked_regular_files(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run(["git", "-C", str(root), "config", "user.email", "t@t.t"], check=True)
+    subprocess.run(["git", "-C", str(root), "config", "user.name", "T"], check=True)
+    (root / ".gitignore").write_text("ops/template.pptx\n")
+    (root / "ops").mkdir()
+    (root / "ops" / "template.pptx").write_bytes(b"synthetic")
+    subprocess.run(["git", "-C", str(root), "add", ".gitignore"], check=True)
+    subprocess.run(["git", "-C", str(root), "commit", "-qm", "init"], check=True)
+    from dev_orchestration.git.repo import GitRepo
+
+    hashes = validation_file_hashes(GitRepo(root), ["ops/template.pptx"])
+    assert len(hashes["ops/template.pptx"]) == 64
+    (root / "ops" / "template.pptx").write_bytes(b"changed")
+    assert validation_file_hashes(GitRepo(root), ["ops/template.pptx"]) != hashes
+
+    (root / "ops" / "template.pptx").unlink()
+    (root / "ops" / "template.pptx").symlink_to(root / ".gitignore")
+    with pytest.raises(ValidationEnvironmentError, match="symlinks"):
+        validation_file_hashes(GitRepo(root), ["ops/template.pptx"])

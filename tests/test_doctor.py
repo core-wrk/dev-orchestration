@@ -210,6 +210,31 @@ def test_valid_project_config_reports_scope_and_each_validation_command(tmp_path
     assert test_check.detail == "pytest"
 
 
+def test_doctor_reports_availability_of_declared_ignored_validation_files(tmp_path):
+    _init_repo(tmp_path)
+    (tmp_path / ".gitignore").write_text("ops/template.pptx\n")
+    (tmp_path / ".ai").mkdir()
+    (tmp_path / ".ai" / "project.yaml").write_text(
+        "project:\n  name: sample\n  class: internal_utility\n"
+        "validation_files:\n  - ops/template.pptx\n"
+    )
+    _commit_all(tmp_path)
+    missing = _by_name(
+        run_checks(tmp_path, codex=FakeAdapter(), claude=FakeAdapter()),
+        "validation file:ops/template.pptx",
+    )
+    assert missing.ok is False
+    assert "fresh worktrees" in missing.detail
+
+    (tmp_path / "ops").mkdir()
+    (tmp_path / "ops" / "template.pptx").write_bytes(b"synthetic")
+    available = _by_name(
+        run_checks(tmp_path, codex=FakeAdapter(), claude=FakeAdapter()),
+        "validation file:ops/template.pptx",
+    )
+    assert available.ok is True
+
+
 def test_agents_md_present_reports_ok_with_no_detail(tmp_path):
     _init_repo(tmp_path)
     (tmp_path / ".ai").mkdir()

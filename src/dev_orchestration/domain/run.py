@@ -108,3 +108,4 @@ class RunManifest(BaseModel):
     stage_attempts: dict[str, int] = Field(default_factory=dict)
     validation_repairs_reserved: int = 0
     validation_artifact: str | None = None
+    validation_input_hashes: dict[str, str] = Field(default_factory=dict)

@@ -275,7 +275,7 @@ def bootstrap_run(
     decision_resolution: tuple[str, str] | None = None,
 ) -> tuple[RunStore, Path]:
     """Create the durable run record and isolated worktree from a clean base."""
-    repo.ensure_clean()
+    repo.ensure_clean_for_run()
     policy = resolve_run_policy([project_config.model_dump(mode="json")])
     for key in PROTECTED_DEFAULTS:
         if policy.get(key) is not False:

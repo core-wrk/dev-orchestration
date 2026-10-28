@@ -23,6 +23,16 @@ class UncommittedContractFileError(RuntimeError):
     """--force would overwrite a contract file that has uncommitted edits."""
 
 
+def gsd_planning_warning(repo_root: Path) -> str | None:
+    """Describe the execution boundary when the repository has GSD state."""
+    if not (repo_root / ".planning").is_dir():
+        return None
+    return (
+        "GSD planning state found in .planning/: GSD owns planning and dev-orch owns execution. "
+        "Import a GSD plan explicitly as an external plan; do not run GSD phase execution here."
+    )
+
+
 def _reject_uncommitted_targets(repo_root: Path, names: list[str]) -> None:
     """Refuse to overwrite a contract file carrying uncommitted changes.
 

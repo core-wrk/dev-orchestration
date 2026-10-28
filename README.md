@@ -24,3 +24,15 @@ command explains why and recommends `--from validation`. `--from remediation`
 runs validation and review first, then allows the existing bounded remediation
 loop to address actionable findings. `dev-orch status RUN_ID` reports eligible
 restart stages for failed and escalated runs.
+
+Repositories may declare ignored, untracked files used by validation in
+`.ai/project.yaml` under `validation_files`. Dev-orch checks and hashes these
+files before planning, copies them into the isolated worktree only while
+validation runs, and records their hashes with validation evidence. `dev-orch
+doctor` reports missing or invalid declarations. A changed input blocks resume;
+restart from validation after restoring the intended input.
+
+Restart from validation also accepts changes to the command text of existing
+validation gates. Gate names, tiers, timeouts, input files, scope, roles,
+approval settings, and protected policy must remain unchanged. The linked run
+records the old and new commands and produces fresh validation results.

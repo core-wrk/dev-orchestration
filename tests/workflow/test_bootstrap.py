@@ -4,9 +4,11 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
+from dev_orchestration.adapters.base import FakeAdapter
 from dev_orchestration.artifacts.goals import GoalError, GoalLedger
 from dev_orchestration.artifacts.store import RunStore
 from dev_orchestration.config.models import ProjectConfig
+from dev_orchestration.doctor import run_checks
 from dev_orchestration.domain.enums import ProjectClass, RunState, Tier
 from dev_orchestration.domain.run import RunManifest
 from dev_orchestration.git.repo import DirtyWorktreeError, GitRepo
@@ -83,6 +85,34 @@ def test_bootstrap_blocks_dirty_repo(repo, tmp_path):
     (repo.root / "scratch.txt").write_text("dirty\n")
     with pytest.raises(DirtyWorktreeError):
         bootstrap_run(repo, CONFIG, "x", Tier.STANDARD, tmp_path / "wt", "test-goal")
+
+
+def test_linked_checkout_blocks_dirty_primary_run_records(repo, tmp_path):
+    records = [
+        repo.root / ".ai" / "runs" / f"run-{index}" / "manifest.json" for index in range(1, 5)
+    ]
+    for record in records:
+        record.parent.mkdir(parents=True)
+        record.write_text("{}\n")
+    subprocess.run(["git", "-C", str(repo.root), "add", "-f", ".ai/runs"], check=True)
+    subprocess.run(["git", "-C", str(repo.root), "commit", "-qm", "run record"], check=True)
+    linked_root = tmp_path / "linked"
+    subprocess.run(
+        ["git", "-C", str(repo.root), "worktree", "add", "-qb", "linked", str(linked_root)],
+        check=True,
+    )
+    for record in records:
+        record.write_text('{"status": "changed"}\n')
+    with pytest.raises(DirtyWorktreeError, match=".ai/runs/run-1/manifest.json"):
+        GitRepo(linked_root).ensure_clean_for_run()
+    clean_check = next(
+        item
+        for item in run_checks(linked_root, codex=FakeAdapter(), claude=FakeAdapter())
+        if item.name == "repository clean"
+    )
+    assert clean_check.ok is False
+    for record in records:
+        assert record.relative_to(repo.root).as_posix() in clean_check.detail
 
 
 def test_one_active_run_per_goal_is_shared_across_linked_checkouts(repo, tmp_path):
@@ -185,7 +215,6 @@ def test_goal_ledger_applies_non_product_limit_and_legacy_product_fallback(repo)
         GoalLedger(repo.root).reserve("six-nonproduct"),
     ):
         pass
-
     for attempt in range(1, 4):
         _record_goal_failure(repo, "legacy-product", f"legacy-{attempt}", attempt)
     with (
@@ -193,6 +222,22 @@ def test_goal_ledger_applies_non_product_limit_and_legacy_product_fallback(repo)
         GoalLedger(repo.root).reserve("legacy-product"),
     ):
         pass
+
+
+def test_environment_failures_do_not_use_product_failure_allowance(repo):
+    for attempt in range(1, 4):
+        _record_goal_failure(
+            repo,
+            "environment-does-not-exhaust-product-budget",
+            f"environment-{attempt}",
+            attempt,
+            "environment",
+            f"missing-input-{attempt}",
+        )
+    with GoalLedger(repo.root).reserve(
+        "environment-does-not-exhaust-product-budget"
+    ) as reservation:
+        assert reservation.attempt == 4
 
 
 def test_goal_ledger_stops_repeated_non_product_signature_but_allows_distinct_causes(repo):

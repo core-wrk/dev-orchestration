@@ -1475,6 +1475,231 @@ def test_pause_before_classification_resumes_despite_persistent_context(tmp_path
     assert resumed.final_state is RunState.COMPLETE_LOCAL
 
 
+@pytest.mark.parametrize("seeded", [False, True])
+def test_trivial_run_resumes_before_and_after_contract_checkpoint(tmp_path, seeded):
+    class ClassifierTimeout(Scripted):
+        def run(self, request):
+            if request.role == "classifier":
+                self.seen.append("classifier")
+                raise AgentTimeoutError("classifier", 7, self.name)
+            return super().run(request)
+
+    class TrivialWorker(Scripted):
+        def __init__(self, *, expected_input, interrupt=False):
+            super().__init__()
+            self.expected_input = expected_input
+            self.interrupt = interrupt
+
+        def run(self, request):
+            self.seen.append(request.role)
+            if request.role == "classifier":
+                payload = {"tier": "trivial", "rationale": "localized", "profiles": []}
+            elif request.role == "implementation_worker":
+                assert (request.cwd / "src/app.py").read_text() == self.expected_input
+                if self.interrupt:
+                    raise AgentInterruptedError(request.role, self.name, 15)
+                (request.cwd / "src/app.py").write_text("x = 2\n")
+                payload = "done"
+            else:
+                return super().run(request)
+            now = datetime.now(UTC)
+            return AgentResult(self.name, None, 0, payload, now, now)
+
+    git = repo(tmp_path)
+    patch_path = tmp_path / "seed.patch"
+    patch_path.write_bytes(
+        b"diff --git a/src/app.py b/src/app.py\n"
+        b"--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1 @@\n-x = 1\n+x = 99\n"
+    )
+    expected_input = "x = 99\n" if seeded else "x = 1\n"
+    first = execute_run(
+        git,
+        CONFIG,
+        registry(ClassifierTimeout()),
+        "change app",
+        tmp_path / "wt",
+        CRITERIA,
+        seed_patch=patch_path if seeded else None,
+    )
+    assert first.final_state is RunState.PAUSED_INTERRUPTED
+
+    store = RunStore(git.root, first.run_id)
+    assert store.latest_checkpoint()["next_stage"] == "classifier"
+    assert store.read_manifest().plan_origin != "task_contract"
+    assert not (store.root / "planning/task-contract.md").exists()
+    paused_after_contract = resume_run(
+        git,
+        CONFIG,
+        registry(TrivialWorker(expected_input=expected_input, interrupt=True)),
+        first.run_id,
+    )
+    assert paused_after_contract.final_state is RunState.PAUSED_INTERRUPTED
+    assert store.read_manifest().plan_origin == "task_contract"
+    assert (store.root / "planning/task-contract.md").is_file()
+
+    completed = resume_run(
+        git,
+        CONFIG,
+        registry(TrivialWorker(expected_input=expected_input)),
+        first.run_id,
+    )
+    assert completed.final_state is RunState.COMPLETE_LOCAL
+    events = [json.loads(line) for line in (store.root / "events.jsonl").read_text().splitlines()]
+    assert sum(event.get("event") == "task_contract_written" for event in events) == 1
+    assert sum(event.get("event") == "seed_patch_applied" for event in events) == int(seeded)
+
+
+@pytest.mark.parametrize(
+    "crash_point", ["after_write", "after_manifest", "after_manifest_changed_version"]
+)
+def test_trivial_contract_recovers_if_interrupted_before_its_checkpoint(
+    tmp_path, monkeypatch, crash_point
+):
+    class Trivial(Scripted):
+        def run(self, request):
+            if request.role == "classifier":
+                self.seen.append(request.role)
+                payload = {"tier": "trivial", "rationale": "localized", "profiles": []}
+                now = datetime.now(UTC)
+                return AgentResult(self.name, None, 0, payload, now, now)
+            return super().run(request)
+
+    git = repo(tmp_path)
+    original_write = RunStore.write_text_artifact
+    original_update = RunStore.update_manifest
+
+    def crash_after_contract_write(store, relative, content, *, immutable=False):
+        result = original_write(store, relative, content, immutable=immutable)
+        if relative == "planning/task-contract.md":
+            raise SystemExit(9)
+        return result
+
+    def crash_after_contract_manifest_update(store, **updates):
+        result = original_update(store, **updates)
+        if updates.get("plan_origin") == "task_contract":
+            raise SystemExit(9)
+        return result
+
+    if crash_point == "after_write":
+        monkeypatch.setattr(RunStore, "write_text_artifact", crash_after_contract_write)
+    else:
+        monkeypatch.setattr(RunStore, "update_manifest", crash_after_contract_manifest_update)
+    with pytest.raises(SystemExit):
+        execute_run(git, CONFIG, registry(Trivial()), "change app", tmp_path / "wt", CRITERIA)
+
+    run_root = git.root / ".ai" / "runs"
+    run_id = next(path.name for path in run_root.iterdir() if (path / "manifest.json").is_file())
+    store = RunStore(git.root, run_id)
+    assert store.latest_checkpoint()["next_stage"] == "classifier"
+    assert (store.read_manifest().plan_origin == "task_contract") == (crash_point != "after_write")
+    assert (store.root / "planning/task-contract.md").is_file()
+
+    monkeypatch.setattr(RunStore, "write_text_artifact", original_write)
+    monkeypatch.setattr(RunStore, "update_manifest", original_update)
+    if crash_point == "after_manifest_changed_version":
+        store.update_manifest(approved_plan_version="different")
+        with pytest.raises(ResumeRefused, match="saved request, policy, role binding"):
+            resume_run(git, CONFIG, registry(Trivial()), run_id)
+        return
+
+    resumed = resume_run(git, CONFIG, registry(Trivial()), run_id)
+    assert resumed.final_state is RunState.COMPLETE_LOCAL
+    events = [json.loads(line) for line in (store.root / "events.jsonl").read_text().splitlines()]
+    assert sum(event.get("event") == "task_contract_written" for event in events) == 1
+
+
+def test_trivial_contract_refuses_symlinked_planning_directory(tmp_path):
+    class TimeoutClassifier(Scripted):
+        def run(self, request):
+            if request.role == "classifier":
+                raise AgentTimeoutError(request.role, 7, self.name)
+            return super().run(request)
+
+    class TrivialClassifier(Scripted):
+        def run(self, request):
+            if request.role == "classifier":
+                self.seen.append(request.role)
+                payload = {"tier": "trivial", "rationale": "localized", "profiles": []}
+                now = datetime.now(UTC)
+                return AgentResult(self.name, None, 0, payload, now, now)
+            return super().run(request)
+
+    git = repo(tmp_path)
+    paused = execute_run(
+        git, CONFIG, registry(TimeoutClassifier()), "change app", tmp_path / "wt", CRITERIA
+    )
+    assert paused.final_state is RunState.PAUSED_INTERRUPTED
+    store = RunStore(git.root, paused.run_id)
+    planning = store.root / "planning"
+    planning.rmdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    planning.symlink_to(outside, target_is_directory=True)
+
+    resumed = resume_run(git, CONFIG, registry(TrivialClassifier()), paused.run_id)
+
+    assert resumed.final_state is RunState.ESCALATED
+    assert "symlink" in resumed.reason
+    assert not (outside / "task-contract.md").exists()
+
+
+def test_missing_validation_file_stops_before_planning_or_repair(tmp_path):
+    git = repo(tmp_path)
+    (git.root / ".gitignore").write_text(".ai/runs/\nops/template.pptx\n")
+    subprocess.run(["git", "-C", str(git.root), "add", ".gitignore"], check=True)
+    subprocess.run(["git", "-C", str(git.root), "commit", "-qm", "ignore fixture"], check=True)
+    config = CONFIG.model_copy(update={"validation_files": ["ops/template.pptx"]})
+    adapter = Scripted()
+    outcome = execute_run(git, config, registry(adapter), "change app", tmp_path / "wt", CRITERIA)
+    manifest = RunStore(git.root, outcome.run_id).read_manifest()
+    assert outcome.final_state is RunState.FAILED
+    assert manifest.failure_class == "environment"
+    assert adapter.seen == ["classifier"]
+
+
+def test_resume_rejects_changed_declared_validation_input(tmp_path):
+    git = repo(tmp_path)
+    (git.root / ".gitignore").write_text(".ai/runs/\nops/template.pptx\n")
+    (git.root / "ops").mkdir()
+    (git.root / "ops" / "template.pptx").write_bytes(b"before")
+    subprocess.run(["git", "-C", str(git.root), "add", ".gitignore"], check=True)
+    subprocess.run(["git", "-C", str(git.root), "commit", "-qm", "ignore fixture"], check=True)
+    config = CONFIG.model_copy(update={"validation_files": ["ops/template.pptx"]})
+    first = execute_run(
+        git,
+        config,
+        registry(Scripted(timeout_worker=True)),
+        "change app",
+        tmp_path / "wt",
+        CRITERIA,
+    )
+    assert first.final_state is RunState.PAUSED_INTERRUPTED
+    manifest = RunStore(git.root, first.run_id).read_manifest()
+    assert manifest.validation_input_hashes["ops/template.pptx"]
+    (git.root / "ops" / "template.pptx").write_bytes(b"after")
+    with pytest.raises(ResumeRefused, match="declared validation files changed"):
+        resume_run(git, config, registry(Scripted()), first.run_id)
+
+
+def test_provider_execution_failure_is_recorded_as_environment_failure(tmp_path):
+    class ProviderFailure(Scripted):
+        def run(self, request):
+            if request.role == "classifier":
+                self.seen.append(request.role)
+                now = datetime.now(UTC)
+                return AgentResult(self.name, None, 2, "", now, now, stderr="provider failed")
+            return super().run(request)
+
+    git = repo(tmp_path)
+    outcome = execute_run(
+        git, CONFIG, registry(ProviderFailure()), "change app", tmp_path / "wt", CRITERIA
+    )
+    manifest = RunStore(git.root, outcome.run_id).read_manifest()
+    assert outcome.final_state is RunState.ESCALATED
+    assert manifest.failure_class == "environment"
+    assert manifest.terminal_cause == "environment"
+
+
 def test_pause_before_classification_refuses_changed_selected_spec_before_provider(tmp_path):
     class ClassifierTimeout(Scripted):
         def run(self, request):

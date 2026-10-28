@@ -3,10 +3,12 @@
 import difflib
 import json
 import re
+from dataclasses import replace
 from pathlib import Path
 
 from dev_orchestration.adapters.base import (
     AgentResult,
+    AgentTimeoutError,
     agent_result_record,
     provider_failure_reason,
 )
@@ -83,12 +85,56 @@ def classify(
         ],
     )
     request = _request(registry, "classifier", store, packet, store.repo_root)
-    result = invoke_structured(
-        registry.adapter_for("classifier"),
-        request,
-        Classification,
-        store.root / "schemas",
-    )
+    adapter = registry.adapter_for("classifier")
+    codex_classifier = registry.binding_for("classifier").adapter == "codex"
+    if codex_classifier:
+        first_timeout = min(request.timeout_seconds or 60, 60)
+        first_request = replace(request, timeout_seconds=first_timeout)
+        try:
+            result = invoke_structured(
+                adapter, first_request, Classification, store.root / "schemas"
+            )
+        except AgentTimeoutError as exc:
+            store.append_event(
+                {
+                    "event": "classifier_attempt_failed",
+                    "attempt": 1,
+                    "timeout_seconds": exc.timeout_seconds,
+                }
+            )
+            try:
+                result = invoke_structured(adapter, request, Classification, store.root / "schemas")
+            except AgentTimeoutError as retry_exc:
+                store.append_event(
+                    {
+                        "event": "classifier_attempt_failed",
+                        "attempt": 2,
+                        "timeout_seconds": retry_exc.timeout_seconds,
+                    }
+                )
+                raise
+            store.append_event(
+                {
+                    "event": "classifier_attempt_succeeded",
+                    "attempt": 2,
+                    "timeout_seconds": request.timeout_seconds,
+                }
+            )
+        else:
+            store.append_event(
+                {
+                    "event": "classifier_attempt_succeeded",
+                    "attempt": 1,
+                    "timeout_seconds": first_timeout,
+                }
+            )
+    else:
+        result = invoke_structured(
+            adapter,
+            request,
+            Classification,
+            store.root / "schemas",
+        )
     _record_result(store, "classification.json", result.model_dump(mode="json"))
     store.append_event(
         {

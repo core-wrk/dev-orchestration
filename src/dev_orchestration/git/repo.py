@@ -83,8 +83,19 @@ class GitRepo:
         # 3-character prefix. Only the trailing newline is ours to remove.
         return self.run_git("status", "--porcelain", strip=False).rstrip("\n")
 
-    def ensure_clean(self) -> None:
-        paths = self.status_paths()
+    def dirty_paths(self) -> list[str]:
+        paths = set(self.status_paths())
+        shared = self.shared_root()
+        if shared != self.root.resolve():
+            primary = GitRepo(shared)
+            paths.update(
+                path
+                for path in primary.status_paths()
+                if path == ".ai/runs" or path.startswith(".ai/runs/")
+            )
+        return sorted(paths)
+
+    def _ensure_paths_clean(self, paths: list[str]) -> None:
         if paths:
             files = "\n  ".join(paths)
             raise DirtyWorktreeError(
@@ -92,6 +103,14 @@ class GitRepo:
                 "Commit or stash them before starting a run. "
                 "dev-orch never modifies uncommitted work."
             )
+
+    def ensure_clean(self) -> None:
+        """Require this checkout itself to be clean."""
+        self._ensure_paths_clean(self.status_paths())
+
+    def ensure_clean_for_run(self) -> None:
+        """Require a clean checkout and clean shared run records before starting."""
+        self._ensure_paths_clean(self.dirty_paths())
 
     def current_branch(self) -> str:
         return self.run_git("rev-parse", "--abbrev-ref", "HEAD")

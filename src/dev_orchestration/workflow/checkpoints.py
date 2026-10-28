@@ -22,7 +22,12 @@ def _within(root: Path, name: str) -> Path:
     return target
 
 
-def input_hashes(store: RunStore, registry: RoleRegistry) -> dict[str, str]:
+def input_hashes(
+    store: RunStore,
+    registry: RoleRegistry,
+    *,
+    manifest_overrides: dict[str, object] | None = None,
+) -> dict[str, str]:
     manifest = store.read_manifest()
     fields = manifest.model_dump(
         mode="json",
@@ -55,6 +60,8 @@ def input_hashes(store: RunStore, registry: RoleRegistry) -> dict[str, str]:
             "seed_patch_sha256",
         },
     )
+    if manifest_overrides:
+        fields.update(manifest_overrides)
     if manifest.restart_mode is not None:
         fields["restart"] = {
             "linked_source_run": manifest.linked_source_run,

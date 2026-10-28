@@ -15,8 +15,9 @@ from dev_orchestration.adapters.claude import ClaudeAdapter
 from dev_orchestration.adapters.codex import CodexAdapter, discover_codex
 from dev_orchestration.config.models import ProjectConfig
 from dev_orchestration.domain.enums import Tier
-from dev_orchestration.git.repo import DirtyWorktreeError, GitCommandError, discover_repo
+from dev_orchestration.git.repo import GitCommandError, discover_repo
 from dev_orchestration.scope import ScopeFence
+from dev_orchestration.workflow.validation import ValidationEnvironmentError, validation_file_hashes
 
 
 @dataclass(frozen=True)
@@ -104,20 +105,18 @@ def _repository_checks(cwd: Path) -> list[Check]:
     else:
         checks.append(Check("tracked files matched by gitignore", True))
 
-    try:
-        repo.ensure_clean()
-        checks.append(Check("repository clean", True))
-    except DirtyWorktreeError:
-        paths = [line[3:] for line in repo.status_porcelain().splitlines()]
-        preview = ", ".join(paths[:3]) + ("..." if len(paths) > 3 else "")
+    paths = repo.dirty_paths()
+    if paths:
         checks.append(
             Check(
                 "repository clean",
                 False,
-                f"{len(paths)} uncommitted path(s): {preview}. "
+                f"{len(paths)} uncommitted path(s): {', '.join(paths)}. "
                 "Commit or stash before starting a run.",
             )
         )
+    else:
+        checks.append(Check("repository clean", True))
 
     config_path = repo.root / ".ai" / "project.yaml"
     if not config_path.exists():
@@ -133,6 +132,25 @@ def _repository_checks(cwd: Path) -> list[Check]:
         return checks
 
     checks.append(Check("project config", True, f"class={config.project.project_class}"))
+    for relative in config.validation_files:
+        try:
+            validation_file_hashes(repo, [relative])
+        except ValidationEnvironmentError as exc:
+            checks.append(
+                Check(
+                    f"validation file:{relative}",
+                    False,
+                    f"{exc}. Git omits ignored files from fresh worktrees; declare an available ignored file.",
+                )
+            )
+        else:
+            checks.append(
+                Check(
+                    f"validation file:{relative}",
+                    True,
+                    "available; copied into isolated validation worktrees",
+                )
+            )
     fence = ScopeFence.from_config(config.scope)
     checks.append(
         Check(

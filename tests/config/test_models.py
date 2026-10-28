@@ -52,6 +52,18 @@ def test_required_validation_links_default_empty_and_must_be_linked():
         )
 
 
+def test_validation_files_default_empty_and_reject_unsafe_paths_or_links():
+    base = {"project": {"name": "x", "class": "internal_utility"}}
+    assert ProjectConfig.model_validate(base).validation_files == []
+    for path in ("../secret", "/tmp/file", ".ai/runs/run.json", ".git/config", ".venv/bin/python"):
+        with pytest.raises(ValidationError):
+            ProjectConfig.model_validate({**base, "validation_files": [path]})
+    with pytest.raises(ValidationError, match="validation_links"):
+        ProjectConfig.model_validate(
+            {**base, "validation_files": ["node_modules/pkg"], "validation_links": ["node_modules"]}
+        )
+
+
 def test_role_timeout_must_be_positive_and_is_optional():
     from dev_orchestration.config.models import RoleConfig
 

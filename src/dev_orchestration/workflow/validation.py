@@ -1,15 +1,18 @@
 """Run configured validation independently of provider narration."""
 
+import hashlib
 import os
+import shutil
 import subprocess
 from collections.abc import Iterator
 from contextlib import contextmanager
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from pydantic import BaseModel
 
 from dev_orchestration.config.models import ValidationCommand
 from dev_orchestration.domain.enums import Tier
+from dev_orchestration.git.repo import GitRepo
 
 TAIL_CHARS = 4000
 
@@ -24,6 +27,7 @@ def validation_environment(
     worktree_root: Path,
     link_paths: tuple[str, ...] = (".venv",),
     required_paths: tuple[str, ...] = (),
+    validation_files: tuple[str, ...] = (),
 ) -> Iterator[None]:
     """Expose the base checkout's ignored dependency directories temporarily.
 
@@ -37,6 +41,7 @@ def validation_environment(
     ``ProjectConfig.validation_links``.
     """
     linked: list[tuple[Path, Path]] = []
+    copied: list[Path] = []
     try:
         for relative in link_paths:
             target = worktree_root / relative
@@ -64,11 +69,73 @@ def validation_environment(
                 raise ValidationEnvironmentError(
                     f"required validation directory {relative!r} is missing or inaccessible"
                 )
+        if validation_files and base_root is None:
+            raise ValidationEnvironmentError("validation files require a base repository")
+        for relative in validation_files:
+            source = base_root / relative
+            target = worktree_root / relative
+            if source.is_symlink() or not source.is_file():
+                raise ValidationEnvironmentError(
+                    f"declared validation file {relative!r} is missing or is not an ordinary file"
+                )
+            if target.exists() or target.is_symlink():
+                raise ValidationEnvironmentError(
+                    f"declared validation file target {relative!r} already exists in the worktree"
+                )
+            parent = worktree_root
+            for part in PurePosixPath(relative).parts[:-1]:
+                parent = parent / part
+                if parent.is_symlink():
+                    raise ValidationEnvironmentError(
+                        f"declared validation file target {relative!r} crosses a worktree symlink"
+                    )
+            target.parent.mkdir(parents=True, exist_ok=True)
+            copied.append(target)
+            shutil.copyfile(source, target)
         yield
     finally:
+        for target in copied:
+            target.unlink(missing_ok=True)
         for target, source in linked:
             if target.is_symlink() and target.resolve() == source:
                 target.unlink()
+
+
+def validation_file_hashes(repo: GitRepo, paths: list[str]) -> dict[str, str]:
+    """Validate configured ignored inputs and return their content hashes."""
+    ignored = set(repo.ignored_paths())
+    hashes: dict[str, str] = {}
+    root = repo.root.resolve()
+    for relative in paths:
+        path = PurePosixPath(relative)
+        source = repo.root.joinpath(*path.parts)
+        current = repo.root
+        for part in path.parts:
+            current = current / part
+            if current.is_symlink():
+                raise ValidationEnvironmentError(
+                    f"declared validation file {relative!r} may not contain symlinks"
+                )
+        try:
+            resolved = source.resolve(strict=True)
+        except OSError as exc:
+            raise ValidationEnvironmentError(
+                f"declared validation file {relative!r} is unavailable: {exc}"
+            ) from exc
+        if not resolved.is_relative_to(root) or not resolved.is_file():
+            raise ValidationEnvironmentError(
+                f"declared validation file {relative!r} is unavailable or outside the repository"
+            )
+        if repo.is_tracked(relative):
+            raise ValidationEnvironmentError(
+                f"declared validation file {relative!r} is tracked; use validation_links or a tracked source"
+            )
+        if relative not in ignored:
+            raise ValidationEnvironmentError(
+                f"declared validation file {relative!r} must be Git-ignored and untracked"
+            )
+        hashes[relative] = hashlib.sha256(source.read_bytes()).hexdigest()
+    return hashes
 
 
 class ValidationOutcome(BaseModel):

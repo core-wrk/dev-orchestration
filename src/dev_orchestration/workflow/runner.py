@@ -99,6 +99,7 @@ from dev_orchestration.workflow.validation import (
     all_passed,
     run_validations,
     validation_environment,
+    validation_file_hashes,
 )
 
 
@@ -146,6 +147,7 @@ def _save_validation(store: RunStore, outcomes: list[ValidationOutcome], cycle: 
             continue
     artifact = f"execution/validation-v{max(versions, default=0) + 1}.json"
     records = _validation_json(outcomes)
+    input_hashes = store.read_manifest().validation_input_hashes
     store.write_json_artifact(artifact, records, immutable=True)
     store.update_manifest(validation_artifact=artifact)
     store.append_event(
@@ -154,6 +156,7 @@ def _save_validation(store: RunStore, outcomes: list[ValidationOutcome], cycle: 
             "cycle": cycle,
             "passed": all_passed(outcomes),
             "required_commands": [outcome.name for outcome in outcomes],
+            "input_hashes": input_hashes,
             "detail": (
                 "No required validation commands were resolved for this tier."
                 if not outcomes
@@ -258,6 +261,37 @@ def _task_contract(
         f"## Protected constraints\n{json.dumps(protected, sort_keys=True)}\n\n"
         f"## Repository invariants\n{chr(10).join(item.content for item in invariants)}\n"
     )
+
+
+def _persist_task_contract(store: RunStore, content: str) -> Path:
+    """Persist a trivial contract idempotently before checkpointing implementation."""
+    relative = "planning/task-contract.md"
+    target = store.root / relative
+    manifest = store.read_manifest()
+    current = target
+    while current != store.repo_root:
+        if current.is_symlink():
+            raise ContextContractError("saved trivial task contract path contains a symlink")
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+    if target.exists():
+        if not target.is_file() or target.read_text(encoding="utf-8") != content:
+            raise ContextContractError("saved trivial task contract does not match this run")
+    elif manifest.plan_origin == "task_contract":
+        raise ContextContractError("saved trivial task contract is missing; start a new run")
+    else:
+        store.write_text_artifact(relative, content, immutable=True)
+    store.update_manifest(plan_origin="task_contract", approved_plan_version="task-contract")
+    events_path = store.root / "events.jsonl"
+    if not any(
+        json.loads(line).get("event") == "task_contract_written"
+        for line in events_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ):
+        store.append_event({"event": "task_contract_written"})
+    return target
 
 
 def _terminal(
@@ -792,12 +826,26 @@ def _run_validation_stage(
     validation_root: Path | None = None,
     link_paths: tuple[str, ...] = (".venv",),
     required_paths: tuple[str, ...] = (),
+    validation_files: tuple[str, ...] = (),
+    expected_input_hashes: dict[str, str] | None = None,
 ):
     """Run validation while ensuring its ignored caches do not become residue."""
     ignored_before = worktree_repo.ignored_paths()
     try:
+        if validation_files:
+            actual = validation_file_hashes(
+                GitRepo(validation_root or worktree_repo.root), list(validation_files)
+            )
+            if expected_input_hashes is not None and actual != expected_input_hashes:
+                raise ValidationEnvironmentError(
+                    "declared validation files changed during the run; restart from validation"
+                )
         with validation_environment(
-            validation_root, worktree_repo.root, link_paths, required_paths
+            validation_root,
+            worktree_repo.root,
+            link_paths,
+            required_paths,
+            validation_files,
         ):
             result = action()
         enforce_fence(worktree_repo, base_commit, fence)
@@ -958,6 +1006,8 @@ def execute_run(
                 repo.root,
                 tuple(project_config.validation_links),
                 tuple(project_config.required_validation_links),
+                tuple(project_config.validation_files),
+                store.read_manifest().validation_input_hashes,
             )
             artifact = _save_validation(store, repaired, cycle)
             receipt(next_stage, [artifact], cycle)
@@ -1104,19 +1154,10 @@ def execute_run(
             classification.tier, tier_override, runtime.minimum_tier, downgrade_reason
         )
         store.update_manifest(tier=effective_tier)
-        stages_for(effective_tier)
-        receipt(
-            "planner"
-            if effective_tier in {Tier.STANDARD, Tier.SUBSTANTIAL}
-            else "implementation_worker",
-            [
-                "classification.json",
-                "context.json",
-                "request.md",
-                "acceptance-criteria.json",
-                "roles.json",
-            ],
+        store.update_manifest(
+            validation_input_hashes=validation_file_hashes(repo, project_config.validation_files)
         )
+        stages_for(effective_tier)
         if external_plan is not None and effective_tier not in {Tier.STANDARD, Tier.SUBSTANTIAL}:
             raise ContextContractError("an external plan requires the standard or substantial tier")
         if effective_tier is not classification.tier:
@@ -1150,9 +1191,18 @@ def execute_run(
                 sort_keys=True,
             ),
         )
+        stage_artifacts = [
+            "classification.json",
+            "context.json",
+            "request.md",
+            "acceptance-criteria.json",
+            "roles.json",
+        ]
         approved: str
+        approval_artifact: str
         reused_review_artifact: str | None = None
         if effective_tier in {Tier.STANDARD, Tier.SUBSTANTIAL}:
+            receipt("planner", stage_artifacts)
             reuse_receipt = None
             reuse_matches = False
             reuse_reason = ""
@@ -1338,13 +1388,14 @@ def execute_run(
                 approved = store.approved_plan()
                 approval_artifact = "planning/approved-plan.md"
         else:
+            receipt("classifier", stage_artifacts)
             approved = _task_contract(request_text, project_config, acceptance_criteria, invariants)
-            store.write_text_artifact("planning/task-contract.md", approved, immutable=True)
-            store.update_manifest(
-                plan_origin="task_contract", approved_plan_version="task-contract"
-            )
-            store.append_event({"event": "task_contract_written"})
+            _persist_task_contract(store, approved)
             approval_artifact = "planning/task-contract.md"
+            receipt(
+                "implementation_worker",
+                [*stage_artifacts, approval_artifact],
+            )
 
         approval_required = _approval_required(
             project_config, effective_tier, classification.profiles
@@ -1390,7 +1441,6 @@ def execute_run(
                 worktree=worktree,
             )
 
-        apply_seed_patch_once(store, worktree_repo, base_commit, fence)
         receipt(
             "implementation_worker",
             [
@@ -1403,6 +1453,12 @@ def execute_run(
                 *([reused_review_artifact] if reused_review_artifact else []),
             ],
         )
+        seed_patch_applied = apply_seed_patch_once(store, worktree_repo, base_commit, fence)
+        if seed_patch_applied:
+            receipt(
+                "implementation_worker",
+                [approval_artifact, SEED_PATCH_ARTIFACT, SEED_PATCH_RECEIPT],
+            )
 
         engine.transition(RunState.EXECUTING)
         if continue_patch is not None:
@@ -1458,6 +1514,8 @@ def execute_run(
             repo.root,
             tuple(project_config.validation_links),
             tuple(project_config.required_validation_links),
+            tuple(project_config.validation_files),
+            store.read_manifest().validation_input_hashes,
         )
         review_next = (
             "implementation_reviewer"
@@ -1569,6 +1627,8 @@ def execute_run(
                 repo.root,
                 tuple(project_config.validation_links),
                 tuple(project_config.required_validation_links),
+                tuple(project_config.validation_files),
+                store.read_manifest().validation_input_hashes,
             )
             _save_validation(store, outcomes, cycle)
             outcomes, repair_failed = repair_failed_validation(
@@ -1714,6 +1774,15 @@ def execute_run(
         ContextContractError,
         ReadOnlyRoleUnsupportedError,
     ) as exc:
+        if isinstance(exc, AgentInvocationError):
+            _terminal(
+                engine,
+                RunState.ESCALATED,
+                str(exc),
+                "environment",
+                failure_class="environment",
+            )
+            return _outcome(engine, repo=repo, worktree=worktree)
         cause = (
             exc.cause
             if isinstance(exc, RemediationExhausted)
