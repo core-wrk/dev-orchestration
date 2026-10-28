@@ -27,7 +27,12 @@ from dev_orchestration.workflow.bootstrap import (
     resolve_run_policy,
     resolve_runtime_context,
 )
-from dev_orchestration.workflow.checkpoints import input_hashes, record_stage
+from dev_orchestration.workflow.checkpoints import (
+    input_hashes,
+    project_config_matches,
+    record_stage,
+    validation_files_default_omission,
+)
 from dev_orchestration.workflow.engine import Engine
 from dev_orchestration.workflow.invoke import AgentInvocationError
 from dev_orchestration.workflow.legacy import recover_legacy
@@ -230,10 +235,22 @@ def _check_run(
                 )
             except CheckpointError as exc:
                 raise ResumeRefused(f"saved run input changed: {exc}") from exc
-    if current_inputs != receipt["inputs"]:
+    if (
+        current_inputs.get(".ai/project.yaml") != receipt["inputs"].get(".ai/project.yaml")
+        and manifest.config_layers
+        and project_config_matches(manifest.config_layers[0], project_config)
+        and validation_files_default_omission(
+            GitRepo(store.repo_root), manifest.git.base_commit or ""
+        )
+    ):
+        current_inputs[".ai/project.yaml"] = receipt["inputs"].get(".ai/project.yaml")
+    saved_inputs = receipt["inputs"]
+    if "validation_input_hashes" not in saved_inputs:
+        current_inputs.pop("validation_input_hashes", None)
+    if current_inputs != saved_inputs:
         raise ResumeRefused("saved request, policy, role binding, or context changed")
-    if not manifest.config_layers or manifest.config_layers[0] != project_config.model_dump(
-        mode="json"
+    if not manifest.config_layers or not project_config_matches(
+        manifest.config_layers[0], project_config
     ):
         raise ResumeRefused("project configuration changed")
     try:
@@ -517,7 +534,8 @@ def resume_run(
             current_hashes = validation_file_hashes(repo, project_config.validation_files)
             if current_hashes != manifest.validation_input_hashes:
                 raise ResumeRefused(
-                    "declared validation files changed since the run began; restart from validation"
+                    "declared validation files changed since the run began; restore the recorded "
+                    "bytes for recovery, or start a fresh run for intentionally different inputs"
                 )
         if (
             manifest.status is RunState.APPROVED
@@ -545,6 +563,12 @@ def resume_run(
             adopt_worktree=adopt_worktree,
             now=now or datetime.now(UTC),
         )
+        if (
+            project_config.validation_files
+            and not manifest.validation_input_hashes
+            and receipt["next_stage"] != "classifier"
+        ):
+            raise ResumeRefused("saved validation input hashes are missing")
         if manifest.retry_of is not None:
             # Parse the immutable child snapshot only after checkpoint hashing has
             # verified it; resumed stages never consult the mutable source run.
@@ -676,6 +700,12 @@ def resume_run(
                         config_layers=layers,
                         resolved_config=policy,
                     )
+                    protected = ContextRef(
+                        label=Category.INVARIANTS,
+                        path="framework:protected",
+                        content=json.dumps(policy, sort_keys=True),
+                    )
+                    invariants = [*runtime.invariants, protected]
                     store.write_json_artifact(
                         "context.json",
                         {

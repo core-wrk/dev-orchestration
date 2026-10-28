@@ -29,8 +29,9 @@ Repositories may declare ignored, untracked files used by validation in
 `.ai/project.yaml` under `validation_files`. Dev-orch checks and hashes these
 files before planning, copies them into the isolated worktree only while
 validation runs, and records their hashes with validation evidence. `dev-orch
-doctor` reports missing or invalid declarations. A changed input blocks resume;
-restart from validation after restoring the intended input.
+doctor` reports missing or invalid declarations. A changed input blocks resume
+and restart. Restore the recorded bytes to recover the run, or start a fresh run
+when the inputs are intentionally different.
 
 Restart from validation also accepts changes to the command text of existing
 validation gates. Gate names, tiers, timeouts, input files, scope, roles,

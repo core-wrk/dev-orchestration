@@ -865,7 +865,9 @@ def test_unproductive_death_saves_the_change_as_a_patch(tmp_path):
     assert "+x = 9" in saved and "added.py" in saved
 
 
-def _failed_verification_source(tmp_path, monkeypatch, *, seed_patch=None, validation_command=None):
+def _failed_verification_source(
+    tmp_path, monkeypatch, *, seed_patch=None, validation_command=None, validation_file=None
+):
     from dev_orchestration.domain.enums import Outcome
     from dev_orchestration.git.repo import GitRepo
     from dev_orchestration.workflow import runner as runner_module
@@ -881,7 +883,19 @@ def _failed_verification_source(tmp_path, monkeypatch, *, seed_patch=None, valid
         )
         subprocess.run(["git", "-C", str(root), "add", ".ai/project.yaml"], check=True)
         subprocess.run(["git", "-C", str(root), "commit", "-qm", "add validation"], check=True)
-    (root / ".gitignore").write_text(".ai/runs/\n")
+    if validation_file is not None:
+        config_path = root / ".ai" / "project.yaml"
+        config_path.write_text(
+            config_path.read_text() + f'validation_files: ["{validation_file}"]\n'
+        )
+        (root / validation_file).parent.mkdir(parents=True, exist_ok=True)
+        (root / validation_file).write_bytes(b"recorded validation input")
+        subprocess.run(["git", "-C", str(root), "add", ".ai/project.yaml"], check=True)
+        subprocess.run(
+            ["git", "-C", str(root), "commit", "-qm", "declare validation input"], check=True
+        )
+    ignored = ".ai/runs/\n" + (f"{validation_file}\n" if validation_file else "")
+    (root / ".gitignore").write_text(ignored)
     subprocess.run(["git", "-C", str(root), "add", ".gitignore"], check=True)
     subprocess.run(["git", "-C", str(root), "commit", "-qm", "ignore run artifacts"], check=True)
     adapter = ScriptedAdapter(tier="standard")
@@ -1450,6 +1464,59 @@ def test_validation_restart_allows_only_existing_gate_command_changes(tmp_path, 
     assert '"event": "validation_commands_changed"' in events
 
 
+@pytest.mark.parametrize("missing", [False, True])
+def test_reliability_restart_inputs_refuse_changed_declared_file_before_child(
+    tmp_path, monkeypatch, missing
+):
+    root, source_id, adapter = _failed_verification_source(
+        tmp_path, monkeypatch, validation_file="ops/template.bin"
+    )
+    if missing:
+        (root / "ops" / "template.bin").unlink()
+    else:
+        (root / "ops" / "template.bin").write_bytes(b"changed validation input")
+    _restart_cli(monkeypatch, tmp_path, adapter)
+    monkeypatch.chdir(root)
+
+    result = CliRunner().invoke(app, ["restart", source_id, "--reason", "recheck inputs"])
+
+    assert result.exit_code == 1
+    assert "restore the recorded bytes for recovery" in result.output
+    assert "start a fresh run" in result.output
+    assert len(list((root / ".ai" / "runs").glob("*/manifest.json"))) == 1
+
+
+def test_reliability_restart_inputs_allow_command_change_with_same_file(tmp_path, monkeypatch):
+    root, source_id, adapter = _failed_verification_source(
+        tmp_path,
+        monkeypatch,
+        validation_command="true",
+        validation_file="ops/template.bin",
+    )
+    config_path = root / ".ai" / "project.yaml"
+    config_path.write_text(
+        config_path.read_text().replace('command: "true"', 'command: "true && true"')
+    )
+    subprocess.run(["git", "-C", str(root), "add", ".ai/project.yaml"], check=True)
+    subprocess.run(
+        ["git", "-C", str(root), "commit", "-qm", "adjust validation command"], check=True
+    )
+    _restart_cli(monkeypatch, tmp_path, adapter)
+    monkeypatch.chdir(root)
+
+    result = CliRunner().invoke(app, ["restart", source_id, "--reason", "rerun changed gate"])
+
+    assert result.exit_code == 0, result.output
+    child = _latest_manifest(root)
+    assert child.status is RunState.COMPLETE_LOCAL
+    assert (
+        child.validation_input_hashes
+        == RunStore(root, source_id).read_manifest().validation_input_hashes
+    )
+    evidence = RunStore(root, child.run_id).root / "execution/validation-v1.json"
+    assert evidence.is_file()
+
+
 def test_restart_status_refuses_legacy_run_without_saved_configuration(tmp_path, monkeypatch):
     root, source_id, adapter = _failed_verification_source(tmp_path, monkeypatch)
     RunStore(root, source_id).update_manifest(config_layers=[])
@@ -1498,6 +1565,27 @@ def test_validation_restart_command_change_validator_rejects_other_config_edits(
         update={"scope": original.scope.model_copy(update={"include": ["docs/"]})}
     )
     assert _validation_command_changes(original.model_dump(mode="json"), changed_scope) is None
+
+
+def test_reliability_saved_inputs_restart_accepts_omitted_empty_default(tmp_path, monkeypatch):
+    root, source_id, adapter = _failed_verification_source(tmp_path, monkeypatch)
+    config_path = root / ".ai" / "project.yaml"
+    config_path.write_text(config_path.read_text() + "validation_files: []\n")
+    _commit_file(
+        root,
+        ".ai/project.yaml",
+        config_path.read_text(),
+        "record empty validation files default",
+    )
+    _restart_cli(monkeypatch, tmp_path, adapter)
+    monkeypatch.chdir(root)
+
+    result = CliRunner().invoke(
+        app, ["restart", source_id, "--from", "validation", "--reason", "rerun validation"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert _latest_manifest(root).status is RunState.COMPLETE_LOCAL
 
 
 def test_remediation_restart_repairs_failed_validation_before_fresh_review(tmp_path, monkeypatch):
