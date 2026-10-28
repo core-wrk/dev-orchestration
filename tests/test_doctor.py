@@ -235,6 +235,42 @@ def test_doctor_reports_availability_of_declared_ignored_validation_files(tmp_pa
     assert available.ok is True
 
 
+def test_reliability_environment_doctor_skips_unrelated_large_ignored_files(tmp_path):
+    _init_repo(tmp_path)
+    (tmp_path / ".gitignore").write_text("unrelated.bin\n")
+    (tmp_path / ".ai").mkdir()
+    (tmp_path / ".ai" / "project.yaml").write_text(
+        "project:\n  name: sample\n  class: internal_utility\n"
+    )
+    with (tmp_path / "unrelated.bin").open("wb") as unrelated:
+        unrelated.truncate(64 * 1024 * 1024 + 1)
+    _commit_all(tmp_path)
+
+    checks = run_checks(tmp_path, codex=FakeAdapter(), claude=FakeAdapter())
+
+    assert _by_name(checks, "project config").ok is True
+    assert not any(check.name.startswith("validation file:") for check in checks)
+
+
+def test_reliability_environment_doctor_reports_test_command_without_running_it(tmp_path):
+    _init_repo(tmp_path)
+    (tmp_path / ".ai").mkdir()
+    marker = tmp_path / "doctor-test-command-ran"
+    command = f"touch {marker}"
+    (tmp_path / ".ai" / "project.yaml").write_text(
+        "project:\n  name: sample\n  class: internal_utility\n"
+        f"validation:\n  test:\n    command: {command!r}\n"
+    )
+    _commit_all(tmp_path)
+
+    checks = run_checks(tmp_path, codex=FakeAdapter(), claude=FakeAdapter())
+
+    test_check = _by_name(checks, "validation:test")
+    assert test_check.ok is True
+    assert test_check.detail == command
+    assert not marker.exists()
+
+
 def test_agents_md_present_reports_ok_with_no_detail(tmp_path):
     _init_repo(tmp_path)
     (tmp_path / ".ai").mkdir()

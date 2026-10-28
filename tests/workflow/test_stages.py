@@ -110,7 +110,13 @@ def test_classifier_receives_selected_specification_and_exact_criteria(store):
     assert '["keep this criterion exactly"]' in rendered
 
 
-def test_codex_classifier_timeout_retries_once_with_configured_budget(store):
+@pytest.mark.parametrize(
+    ("configured_budget", "expected_budgets"),
+    [(30, [30, 30]), (90, [60, 90])],
+)
+def test_reliability_classifier_timeout_retries_once_with_configured_budget(
+    store, configured_budget, expected_budgets
+):
     class TimeoutOnce(Scripted):
         def run(self, request):
             self.requests.append(request)
@@ -123,19 +129,19 @@ def test_codex_classifier_timeout_retries_once_with_configured_budget(store):
 
     adapter = TimeoutOnce([])
     codex_registry = RoleRegistry(
-        {"classifier": RoleConfig(adapter="codex", model="m", timeout_seconds=90)},
+        {"classifier": RoleConfig(adapter="codex", model="m", timeout_seconds=configured_budget)},
         {"codex": adapter},
     )
     result = classify(codex_registry, "small change", ProjectClass.INTERNAL_UTILITY, store)
     assert result.tier is Tier.TRIVIAL
-    assert [request.timeout_seconds for request in adapter.requests] == [60, 90]
+    assert [request.timeout_seconds for request in adapter.requests] == expected_budgets
     events = [json.loads(line) for line in (store.root / "events.jsonl").read_text().splitlines()]
     assert [
         event["event"] for event in events if event["event"].startswith("classifier_attempt")
     ] == ["classifier_attempt_failed", "classifier_attempt_succeeded"]
 
 
-def test_codex_classifier_second_timeout_and_interrupt_are_not_swallowed(store):
+def test_reliability_classifier_second_timeout_and_interrupt_are_not_swallowed(store):
     class AlwaysTimeout(Scripted):
         def run(self, request):
             self.requests.append(request)

@@ -6,7 +6,8 @@ from pathlib import Path
 
 from dev_orchestration.adapters.registry import RoleRegistry
 from dev_orchestration.artifacts.store import CheckpointError, RunStore
-from dev_orchestration.git.repo import GitRepo
+from dev_orchestration.config.models import ProjectConfig
+from dev_orchestration.git.repo import GitCommandError, GitRepo
 from dev_orchestration.roles.loader import load_role_prompt
 from dev_orchestration.workflow.snapshot import capture_snapshot
 
@@ -20,6 +21,31 @@ def _within(root: Path, name: str) -> Path:
     if not target.is_relative_to(root.resolve()):
         raise CheckpointError(f"input path escaped repository: {name}")
     return target
+
+
+def project_config_matches(saved: dict, current: ProjectConfig) -> bool:
+    """Compare saved config while accepting omission of the empty validation file default."""
+    normalized = dict(saved)
+    normalized.setdefault("validation_files", [])
+    return normalized == current.model_dump(mode="json")
+
+
+def validation_files_default_omission(repo: GitRepo, base_commit: str) -> bool:
+    """Recognize only adding or omitting the explicit empty validation_files default."""
+    if not base_commit:
+        return False
+    try:
+        diff = repo.run_git(
+            "diff", "--no-ext-diff", "--unified=0", base_commit, "--", ".ai/project.yaml"
+        )
+    except GitCommandError:
+        return False
+    changed = [
+        line
+        for line in diff.splitlines()
+        if line.startswith(("+", "-")) and not line.startswith(("+++", "---"))
+    ]
+    return len(changed) == 1 and all(line[1:].strip() == "validation_files: []" for line in changed)
 
 
 def input_hashes(
@@ -75,6 +101,10 @@ def input_hashes(
     if manifest.plan_review_provenance:
         fields["plan_review_provenance"] = manifest.plan_review_provenance
     values = {"manifest_contract": _digest(json.dumps(fields, sort_keys=True).encode())}
+    if manifest.validation_input_hashes:
+        values["validation_input_hashes"] = _digest(
+            json.dumps(manifest.validation_input_hashes, sort_keys=True).encode()
+        )
     for name in (".ai/project.yaml", *manifest.context_included):
         path = _within(store.repo_root, name)
         if name == ".ai/project.yaml" and not path.exists():
