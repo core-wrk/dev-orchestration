@@ -1,4 +1,7 @@
+import os
 import subprocess
+import sys
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -248,6 +251,50 @@ def test_run_turns_a_timeout_into_a_named_stage_error(monkeypatch):
         CodexAdapter(binary=Path("/bin/codex")).run(
             AgentRequest(role="planner", prompt="p", cwd=Path("/w"), timeout_seconds=42)
         )
+
+
+def test_reliability_classifier_timeout_kills_child_after_leader_exit(tmp_path):
+    child_pid_file = tmp_path / "child.pid"
+    executable = tmp_path / "codex"
+    child_code = (
+        "import os, signal, time; "
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        f"open({str(child_pid_file)!r}, 'w').write(str(os.getpid())); "
+        "time.sleep(30)"
+    )
+    executable.write_text(
+        "#!" + sys.executable + "\n"
+        "import os, subprocess, sys, time\n"
+        f"pid_file = {str(child_pid_file)!r}\n"
+        f"child_code = {child_code!r}\n"
+        "subprocess.Popen([sys.executable, '-c', child_code])\n"
+        "while not os.path.exists(pid_file): time.sleep(0.01)\n"
+    )
+    executable.chmod(0o755)
+
+    with pytest.raises(AgentTimeoutError, match="classifier"):
+        CodexAdapter(binary=executable).run(
+            AgentRequest(role="classifier", prompt="p", cwd=tmp_path, timeout_seconds=1)
+        )
+
+    child_pid = int(child_pid_file.read_text())
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            os.kill(child_pid, 0)
+        except ProcessLookupError:
+            break
+        state = subprocess.run(
+            ["ps", "-o", "stat=", "-p", str(child_pid)],
+            capture_output=True,
+            text=True,
+            check=False,
+        ).stdout.strip()
+        if state.startswith("Z"):
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail("timed-out classifier child remained alive")
 
 
 def test_run_reports_process_signal_as_interruption(monkeypatch):

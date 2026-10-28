@@ -1454,7 +1454,7 @@ def test_legacy_dirty_worktree_requires_explicit_adoption(tmp_path):
     assert resumed.final_state is RunState.COMPLETE_LOCAL
 
 
-def test_pause_before_classification_resumes_despite_persistent_context(tmp_path):
+def test_reliability_classifier_pause_resumes_despite_persistent_context(tmp_path):
     class ClassifierTimeout(Scripted):
         def run(self, request):
             if request.role == "classifier" and not self.seen:
@@ -1475,6 +1475,45 @@ def test_pause_before_classification_resumes_despite_persistent_context(tmp_path
     assert first.final_state is RunState.PAUSED_INTERRUPTED
     resumed = resume_run(git, config, registry(Scripted()), first.run_id)
     assert resumed.final_state is RunState.COMPLETE_LOCAL
+
+
+def test_reliability_classifier_repeated_timeout_pauses_run(tmp_path):
+    class ClassifierTimeout(Scripted):
+        def run(self, request):
+            self.seen.append(request.role)
+            if request.role == "classifier":
+                raise AgentTimeoutError(request.role, request.timeout_seconds, self.name)
+            return super().run(request)
+
+    git = repo(tmp_path)
+    adapter = ClassifierTimeout()
+    roles = {
+        role: RoleConfig(
+            adapter="codex" if role == "classifier" else "fake",
+            model="m",
+            timeout_seconds=90 if role == "classifier" else None,
+        )
+        for role in ROLES
+    }
+    outcome = execute_run(
+        git,
+        CONFIG,
+        RoleRegistry(roles, {"codex": adapter, "fake": adapter}),
+        "change app",
+        tmp_path / "wt",
+        CRITERIA,
+    )
+
+    assert outcome.final_state is RunState.PAUSED_INTERRUPTED
+    assert adapter.seen == ["classifier", "classifier"]
+    events = [
+        json.loads(line) for line in (outcome.store_root / "events.jsonl").read_text().splitlines()
+    ]
+    assert [
+        event["timeout_seconds"]
+        for event in events
+        if event.get("event") == "classifier_attempt_failed"
+    ] == [60, 90]
 
 
 def test_reliability_saved_inputs_classifier_pause_resumes_without_recorded_hashes(tmp_path):
