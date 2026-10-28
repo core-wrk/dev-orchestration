@@ -52,6 +52,14 @@ def _raw_text(output: dict | str) -> str:
     return output if isinstance(output, str) else json.dumps(output, indent=2) + "\n"
 
 
+def _criteria_context(criteria: list[str]) -> ContextRef:
+    return ContextRef(
+        label=Category.ACCEPTANCE_CRITERIA,
+        path=None,
+        content=json.dumps(criteria, ensure_ascii=False),
+    )
+
+
 def _agent_result_json(result: AgentResult) -> dict:
     return agent_result_record(result)
 
@@ -154,11 +162,14 @@ def plan(
     references: list[ContextRef],
     store: RunStore,
     scope_fence: ContextRef | None = None,
+    acceptance_criteria: list[str] | None = None,
 ) -> Path:
     packet = assemble(
         "planning",
         [
             ContextRef(label=Category.BRIEF, path=None, content=brief),
+            ContextRef(label=Category.REQUEST, path=None, content=brief),
+            _criteria_context(acceptance_criteria or []),
             *invariants,
             *references,
             *([scope_fence] if scope_fence is not None else []),
@@ -181,13 +192,18 @@ def review_plan(
     plan_text: str,
     profile_constraints: list[ContextRef],
     store: RunStore,
+    acceptance_criteria: list[str] | None = None,
+    scope_fence: ContextRef | None = None,
 ) -> ReviewResult:
     packet = assemble(
         "plan_review",
         [
             ContextRef(label=Category.BRIEF, path=None, content=brief),
+            ContextRef(label=Category.REQUEST, path=None, content=brief),
+            _criteria_context(acceptance_criteria or []),
             ContextRef(label=Category.PROPOSED_PLAN, path=None, content=plan_text),
             *profile_constraints,
+            *([scope_fence] if scope_fence is not None else []),
         ],
     )
     request = _request(registry, "plan_reviewer", store, packet, store.repo_root)
@@ -279,10 +295,16 @@ def reconcile(
     plan_text: str,
     findings: list[Finding],
     store: RunStore,
+    request_text: str = "",
+    acceptance_criteria: list[str] | None = None,
+    scope_fence: ContextRef | None = None,
 ) -> Path:
     packet = assemble(
         "reconciliation",
         [
+            ContextRef(label=Category.REQUEST, path=None, content=request_text),
+            _criteria_context(acceptance_criteria or []),
+            *([scope_fence] if scope_fence is not None else []),
             ContextRef(label=Category.PROPOSED_PLAN, path=None, content=plan_text),
             ContextRef(
                 label=Category.REVIEW_FINDINGS,

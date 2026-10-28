@@ -110,7 +110,13 @@ def test_classifier_receives_selected_specification_and_exact_criteria(store):
     assert '["keep this criterion exactly"]' in rendered
 
 
-def test_codex_classifier_timeout_retries_once_with_configured_budget(store):
+@pytest.mark.parametrize(
+    ("configured_budget", "expected_budgets"),
+    [(30, [30, 30]), (90, [60, 90])],
+)
+def test_reliability_classifier_timeout_retries_once_with_configured_budget(
+    store, configured_budget, expected_budgets
+):
     class TimeoutOnce(Scripted):
         def run(self, request):
             self.requests.append(request)
@@ -123,19 +129,19 @@ def test_codex_classifier_timeout_retries_once_with_configured_budget(store):
 
     adapter = TimeoutOnce([])
     codex_registry = RoleRegistry(
-        {"classifier": RoleConfig(adapter="codex", model="m", timeout_seconds=90)},
+        {"classifier": RoleConfig(adapter="codex", model="m", timeout_seconds=configured_budget)},
         {"codex": adapter},
     )
     result = classify(codex_registry, "small change", ProjectClass.INTERNAL_UTILITY, store)
     assert result.tier is Tier.TRIVIAL
-    assert [request.timeout_seconds for request in adapter.requests] == [60, 90]
+    assert [request.timeout_seconds for request in adapter.requests] == expected_budgets
     events = [json.loads(line) for line in (store.root / "events.jsonl").read_text().splitlines()]
     assert [
         event["event"] for event in events if event["event"].startswith("classifier_attempt")
     ] == ["classifier_attempt_failed", "classifier_attempt_succeeded"]
 
 
-def test_codex_classifier_second_timeout_and_interrupt_are_not_swallowed(store):
+def test_reliability_classifier_second_timeout_and_interrupt_are_not_swallowed(store):
     class AlwaysTimeout(Scripted):
         def run(self, request):
             self.requests.append(request)
@@ -193,6 +199,88 @@ def test_planner_and_reconciler_prompts_preserve_small_explicit_designs(store):
     assert "dropping a criterion or crossing the approved scope" in load_role_prompt(
         "plan_reconciler"
     )
+
+
+def test_reliability_planning_context_preserves_request_criteria_and_scope(store):
+    request = (
+        "Update smoke_test.py to refuse if clients/smoketest-co* exists; "
+        "do not add an ownership manifest."
+    )
+    criteria = [
+        "Refuse before creating files when any clients/smoketest-co* folder exists.",
+        "Do not create an ownership manifest.",
+    ]
+    scope = ContextRef(
+        label=Category.SCOPE_FENCE,
+        path="config:scope",
+        content='{"include":["src/","tests/"],"exclude":[".ai/"]}',
+    )
+    proposed = "# Plan\n\nAdd an ownership manifest to track clients/smoketest-co* folders.\n"
+    planner = Scripted([proposed])
+    plan_path = plan(
+        registry(planner, "planner"),
+        request,
+        [],
+        [],
+        store,
+        scope_fence=scope,
+        acceptance_criteria=criteria,
+    )
+    review_adapter = Scripted(
+        [
+            {
+                "outcome": "CHANGES_REQUIRED",
+                "findings": [
+                    {
+                        "id": "ignored",
+                        "severity": "blocking",
+                        "summary": "Plan adds a forbidden ownership manifest",
+                        "evidence_required": "revise the plan to refuse on an existing matching folder",
+                    }
+                ],
+            }
+        ]
+    )
+    review_plan(
+        registry(review_adapter, "plan_reviewer"),
+        request,
+        plan_path.read_text(),
+        [],
+        store,
+        criteria,
+        scope,
+    )
+    reconciler = Scripted(
+        ["# Revised plan\n\nRefuse if clients/smoketest-co* exists. Add no ownership manifest.\n"]
+    )
+    revised = reconcile(
+        registry(reconciler, "plan_reconciler"),
+        proposed,
+        [
+            Finding(
+                id="F001",
+                severity=Severity.BLOCKING,
+                summary="Plan adds a forbidden ownership manifest",
+                evidence_required="revise the plan",
+            )
+        ],
+        store,
+        request,
+        criteria,
+        scope,
+    )
+
+    expected_scope = scope.content
+    for adapter in (planner, review_adapter, reconciler):
+        rendered = adapter.requests[0].context.render()
+        assert request in rendered
+        assert json.dumps(criteria, ensure_ascii=False) in rendered
+        assert expected_scope in rendered
+    assert "ownership manifest" in planner.requests[0].context.render()
+    assert "ownership manifest" in review_adapter.requests[0].context.render()
+    assert "ownership manifest" in reconciler.requests[0].context.render()
+    assert "Add no ownership manifest" in revised.read_text()
+    assert MAX_REMEDIATION_CYCLES == 2
 
 
 def test_execution_is_pinned_to_worktree_and_excludes_review_findings(store, tmp_path):

@@ -1294,6 +1294,7 @@ def execute_run(
                         runtime.references,
                         store,
                         scope_fence=scope_context,
+                        acceptance_criteria=acceptance_criteria,
                     )
             if not reuse_matches:
                 engine.transition(RunState.PLANNED)
@@ -1305,6 +1306,8 @@ def execute_run(
                     plan_text,
                     runtime.profile_constraints,
                     store,
+                    acceptance_criteria,
+                    scope_context,
                 )
                 engine.transition(RunState.PLAN_REVIEWED)
                 receipt(
@@ -1339,7 +1342,15 @@ def execute_run(
                         cause="plan_review_exhausted",
                     )
                 engine.transition(RunState.PLANNED)
-                version = reconcile(registry, plan_text, plan_review.findings, store)
+                version = reconcile(
+                    registry,
+                    plan_text,
+                    plan_review.findings,
+                    store,
+                    request_text,
+                    acceptance_criteria,
+                    scope_context,
+                )
                 receipt("plan_reviewer", [f"planning/{version.name}"], reconciliation_cycles)
                 plan_text = version.read_text(encoding="utf-8")
                 plan_review = review_plan(
@@ -1348,6 +1359,8 @@ def execute_run(
                     plan_text,
                     runtime.profile_constraints,
                     store,
+                    acceptance_criteria,
+                    scope_context,
                 )
                 engine.transition(RunState.PLAN_REVIEWED)
                 receipt(

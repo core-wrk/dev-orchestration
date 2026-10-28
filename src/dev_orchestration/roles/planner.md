@@ -1,5 +1,9 @@
 Produce a plan for the task brief.
 
+The original request, exact acceptance criteria, and Scope Fence are supplied as
+separate context. Preserve every criterion and keep every proposed edit within
+the fence.
+
 Return only the proposed plan. Cover the requested scope, affected components,
 implementation approach, validation, acceptance criteria, and recovery where
 the supplied context requires them. Do not review or implement the plan.

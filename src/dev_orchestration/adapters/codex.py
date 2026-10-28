@@ -302,15 +302,23 @@ def _error_diagnostic(stdout: str) -> dict | None:
 
 def _terminate_process_group(proc: subprocess.Popen) -> None:
     """Stop Codex and every MCP child it spawned after a timeout."""
-    if proc.poll() is not None:
-        return
     try:
         os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
         proc.wait(timeout=5)
     except subprocess.TimeoutExpired:
+        pass
+    try:
+        # The process group can outlive its leader. Escalate against the group
+        # itself so children that ignore SIGTERM cannot keep running.
         os.killpg(proc.pid, signal.SIGKILL)
-        proc.wait()
     except ProcessLookupError:
+        pass
+    try:
+        proc.wait()
+    except ChildProcessError:
         pass
 
 
