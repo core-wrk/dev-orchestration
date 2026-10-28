@@ -27,6 +27,7 @@ from dev_orchestration.workflow.cloud import link_cloud_session
 from dev_orchestration.workflow.legacy import LegacyRecoveryError
 from dev_orchestration.workflow.recovery import ResumeRefused, approve_run, resume_run
 from dev_orchestration.workflow.scheduler import SchedulerQueue
+from dev_orchestration.workflow.validation import validation_file_hashes
 from tests.workflow.run_helpers import execute_run
 
 CONFIG = ProjectConfig.model_validate(
@@ -1476,6 +1477,38 @@ def test_pause_before_classification_resumes_despite_persistent_context(tmp_path
     assert resumed.final_state is RunState.COMPLETE_LOCAL
 
 
+def test_reliability_saved_inputs_classifier_pause_resumes_without_recorded_hashes(tmp_path):
+    class ClassifierTimeout(Scripted):
+        def run(self, request):
+            if request.role == "classifier":
+                raise AgentTimeoutError(request.role, 7, self.name)
+            return super().run(request)
+
+    git = repo(tmp_path)
+    (git.root / ".gitignore").write_text(".ai/runs/\nops/template.pptx\n")
+    (git.root / "ops").mkdir()
+    (git.root / "ops" / "template.pptx").write_bytes(b"synthetic template")
+    subprocess.run(["git", "-C", str(git.root), "add", ".gitignore"], check=True)
+    subprocess.run(["git", "-C", str(git.root), "commit", "-qm", "ignore fixture"], check=True)
+    config = CONFIG.model_copy(update={"validation_files": ["ops/template.pptx"]})
+
+    first = execute_run(
+        git, config, registry(ClassifierTimeout()), "change app", tmp_path / "wt", CRITERIA
+    )
+
+    assert first.final_state is RunState.PAUSED_INTERRUPTED
+    store = RunStore(git.root, first.run_id)
+    assert store.latest_checkpoint()["next_stage"] == "classifier"
+    assert store.read_manifest().validation_input_hashes == {}
+
+    resumed = resume_run(git, config, registry(Scripted()), first.run_id)
+
+    assert resumed.final_state is RunState.COMPLETE_LOCAL
+    assert store.read_manifest().validation_input_hashes == validation_file_hashes(
+        git, config.validation_files
+    )
+
+
 @pytest.mark.parametrize("seeded", [False, True])
 def test_trivial_run_resumes_before_and_after_contract_checkpoint(tmp_path, seeded):
     class ClassifierTimeout(Scripted):
@@ -1680,6 +1713,91 @@ def test_resume_rejects_changed_declared_validation_input(tmp_path):
     (git.root / "ops" / "template.pptx").write_bytes(b"after")
     with pytest.raises(ResumeRefused, match="declared validation files changed"):
         resume_run(git, config, registry(Scripted()), first.run_id)
+
+
+def test_reliability_saved_inputs_resume_rejects_file_and_manifest_hash_tampering(tmp_path):
+    git = repo(tmp_path)
+    (git.root / ".gitignore").write_text(".ai/runs/\nops/template.pptx\n")
+    (git.root / "ops").mkdir()
+    (git.root / "ops" / "template.pptx").write_bytes(b"before")
+    subprocess.run(["git", "-C", str(git.root), "add", ".gitignore"], check=True)
+    subprocess.run(["git", "-C", str(git.root), "commit", "-qm", "ignore fixture"], check=True)
+    config = CONFIG.model_copy(update={"validation_files": ["ops/template.pptx"]})
+    first = execute_run(
+        git,
+        config,
+        registry(Scripted(timeout_worker=True)),
+        "change app",
+        tmp_path / "wt",
+        CRITERIA,
+    )
+    assert first.final_state is RunState.PAUSED_INTERRUPTED
+    store = RunStore(git.root, first.run_id)
+    (git.root / "ops" / "template.pptx").write_bytes(b"after")
+    store.update_manifest(
+        validation_input_hashes=validation_file_hashes(git, config.validation_files)
+    )
+
+    with pytest.raises(ResumeRefused, match="saved request, policy, role binding, or context"):
+        resume_run(git, config, registry(Scripted()), first.run_id)
+
+
+def test_reliability_saved_inputs_resume_accepts_historical_receipt_without_hash_field(tmp_path):
+    git = repo(tmp_path)
+    (git.root / ".gitignore").write_text(".ai/runs/\nops/template.pptx\n")
+    (git.root / "ops").mkdir()
+    (git.root / "ops" / "template.pptx").write_bytes(b"stable input")
+    subprocess.run(["git", "-C", str(git.root), "add", ".gitignore"], check=True)
+    subprocess.run(["git", "-C", str(git.root), "commit", "-qm", "ignore fixture"], check=True)
+    config = CONFIG.model_copy(update={"validation_files": ["ops/template.pptx"]})
+    first = execute_run(
+        git,
+        config,
+        registry(Scripted(timeout_worker=True)),
+        "change app",
+        tmp_path / "wt",
+        CRITERIA,
+    )
+    assert first.final_state is RunState.PAUSED_INTERRUPTED
+    store = RunStore(git.root, first.run_id)
+    receipt_path = store.root / store.read_manifest().checkpoint
+    historical_receipt = json.loads(receipt_path.read_text())
+    historical_receipt["inputs"].pop("validation_input_hashes")
+    receipt_path.write_text(json.dumps(historical_receipt))
+
+    resumed = resume_run(git, config, registry(Scripted()), first.run_id)
+
+    assert resumed.final_state is RunState.COMPLETE_LOCAL
+    assert "validation_input_hashes" not in json.loads(receipt_path.read_text())["inputs"]
+
+
+def test_reliability_saved_inputs_resume_accepts_omitted_empty_default(tmp_path):
+    git = repo(tmp_path)
+    config_path = git.root / ".ai" / "project.yaml"
+    config_path.parent.mkdir()
+    config_path.write_text(
+        "project: {name: demo, class: internal_utility}\n"
+        'scope: {include: ["src/"], exclude: []}\n'
+        "context: {persistent: []}\n"
+        'validation: {unit: {command: "true", required_for: [standard]}}\n'
+        "validation_files: []\n"
+    )
+    subprocess.run(["git", "-C", str(git.root), "add", ".ai/project.yaml"], check=True)
+    subprocess.run(["git", "-C", str(git.root), "commit", "-qm", "add project config"], check=True)
+    first = execute_run(
+        git,
+        CONFIG,
+        registry(Scripted(timeout_worker=True)),
+        "change app",
+        tmp_path / "wt",
+        CRITERIA,
+    )
+    assert first.final_state is RunState.PAUSED_INTERRUPTED
+    config_path.write_text(config_path.read_text().replace("validation_files: []\n", ""))
+
+    resumed = resume_run(git, CONFIG, registry(Scripted()), first.run_id)
+
+    assert resumed.final_state is RunState.COMPLETE_LOCAL
 
 
 def test_provider_execution_failure_is_recorded_as_environment_failure(tmp_path):
