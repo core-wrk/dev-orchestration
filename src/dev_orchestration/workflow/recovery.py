@@ -756,6 +756,7 @@ def resume_run(
                             runtime.references,
                             store,
                             scope_fence=scope_context,
+                            acceptance_criteria=criteria,
                         )
                     store.update_manifest(status=RunState.PLANNED)
                     checkpoint("plan_reviewer", [f"planning/{version.name}"])
@@ -768,6 +769,8 @@ def resume_run(
                         version.read_text(encoding="utf-8"),
                         runtime.profile_constraints,
                         store,
+                        criteria,
+                        scope_context,
                     )
                     store.update_manifest(status=RunState.PLAN_REVIEWED)
                     stage = "plan_reconciler" if reviewed.blocking_ids() else "plan_finalization"
@@ -805,6 +808,9 @@ def resume_run(
                         _latest_plan(store).read_text(encoding="utf-8"),
                         reviewed.findings,
                         store,
+                        request_text,
+                        criteria,
+                        scope_context,
                     )
                     store.update_manifest(status=RunState.PLANNED)
                     checkpoint("plan_reviewer", [f"planning/{version.name}"], cycle)

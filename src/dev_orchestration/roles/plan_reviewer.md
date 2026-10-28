@@ -1,5 +1,9 @@
 Review the proposed plan against the task brief.
 
+The original request, exact acceptance criteria, and Scope Fence are supplied as
+separate context. Judge whether the plan preserves the request and every
+criterion while staying within the fence.
+
 Report only defects that would materially change what gets built, break something, or
 make the result unsafe. Do not raise refactors, added abstractions, expanded test
 coverage, documentation, stylistic preferences, or future-proofing unless they address a

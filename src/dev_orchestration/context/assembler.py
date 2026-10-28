@@ -53,7 +53,9 @@ STAGE_CONTRACTS: dict[str, frozenset[Category]] = {
     ),
     "planning": frozenset(
         {
+            Category.REQUEST,
             Category.BRIEF,
+            Category.ACCEPTANCE_CRITERIA,
             Category.INVARIANTS,
             Category.REFERENCES,
             Category.SCOPE_FENCE,
@@ -63,13 +65,23 @@ STAGE_CONTRACTS: dict[str, frozenset[Category]] = {
     "plan_review": frozenset(
         {
             Category.BRIEF,
+            Category.REQUEST,
+            Category.ACCEPTANCE_CRITERIA,
             Category.PROPOSED_PLAN,
+            Category.SCOPE_FENCE,
             Category.PROFILE_CONSTRAINTS,
             Category.CONTEXT_NOTES,
         }
     ),
     "reconciliation": frozenset(
-        {Category.PROPOSED_PLAN, Category.REVIEW_FINDINGS, Category.CONTEXT_NOTES}
+        {
+            Category.REQUEST,
+            Category.ACCEPTANCE_CRITERIA,
+            Category.SCOPE_FENCE,
+            Category.PROPOSED_PLAN,
+            Category.REVIEW_FINDINGS,
+            Category.CONTEXT_NOTES,
+        }
     ),
     "human_approval": frozenset({Category.APPROVAL_SUMMARY, Category.CONTEXT_NOTES}),
     "execution": frozenset(

@@ -201,6 +201,88 @@ def test_planner_and_reconciler_prompts_preserve_small_explicit_designs(store):
     )
 
 
+def test_reliability_planning_context_preserves_request_criteria_and_scope(store):
+    request = (
+        "Update smoke_test.py to refuse if clients/smoketest-co* exists; "
+        "do not add an ownership manifest."
+    )
+    criteria = [
+        "Refuse before creating files when any clients/smoketest-co* folder exists.",
+        "Do not create an ownership manifest.",
+    ]
+    scope = ContextRef(
+        label=Category.SCOPE_FENCE,
+        path="config:scope",
+        content='{"include":["src/","tests/"],"exclude":[".ai/"]}',
+    )
+    proposed = "# Plan\n\nAdd an ownership manifest to track clients/smoketest-co* folders.\n"
+    planner = Scripted([proposed])
+    plan_path = plan(
+        registry(planner, "planner"),
+        request,
+        [],
+        [],
+        store,
+        scope_fence=scope,
+        acceptance_criteria=criteria,
+    )
+    review_adapter = Scripted(
+        [
+            {
+                "outcome": "CHANGES_REQUIRED",
+                "findings": [
+                    {
+                        "id": "ignored",
+                        "severity": "blocking",
+                        "summary": "Plan adds a forbidden ownership manifest",
+                        "evidence_required": "revise the plan to refuse on an existing matching folder",
+                    }
+                ],
+            }
+        ]
+    )
+    review_plan(
+        registry(review_adapter, "plan_reviewer"),
+        request,
+        plan_path.read_text(),
+        [],
+        store,
+        criteria,
+        scope,
+    )
+    reconciler = Scripted(
+        ["# Revised plan\n\nRefuse if clients/smoketest-co* exists. Add no ownership manifest.\n"]
+    )
+    revised = reconcile(
+        registry(reconciler, "plan_reconciler"),
+        proposed,
+        [
+            Finding(
+                id="F001",
+                severity=Severity.BLOCKING,
+                summary="Plan adds a forbidden ownership manifest",
+                evidence_required="revise the plan",
+            )
+        ],
+        store,
+        request,
+        criteria,
+        scope,
+    )
+
+    expected_scope = scope.content
+    for adapter in (planner, review_adapter, reconciler):
+        rendered = adapter.requests[0].context.render()
+        assert request in rendered
+        assert json.dumps(criteria, ensure_ascii=False) in rendered
+        assert expected_scope in rendered
+    assert "ownership manifest" in planner.requests[0].context.render()
+    assert "ownership manifest" in review_adapter.requests[0].context.render()
+    assert "ownership manifest" in reconciler.requests[0].context.render()
+    assert "Add no ownership manifest" in revised.read_text()
+    assert MAX_REMEDIATION_CYCLES == 2
+
+
 def test_execution_is_pinned_to_worktree_and_excludes_review_findings(store, tmp_path):
     adapter = Scripted(["done"])
     worktree = tmp_path / "worktree"
