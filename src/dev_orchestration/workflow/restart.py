@@ -18,16 +18,19 @@ from dev_orchestration.workflow.bootstrap import (
     resolve_runtime_context,
 )
 from dev_orchestration.workflow.checkpoints import (
+    dependency_discovery_default_omission,
     input_hashes,
     project_config_matches,
     record_stage,
     validation_files_default_omission,
 )
+from dev_orchestration.workflow.dependencies import dependency_sources
 from dev_orchestration.workflow.engine import Engine
 from dev_orchestration.workflow.recovery import ResumeRefused, _verify_human_approval, resume_run
 from dev_orchestration.workflow.runner import RunOutcome, cleanup_worktree_if_unproductive
 from dev_orchestration.workflow.scope_check import ScopeViolation, enforce_fence
 from dev_orchestration.workflow.snapshot import capture_snapshot
+from dev_orchestration.workflow.stages import discover_dependencies
 from dev_orchestration.workflow.validation import (
     ValidationEnvironmentError,
     ValidationOutcome,
@@ -212,7 +215,11 @@ def _source_contract(
             )
     try:
         latest = source.verify_checkpoint()
-        current_inputs = input_hashes(source, registry)
+        current_inputs = input_hashes(
+            source,
+            registry,
+            allow_changed_dependency_sources=config.context.dependency_discovery,
+        )
         saved_inputs = latest["inputs"]
         if "validation_input_hashes" not in saved_inputs:
             current_inputs.pop("validation_input_hashes", None)
@@ -220,12 +227,30 @@ def _source_contract(
             current_inputs.pop(".ai/project.yaml", None)
             saved_inputs = dict(saved_inputs)
             saved_inputs.pop(".ai/project.yaml", None)
+        if config.context.dependency_discovery:
+            current_inputs = {
+                key: value
+                for key, value in current_inputs.items()
+                if key != "dependency-report.json"
+                and not key.startswith("dependency_source:")
+                and key != "dependency_inventory"
+            }
+            saved_inputs = {
+                key: value
+                for key, value in saved_inputs.items()
+                if key != "dependency-report.json"
+                and not key.startswith("dependency_source:")
+                and key != "dependency_inventory"
+            }
         if (
             ".ai/project.yaml" in current_inputs
             and ".ai/project.yaml" in saved_inputs
             and current_inputs[".ai/project.yaml"] != saved_inputs[".ai/project.yaml"]
             and project_config_matches(manifest.config_layers[0], config)
-            and validation_files_default_omission(repo, manifest.git.base_commit or "")
+            and (
+                dependency_discovery_default_omission(manifest.config_layers[0], config)
+                or validation_files_default_omission(repo, manifest.git.base_commit or "")
+            )
         ):
             current_inputs[".ai/project.yaml"] = saved_inputs[".ai/project.yaml"]
         if current_inputs != saved_inputs:
@@ -368,6 +393,31 @@ def _review_evidence(source: RunStore, code_digest: str) -> tuple[str, str, str]
         raise ResumeRefused(
             "matching review or validation evidence is missing; use --from validation"
         )
+    manifest = source.read_manifest()
+    if (
+        manifest.config_layers
+        and ProjectConfig.model_validate(manifest.config_layers[0]).context.dependency_discovery
+    ):
+        report_path = source.root / "dependency-report.json"
+        identity = None
+        if report_path.is_file():
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            identity = {
+                "report_sha256": hashlib.sha256(report_path.read_bytes()).hexdigest(),
+                "source_inventory_identity": report.get("source_inventory_identity"),
+            }
+        pinned = receipt.get("inputs", {})
+        if (
+            identity is None
+            or "dependency-report.json" not in receipt.get("artifacts", [])
+            or pinned.get("dependency-report.json") != identity["report_sha256"]
+            or pinned.get("dependency_inventory") != identity["source_inventory_identity"]
+            or not identity["source_inventory_identity"]
+        ):
+            raise ResumeRefused(
+                "saved implementation review does not pin dependency evidence; "
+                "use --from validation"
+            )
     review_name = max(reviews, key=_version)
     validation_name = max(validation, key=_version)
     reviewed = ReviewResult.model_validate_json((source.root / review_name).read_text())
@@ -392,6 +442,38 @@ def _verification_evidence(
         return validation, review, index
     validation, _ = _validation_evidence(source, code_digest)
     return validation, None, None
+
+
+def _review_matches_dependency_identity(source: RunStore, current: dict) -> bool:
+    manifest = source.read_manifest()
+    if (
+        not manifest.config_layers
+        or not ProjectConfig.model_validate(manifest.config_layers[0]).context.dependency_discovery
+    ):
+        return True
+    receipt = _receipt_for(source, next_stage="verifier")
+    path = source.root / "dependency-report.json"
+    if receipt is None or not path.is_file():
+        return False
+    artifacts = receipt.get("artifacts", [])
+    if not any(
+        name.startswith("review/implementation-review-") and name.endswith(".json")
+        for name in artifacts
+    ):
+        return False
+    report = json.loads(path.read_text(encoding="utf-8"))
+    saved = {
+        "report_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        "source_inventory_identity": report.get("source_inventory_identity"),
+    }
+    inputs = receipt.get("inputs", {})
+    return (
+        saved == current
+        and "dependency-report.json" in artifacts
+        and inputs.get("dependency-report.json") == saved["report_sha256"]
+        and inputs.get("dependency_inventory") == saved["source_inventory_identity"]
+        and bool(saved["source_inventory_identity"])
+    )
 
 
 def restart_status(
@@ -435,11 +517,26 @@ def restart_status(
                 )
                 stages.append("verification")
             except ResumeRefused as exc:
-                blockers.append(str(exc))
+                if config.context.dependency_discovery and "dependency evidence" in str(exc):
+                    stages.append("verification after fresh review")
+                    blockers.append(
+                        "changed dependency evidence requires implementation review "
+                        "before verification"
+                    )
+                else:
+                    blockers.append(str(exc))
         except ResumeRefused as exc:
             blockers.append(str(exc))
         stages.append("remediation")
         detail = f"Restart: eligible --from {'|'.join(stages)}"
+        if config.context.dependency_discovery and manifest.tier.value in {
+            "standard",
+            "substantial",
+        }:
+            detail += (
+                "; verification restart checks fresh dependency evidence and reviews again "
+                "if it changed"
+            )
         if blockers:
             detail += "; shortcuts refused: " + " / ".join(dict.fromkeys(blockers))
         return detail
@@ -508,11 +605,14 @@ def restart_run(
     if from_stage == "review":
         _validation_evidence(source, source_digest)
     elif from_stage == "verification":
-        _verification_evidence(
-            source,
-            source_digest,
-            review_required=original.tier.value in {"standard", "substantial"},
-        )
+        if project_config.context.dependency_discovery:
+            _validation_evidence(source, source_digest)
+        else:
+            _verification_evidence(
+                source,
+                source_digest,
+                review_required=original.tier.value in {"standard", "substantial"},
+            )
 
     # A reviewer/verifier shortcut is eligible only when source evidence pins this
     # patch to the exact checked implementation. The patch is applied below before
@@ -540,11 +640,14 @@ def restart_run(
         if from_stage == "review":
             _validation_evidence(source, code_digest)
         elif from_stage == "verification":
-            _verification_evidence(
-                source,
-                code_digest,
-                review_required=original.tier.value in {"standard", "substantial"},
-            )
+            if project_config.context.dependency_discovery:
+                _validation_evidence(source, code_digest)
+            else:
+                _verification_evidence(
+                    source,
+                    code_digest,
+                    review_required=original.tier.value in {"standard", "substantial"},
+                )
         mode = "remediate" if from_stage == "remediation" else "check_only"
 
         # Copy immutable request and approved-contract inputs; keep review outputs in
@@ -658,6 +761,38 @@ def restart_run(
             copy_artifact("approval/human-approval.md")
             copy_artifact("approval/approved.json")
 
+        if project_config.context.dependency_discovery:
+            inventory, source_metadata = dependency_sources(repo.root, project_config)
+            discover_dependencies(
+                registry,
+                original.request_text or "",
+                inventory,
+                source_metadata,
+                resolve_runtime_context(
+                    repo.root, project_config, original.active_profiles, fence
+                ).invariants,
+                store,
+            )
+            report_path = store.root / "dependency-report.json"
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            fresh_dependency_identity = {
+                "report_sha256": hashlib.sha256(report_path.read_bytes()).hexdigest(),
+                "source_inventory_identity": report.get("source_inventory_identity"),
+            }
+            if from_stage == "verification" and not _review_matches_dependency_identity(
+                source, fresh_dependency_identity
+            ):
+                requested_next = "implementation_reviewer"
+                store.append_event(
+                    {
+                        "event": "restart_review_required",
+                        "reason": (
+                            "fresh dependency identity does not match a checkpointed "
+                            "implementation review"
+                        ),
+                    }
+                )
+
         artifacts = [
             "request.md",
             "acceptance-criteria.json",
@@ -678,11 +813,15 @@ def restart_run(
             store.update_manifest(validation_artifact=destination)
             artifacts.append(destination)
         elif from_stage == "verification":
-            validation_name, review_name, index_name = _verification_evidence(
-                source,
-                code_digest,
-                review_required=original.tier.value in {"standard", "substantial"},
-            )
+            if requested_next == "verifier":
+                validation_name, review_name, index_name = _verification_evidence(
+                    source,
+                    code_digest,
+                    review_required=original.tier.value in {"standard", "substantial"},
+                )
+            else:
+                validation_name, _ = _validation_evidence(source, code_digest)
+                review_name = index_name = None
             validation_target = copy_artifact(validation_name, "execution/validation-v1.json")
             store.update_manifest(validation_artifact=validation_target)
             artifacts.append(validation_target)

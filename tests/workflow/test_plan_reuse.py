@@ -36,7 +36,7 @@ def _store(root, run_id, *, request="change", base="base"):
     return store
 
 
-def _completed_source(root, review_payload=None):
+def _completed_source(root, review_payload=None, dependency_report=None):
     source = _store(root, "source")
     version = source.write_plan_version("# reviewed\n")
     source.approve_plan(version)
@@ -50,7 +50,7 @@ def _completed_source(root, review_payload=None):
     if any(finding["id"] == "F001" for finding in payload["findings"]):
         index["<none>|small note"] = "F001"
     source.record_finding_index(index)
-    create_receipt(source, version, review)
+    create_receipt(source, version, review, dependency_report=dependency_report)
     source.checkpoint(
         next_stage="implementation_worker",
         artifacts=[
@@ -95,6 +95,29 @@ def test_matching_review_inputs_reuse_source_receipt(tmp_path):
     assert matched
     assert reason == "matching completed plan review receipt"
     assert receipt == json.loads((source.root / RECEIPT).read_text())
+
+
+def test_changed_dependency_sources_invalidate_review_reuse(tmp_path):
+    initial = {
+        "report_sha256": "report-one",
+        "source_identities": [{"path": "docs/epic.md", "sha256": "source-one"}],
+    }
+    source = _completed_source(tmp_path, dependency_report=initial)
+    current = _store(tmp_path, "current")
+
+    matched, reason, _ = match_source(
+        source, current=current, plan_bytes=b"# reviewed\n", dependency_report=initial
+    )
+    changed = {
+        "report_sha256": "report-two",
+        "source_identities": [{"path": "docs/epic.md", "sha256": "source-two"}],
+    }
+    changed_match, changed_reason, _ = match_source(
+        source, current=current, plan_bytes=b"# reviewed\n", dependency_report=changed
+    )
+
+    assert matched and reason == "matching completed plan review receipt"
+    assert not changed_match and "dependency_report" in changed_reason
 
 
 def test_accepted_review_with_nonblocking_findings_is_reusable(tmp_path):

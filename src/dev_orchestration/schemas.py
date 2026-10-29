@@ -5,12 +5,18 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
-from dev_orchestration.domain.findings import Classification, ReviewResult, Verification
+from dev_orchestration.domain.findings import (
+    Classification,
+    DependencyReport,
+    ReviewResult,
+    Verification,
+)
 
 SCHEMA_MODELS: dict[str, type[BaseModel]] = {
     "classification": Classification,
     "review_result": ReviewResult,
     "verification": Verification,
+    "dependency_report": DependencyReport,
 }
 
 

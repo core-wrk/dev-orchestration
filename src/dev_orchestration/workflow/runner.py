@@ -32,6 +32,7 @@ from dev_orchestration.workflow.bootstrap import (
     resolve_runtime_context,
 )
 from dev_orchestration.workflow.checkpoints import record_stage
+from dev_orchestration.workflow.dependencies import dependency_sources
 from dev_orchestration.workflow.engine import Engine, IllegalTransitionError
 from dev_orchestration.workflow.invoke import AgentInvocationError, SchemaEscalation
 from dev_orchestration.workflow.plan_reuse import (
@@ -78,6 +79,7 @@ from dev_orchestration.workflow.stages import (
     FindingIdentityAmbiguity,
     RemediationExhausted,
     classify,
+    discover_dependencies,
     execute,
     plan,
     reconcile,
@@ -136,6 +138,17 @@ def _evidence(outcomes: list[ValidationOutcome]) -> str:
 
 def _validation_json(outcomes: list[ValidationOutcome]) -> list[dict]:
     return [outcome.model_dump(mode="json") for outcome in outcomes]
+
+
+def _dependency_review_identity(store: RunStore) -> dict | None:
+    path = store.root / "dependency-report.json"
+    if not path.is_file():
+        return None
+    report = json.loads(path.read_text(encoding="utf-8"))
+    return {
+        "report_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        "source_inventory_identity": report.get("source_inventory_identity"),
+    }
 
 
 def _save_validation(store: RunStore, outcomes: list[ValidationOutcome], cycle: int = 0) -> str:
@@ -994,6 +1007,7 @@ def execute_run(
                     outcomes,
                     worktree,
                     store,
+                    dependency_report,
                 ),
             )
             receipt("validation", ["execution/validation-repair-v1.json"], cycle)
@@ -1110,6 +1124,19 @@ def execute_run(
             )
         engine.transition(RunState.CLASSIFIED)
         runtime = resolve_runtime_context(repo.root, project_config, classification.profiles, fence)
+        dependency_report = ""
+        if project_config.context.dependency_discovery:
+            inventory, source_metadata = dependency_sources(repo.root, project_config)
+            dependency_report = discover_dependencies(
+                registry, request_text, inventory, source_metadata, runtime.invariants, store
+            )
+            store.append_event(
+                {
+                    "event": "dependency_discovery_completed",
+                    "source_count": len(source_metadata["sources"]),
+                    "budget_exhausted": source_metadata["budget_exhausted"],
+                }
+            )
         config_layers = [
             project_config.model_dump(mode="json"),
             *[
@@ -1198,6 +1225,8 @@ def execute_run(
             "acceptance-criteria.json",
             "roles.json",
         ]
+        if dependency_report:
+            stage_artifacts.append("dependency-report.json")
         approved: str
         approval_artifact: str
         reused_review_artifact: str | None = None
@@ -1213,6 +1242,7 @@ def execute_run(
                     current=store,
                     plan_bytes=candidate_bytes,
                     profile_constraints=runtime.profile_constraints,
+                    dependency_report=_dependency_review_identity(store),
                 )
                 if not reuse_matches:
                     store.append_event(
@@ -1249,7 +1279,11 @@ def execute_run(
                 engine.transition(RunState.PLAN_REVIEWED)
                 store.approve_plan(version)
                 create_plan_review_receipt(
-                    store, version, store.root / copied_review, runtime.profile_constraints
+                    store,
+                    version,
+                    store.root / copied_review,
+                    runtime.profile_constraints,
+                    _dependency_review_identity(store),
                 )
                 engine.transition(RunState.PLAN_FINALIZED)
                 receipt(
@@ -1295,6 +1329,7 @@ def execute_run(
                         store,
                         scope_fence=scope_context,
                         acceptance_criteria=acceptance_criteria,
+                        dependency_report=dependency_report,
                     )
             if not reuse_matches:
                 engine.transition(RunState.PLANNED)
@@ -1308,6 +1343,7 @@ def execute_run(
                     store,
                     acceptance_criteria,
                     scope_context,
+                    dependency_report,
                 )
                 engine.transition(RunState.PLAN_REVIEWED)
                 receipt(
@@ -1350,6 +1386,7 @@ def execute_run(
                     request_text,
                     acceptance_criteria,
                     scope_context,
+                    dependency_report,
                 )
                 receipt("plan_reviewer", [f"planning/{version.name}"], reconciliation_cycles)
                 plan_text = version.read_text(encoding="utf-8")
@@ -1361,6 +1398,7 @@ def execute_run(
                     store,
                     acceptance_criteria,
                     scope_context,
+                    dependency_report,
                 )
                 engine.transition(RunState.PLAN_REVIEWED)
                 receipt(
@@ -1391,7 +1429,11 @@ def execute_run(
                     key=lambda path: int(path.stem.rsplit("-v", 1)[1]),
                 )
                 create_plan_review_receipt(
-                    store, version, final_review, runtime.profile_constraints
+                    store,
+                    version,
+                    final_review,
+                    runtime.profile_constraints,
+                    _dependency_review_identity(store),
                 )
                 engine.transition(RunState.PLAN_FINALIZED)
                 receipt(
@@ -1504,6 +1546,7 @@ def execute_run(
                     store,
                     runtime.profile_constraints,
                     scope_context,
+                    dependency_report,
                 ),
             )
             after_worker = _deliverable_patch(worktree_repo, base_commit)
@@ -1561,6 +1604,7 @@ def execute_run(
                 runtime.profile_constraints,
                 store,
                 worktree,
+                dependency_report,
             )
             receipt(
                 "remediation" if implementation_review.blocking_ids() else "verifier",
@@ -1617,6 +1661,7 @@ def execute_run(
                     worktree,
                     store,
                     cycle=cycle,
+                    dependency_report=dependency_report,
                 ),
             )
             after_remediation = _deliverable_patch(worktree_repo, base_commit)
@@ -1668,6 +1713,7 @@ def execute_run(
                 runtime.profile_constraints,
                 store,
                 worktree,
+                dependency_report,
             )
             receipt(
                 "remediation" if implementation_review.blocking_ids() else "verifier",
@@ -1719,6 +1765,7 @@ def execute_run(
             implementation_review.findings if implementation_review is not None else [],
             store,
             worktree,
+            dependency_report,
         )
         receipt("commit", ["verification/final-verification.json"])
         cleanup_ephemeral_paths(worktree_repo.root)

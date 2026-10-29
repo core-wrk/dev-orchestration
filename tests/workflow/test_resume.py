@@ -22,7 +22,7 @@ from dev_orchestration.config.models import ApprovalPolicy, ProjectConfig, RoleC
 from dev_orchestration.domain.enums import ProjectClass, RunState, Tier
 from dev_orchestration.domain.run import RunManifest
 from dev_orchestration.git.repo import GitRepo
-from dev_orchestration.workflow.checkpoints import input_hashes
+from dev_orchestration.workflow.checkpoints import input_hashes, record_stage
 from dev_orchestration.workflow.cloud import link_cloud_session
 from dev_orchestration.workflow.legacy import LegacyRecoveryError
 from dev_orchestration.workflow.recovery import ResumeRefused, approve_run, resume_run
@@ -1055,6 +1055,44 @@ def test_old_manifest_keeps_hashes_and_resumes_with_cycle_validation_artifact(tm
     assert resumed.final_state is RunState.COMPLETE_LOCAL
     assert adapter.seen == ["implementation_reviewer", "verifier"]
     assert (store.root / "execution/validation-v1.json").is_file()
+
+
+def test_old_checkpoint_without_disabled_dependency_option_resumes(tmp_path):
+    git = repo(tmp_path)
+    first = execute_run(
+        git,
+        CONFIG,
+        registry(Scripted(timeout_worker=True)),
+        "change app",
+        tmp_path / "wt",
+        CRITERIA,
+    )
+    assert first.final_state is RunState.PAUSED_INTERRUPTED
+    store = RunStore(git.root, first.run_id)
+    manifest = store.read_manifest()
+    legacy_config = dict(manifest.config_layers[0])
+    legacy_context = dict(legacy_config["context"])
+    legacy_context.pop("dependency_discovery", None)
+    legacy_config["context"] = legacy_context
+    legacy_policy = dict(manifest.resolved_config)
+    legacy_policy.pop("context.dependency_discovery", None)
+    store.update_manifest(
+        config_layers=[legacy_config, *manifest.config_layers[1:]],
+        resolved_config=legacy_policy,
+    )
+    checkpoint = store.latest_checkpoint()
+    record_stage(
+        store,
+        registry(Scripted()),
+        Path(manifest.git.worktree),
+        next_stage=checkpoint["next_stage"],
+        artifacts=list(checkpoint["artifacts"]),
+        cycle=checkpoint["cycle"],
+    )
+
+    resumed = resume_run(git, CONFIG, registry(Scripted()), first.run_id)
+
+    assert resumed.final_state is RunState.COMPLETE_LOCAL
 
 
 def test_pause_during_validation_repair_resumes_reserved_attempt(tmp_path):

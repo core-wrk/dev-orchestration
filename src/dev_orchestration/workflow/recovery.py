@@ -28,11 +28,13 @@ from dev_orchestration.workflow.bootstrap import (
     resolve_runtime_context,
 )
 from dev_orchestration.workflow.checkpoints import (
+    dependency_discovery_default_omission,
     input_hashes,
     project_config_matches,
     record_stage,
     validation_files_default_omission,
 )
+from dev_orchestration.workflow.dependencies import dependency_sources
 from dev_orchestration.workflow.engine import Engine
 from dev_orchestration.workflow.invoke import AgentInvocationError
 from dev_orchestration.workflow.legacy import recover_legacy
@@ -49,6 +51,7 @@ from dev_orchestration.workflow.runner import (
     _approval_required,
     _approval_summary,
     _deliverable_patch,
+    _dependency_review_identity,
     _effective_tier,
     _evidence,
     _implementation_review_required,
@@ -83,6 +86,7 @@ from dev_orchestration.workflow.stages import (
     MAX_REMEDIATION_CYCLES,
     RemediationExhausted,
     classify,
+    discover_dependencies,
     execute,
     plan,
     reconcile,
@@ -239,8 +243,11 @@ def _check_run(
         current_inputs.get(".ai/project.yaml") != receipt["inputs"].get(".ai/project.yaml")
         and manifest.config_layers
         and project_config_matches(manifest.config_layers[0], project_config)
-        and validation_files_default_omission(
-            GitRepo(store.repo_root), manifest.git.base_commit or ""
+        and (
+            dependency_discovery_default_omission(manifest.config_layers[0], project_config)
+            or validation_files_default_omission(
+                GitRepo(store.repo_root), manifest.git.base_commit or ""
+            )
         )
     ):
         current_inputs[".ai/project.yaml"] = receipt["inputs"].get(".ai/project.yaml")
@@ -530,6 +537,13 @@ def resume_run(
         )
     with store.claim():
         manifest = store.read_manifest()
+        dependency_report = ""
+        if project_config.context.dependency_discovery:
+            dependency_path = store.root / "dependency-report.json"
+            if dependency_path.is_file():
+                dependency_report = json.dumps(
+                    json.loads(dependency_path.read_text(encoding="utf-8")), indent=2
+                )
         if manifest.validation_input_hashes:
             current_hashes = validation_file_hashes(repo, project_config.validation_files)
             if current_hashes != manifest.validation_input_hashes:
@@ -606,6 +620,23 @@ def resume_run(
             )
 
         try:
+            if (
+                project_config.context.dependency_discovery
+                and not dependency_report
+                and stage != "classifier"
+            ):
+                inventory, metadata = dependency_sources(repo.root, project_config)
+                dependency_runtime = resolve_runtime_context(
+                    repo.root, project_config, manifest.active_profiles, fence
+                )
+                dependency_report = discover_dependencies(
+                    registry,
+                    manifest.request_text or "",
+                    inventory,
+                    metadata,
+                    dependency_runtime.invariants,
+                    store,
+                )
             while True:
                 current = store.read_manifest()
                 request_text = current.request_text or ""
@@ -673,6 +704,16 @@ def resume_run(
                     runtime = resolve_runtime_context(
                         repo.root, project_config, classification.profiles, fence
                     )
+                    if project_config.context.dependency_discovery and not dependency_report:
+                        inventory, metadata = dependency_sources(repo.root, project_config)
+                        dependency_report = discover_dependencies(
+                            registry,
+                            request_text,
+                            inventory,
+                            metadata,
+                            runtime.invariants,
+                            store,
+                        )
                     layers = [
                         project_config.model_dump(mode="json"),
                         *[
@@ -757,6 +798,7 @@ def resume_run(
                             store,
                             scope_fence=scope_context,
                             acceptance_criteria=criteria,
+                            dependency_report=dependency_report,
                         )
                     store.update_manifest(status=RunState.PLANNED)
                     checkpoint("plan_reviewer", [f"planning/{version.name}"])
@@ -771,6 +813,7 @@ def resume_run(
                         store,
                         criteria,
                         scope_context,
+                        dependency_report,
                     )
                     store.update_manifest(status=RunState.PLAN_REVIEWED)
                     stage = "plan_reconciler" if reviewed.blocking_ids() else "plan_finalization"
@@ -811,6 +854,7 @@ def resume_run(
                         request_text,
                         criteria,
                         scope_context,
+                        dependency_report,
                     )
                     store.update_manifest(status=RunState.PLANNED)
                     checkpoint("plan_reviewer", [f"planning/{version.name}"], cycle)
@@ -837,7 +881,11 @@ def resume_run(
                     store.approve_plan(_latest_plan(store))
                     final_review = _latest(store, "review", "plan-review")
                     create_plan_review_receipt(
-                        store, _latest_plan(store), final_review, runtime.profile_constraints
+                        store,
+                        _latest_plan(store),
+                        final_review,
+                        runtime.profile_constraints,
+                        _dependency_review_identity(store),
                     )
                     approval_required = _approval_required(
                         project_config, current.tier, current.active_profiles
@@ -938,7 +986,7 @@ def resume_run(
                             worktree_repo,
                             base,
                             fence,
-                            lambda approved=approved, invariants=invariants, runtime=runtime, scope_context=scope_context: (
+                            lambda approved=approved, invariants=invariants, runtime=runtime, scope_context=scope_context, dependency_report=dependency_report: (
                                 execute(
                                     registry,
                                     approved,
@@ -948,6 +996,7 @@ def resume_run(
                                     store,
                                     runtime.profile_constraints,
                                     scope_context,
+                                    dependency_report,
                                 )
                             ),
                         )
@@ -1017,13 +1066,16 @@ def resume_run(
                         worktree_repo,
                         base,
                         fence,
-                        lambda outcomes=outcomes: repair_validation(
-                            registry,
-                            _approved(store),
-                            worktree_repo.change_diff(base),
-                            outcomes,
-                            worktree,
-                            store,
+                        lambda outcomes=outcomes, dependency_report=dependency_report: (
+                            repair_validation(
+                                registry,
+                                _approved(store),
+                                worktree_repo.change_diff(base),
+                                outcomes,
+                                worktree,
+                                store,
+                                dependency_report,
+                            )
                         ),
                     )
                     checkpoint("validation", ["execution/validation-repair-v1.json"], cycle)
@@ -1040,6 +1092,7 @@ def resume_run(
                         runtime.profile_constraints,
                         store,
                         worktree,
+                        dependency_report,
                     )
                     cleanup_ephemeral_paths(worktree)
                     require_snapshot(worktree_repo, before)
@@ -1109,14 +1162,17 @@ def resume_run(
                         worktree_repo,
                         base,
                         fence,
-                        lambda blocking=blocking, cycle=cycle: remediate(
-                            registry,
-                            blocking,
-                            _approved(store),
-                            worktree_repo.change_diff(base),
-                            worktree,
-                            store,
-                            cycle=cycle,
+                        lambda blocking=blocking, cycle=cycle, dependency_report=dependency_report: (
+                            remediate(
+                                registry,
+                                blocking,
+                                _approved(store),
+                                worktree_repo.change_diff(base),
+                                worktree,
+                                store,
+                                cycle=cycle,
+                                dependency_report=dependency_report,
+                            )
                         ),
                     )
                     after_remediation = _deliverable_patch(worktree_repo, base)
@@ -1165,6 +1221,7 @@ def resume_run(
                         reviewed.findings if reviewed else [],
                         store,
                         worktree,
+                        dependency_report,
                     )
                     cleanup_ephemeral_paths(worktree)
                     require_snapshot(worktree_repo, before)

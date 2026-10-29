@@ -38,6 +38,8 @@ class ScriptedAdapter:
         self.requests = []
         self.tier = tier
         self.profiles = profiles or []
+        self.fail_verification = False
+        self.dependency_conflict = False
 
     def healthcheck(self):
         return AdapterStatus(name="fake", available=True)
@@ -48,15 +50,49 @@ class ScriptedAdapter:
     def run(self, request):
         self.seen.append(request.role)
         self.requests.append(request)
+        if request.role == "dependency_analyst":
+            findings = []
+            if self.dependency_conflict:
+                findings.append(
+                    {
+                        "relationship": "conflict",
+                        "source": "docs/epic.md",
+                        "excerpt": "Changed epic evidence.",
+                        "current_behavior": "The declared epic has changed.",
+                        "future_work": "The requested change conflicts with the epic.",
+                        "approval_status": "approved",
+                        "effect_on_task": "The conflict must be resolved before completion.",
+                    }
+                )
+            now = datetime.now(UTC)
+            return AgentResult(
+                "fake",
+                None,
+                0,
+                {
+                    "findings": findings,
+                    "searched_sources": [],
+                    "inaccessible_sources": [],
+                    "incomplete_searches": [],
+                    "budget_exhausted": False,
+                },
+                now,
+                now,
+            )
         if request.role == "implementation_worker":
             (request.cwd / "src" / "app.py").write_text("x = 2\n")
         if request.role == "verifier":
             criteria = _criteria_from(request)
             payload = {
-                "outcome": "PASS",
+                "outcome": "CHANGES_REQUIRED" if self.fail_verification else "PASS",
                 "criteria": criteria,
                 "verdicts": [
-                    {"criterion": item, "verdict": "PASS", "evidence": "seen"} for item in criteria
+                    {
+                        "criterion": item,
+                        "verdict": "FAIL" if self.fail_verification else "PASS",
+                        "evidence": "seen",
+                    }
+                    for item in criteria
                 ],
                 "unresolved_finding_ids": [],
             }
@@ -85,9 +121,10 @@ def _criteria_from(request):
     return []
 
 
-def registry(adapter):
+def registry(adapter, *, dependency_discovery=False):
+    roles = (*ROLES, *(("dependency_analyst",) if dependency_discovery else ()))
     return RoleRegistry(
-        roles={role: RoleConfig(adapter="fake", model="m") for role in ROLES},
+        roles={role: RoleConfig(adapter="fake", model="m") for role in roles},
         adapters={"fake": adapter},
     )
 
@@ -866,7 +903,13 @@ def test_unproductive_death_saves_the_change_as_a_patch(tmp_path):
 
 
 def _failed_verification_source(
-    tmp_path, monkeypatch, *, seed_patch=None, validation_command=None, validation_file=None
+    tmp_path,
+    monkeypatch,
+    *,
+    seed_patch=None,
+    validation_command=None,
+    validation_file=None,
+    dependency_discovery=False,
 ):
     from dev_orchestration.domain.enums import Outcome
     from dev_orchestration.git.repo import GitRepo
@@ -875,6 +918,19 @@ def _failed_verification_source(
     root = tmp_path / "restart-source"
     root.mkdir()
     repo(root)
+    if dependency_discovery:
+        (root / "docs").mkdir()
+        (root / "docs" / "epic.md").write_text("Initial epic evidence.\n")
+        config_path = root / ".ai" / "project.yaml"
+        config_path.write_text(
+            config_path.read_text()
+            + "context:\n  dependency_discovery: true\n  persistent: []\n"
+            + "  on_demand:\n    specifications: docs/epic.md\n"
+        )
+        subprocess.run(["git", "-C", str(root), "add", ".ai/project.yaml"], check=True)
+        subprocess.run(
+            ["git", "-C", str(root), "commit", "-qm", "enable dependency discovery"], check=True
+        )
     if validation_command is not None:
         config_path = root / ".ai" / "project.yaml"
         config_path.write_text(
@@ -894,7 +950,10 @@ def _failed_verification_source(
         subprocess.run(
             ["git", "-C", str(root), "commit", "-qm", "declare validation input"], check=True
         )
-    ignored = ".ai/runs/\n" + (f"{validation_file}\n" if validation_file else "")
+    ignored = ".ai/runs/\n"
+    if dependency_discovery:
+        ignored += "docs/epic.md\n"
+    ignored += f"{validation_file}\n" if validation_file else ""
     (root / ".gitignore").write_text(ignored)
     subprocess.run(["git", "-C", str(root), "add", ".gitignore"], check=True)
     subprocess.run(["git", "-C", str(root), "commit", "-qm", "ignore run artifacts"], check=True)
@@ -915,7 +974,7 @@ def _failed_verification_source(
     outcome = runner_execute_run(
         GitRepo(root),
         config,
-        registry(adapter),
+        registry(adapter, dependency_discovery=dependency_discovery),
         "add a flag",
         tmp_path / "worktrees",
         ["flag exists"],
@@ -926,10 +985,14 @@ def _failed_verification_source(
     return root, outcome.run_id, adapter
 
 
-def _restart_cli(monkeypatch, tmp_path, adapter):
+def _restart_cli(monkeypatch, tmp_path, adapter, *, dependency_discovery=False):
     from dev_orchestration.config.models import GlobalConfig
 
-    monkeypatch.setattr(cli_module, "default_registry", lambda *a, **k: registry(adapter))
+    monkeypatch.setattr(
+        cli_module,
+        "default_registry",
+        lambda *a, **k: registry(adapter, dependency_discovery=dependency_discovery),
+    )
     monkeypatch.setattr(
         cli_module,
         "_global_config",
@@ -1182,6 +1245,48 @@ def test_restart_verification_shortcut_requires_and_reuses_exact_evidence(tmp_pa
     assert adapter.seen == ["verifier"]
     child = _latest_manifest(root)
     assert child.restart_from == "verification"
+
+
+def test_dependency_restart_reuses_review_only_when_fresh_evidence_matches(tmp_path, monkeypatch):
+    root, source_id, adapter = _failed_verification_source(
+        tmp_path, monkeypatch, dependency_discovery=True
+    )
+    _restart_cli(monkeypatch, tmp_path, adapter, dependency_discovery=True)
+    monkeypatch.chdir(root)
+    adapter.seen.clear()
+
+    result = CliRunner().invoke(
+        app,
+        ["restart", source_id, "--from", "verification", "--reason", "recheck acceptance"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert adapter.seen == ["dependency_analyst", "verifier"]
+
+
+def test_changed_ignored_dependency_evidence_requires_fresh_review(tmp_path, monkeypatch):
+    root, source_id, adapter = _failed_verification_source(
+        tmp_path, monkeypatch, dependency_discovery=True
+    )
+    (root / "docs" / "epic.md").write_text("Changed epic evidence.\n")
+    adapter.fail_verification = True
+    adapter.dependency_conflict = True
+    _restart_cli(monkeypatch, tmp_path, adapter, dependency_discovery=True)
+    monkeypatch.chdir(root)
+    adapter.seen.clear()
+
+    result = CliRunner().invoke(
+        app,
+        ["restart", source_id, "--from", "verification", "--reason", "recheck acceptance"],
+    )
+
+    assert result.exit_code == 1, result.output
+    assert adapter.seen == ["dependency_analyst", "implementation_reviewer", "verifier"]
+    child = _latest_manifest(root)
+    assert child.status is RunState.FAILED
+    events = (RunStore(root, child.run_id).root / "events.jsonl").read_text()
+    assert '"event": "restart_review_required"' in events
+    assert '"event": "restart_evidence_reused"' in events
 
 
 def test_restart_review_shortcut_runs_only_review_and_verification(tmp_path, monkeypatch):

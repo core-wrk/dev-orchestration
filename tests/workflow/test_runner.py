@@ -14,6 +14,7 @@ from dev_orchestration.context.assembler import Category, ContextContractError
 from dev_orchestration.domain.enums import RunState, Tier
 from dev_orchestration.domain.run import RunManifest
 from dev_orchestration.git.repo import GitRepo
+from dev_orchestration.workflow.checkpoints import input_hashes
 from dev_orchestration.workflow.cloud import link_cloud_session
 from dev_orchestration.workflow.recovery import ResumeRefused, approve_run, resume_run
 from tests.workflow.run_helpers import execute_run
@@ -398,6 +399,251 @@ def test_trivial_executor_receives_request_scope_criteria_and_constraints(tmp_pa
     rendered = executor.context.render()
     assert "fix a typo" in rendered and "Protected constraints" in rendered
     assert (outcome.store_root / "planning" / "task-contract.md").is_file()
+
+
+def test_opted_in_trivial_run_discovers_declared_sources_and_supplies_report(tmp_path):
+    git = repo(tmp_path)
+    (git.root / "docs" / "specs").mkdir(parents=True)
+    (git.root / "docs" / "specs" / "architecture.md").write_text(
+        "Current shared interface: CustomerId.\n"
+    )
+    subprocess.run(["git", "-C", str(git.root), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(git.root), "commit", "-qm", "architecture"], check=True)
+    config = ProjectConfig.model_validate(
+        CONFIG.model_dump(mode="json")
+        | {
+            "context": {
+                "persistent": [],
+                "on_demand": {"specifications": "docs/specs"},
+                "dependency_discovery": True,
+            }
+        }
+    )
+    report = {
+        "findings": [
+            {
+                "relationship": "shared_contract",
+                "source": "docs/specs/architecture.md",
+                "excerpt": "CustomerId",
+                "current_behavior": "A caller uses this interface.",
+                "future_work": "The task may affect it.",
+                "approval_status": "not_applicable",
+                "effect_on_task": "Preserve caller compatibility.",
+            }
+        ],
+        "searched_sources": [],
+        "inaccessible_sources": [],
+        "incomplete_searches": [],
+        "budget_exhausted": False,
+    }
+    scripted = script(tier="trivial")
+    scripted["dependency_analyst"] = [report]
+    adapter = Scripted(scripted)
+    roles = registry(adapter)
+    roles = RoleRegistry(
+        roles={
+            **roles.roles,
+            "dependency_analyst": RoleConfig(adapter="fake", model="m"),
+        },
+        adapters=roles.adapters,
+    )
+
+    outcome = execute_run(
+        git, config, roles, "make the interface change", tmp_path / "wt", CRITERIA
+    )
+
+    saved = json.loads((outcome.store_root / "dependency-report.json").read_text())
+    store = RunStore(git.root, outcome.run_id)
+    worker = next(item for item in adapter.requests if item.role == "implementation_worker")
+    verifier = next(item for item in adapter.requests if item.role == "verifier")
+    assert outcome.final_state is RunState.COMPLETE_LOCAL
+    assert "dependency_analyst" in adapter.seen
+    assert "CustomerId" in worker.context.render() and "CustomerId" in verifier.context.render()
+    assert saved["source_identities"][0]["path"] == "docs/specs/architecture.md"
+    assert "dependency-report.json" in store.latest_checkpoint()["artifacts"]
+    (git.root / "docs" / "specs" / "architecture.md").write_text("Changed contract.\n")
+    with pytest.raises(CheckpointError, match="changed after discovery"):
+        input_hashes(store, roles)
+    input_hashes(store, roles, allow_changed_dependency_sources=True)
+
+
+def test_resume_loads_dependency_report_and_discovers_after_classification(tmp_path):
+    class PauseFirstPlanner(Scripted):
+        paused = False
+
+        def run(self, request):
+            if request.role == "planner" and not self.paused:
+                self.paused = True
+                self.seen.append(request.role)
+                self.requests.append(request)
+                raise AgentTimeoutError(request.role, 7, "fake")
+            return super().run(request)
+
+    git = repo(tmp_path)
+    (git.root / "docs" / "specs").mkdir(parents=True)
+    (git.root / "docs" / "specs" / "contract.md").write_text("Shared token: AccountId.\n")
+    subprocess.run(["git", "-C", str(git.root), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(git.root), "commit", "-qm", "contract"], check=True)
+    config = ProjectConfig.model_validate(
+        CONFIG.model_dump(mode="json")
+        | {
+            "context": {
+                "persistent": [],
+                "on_demand": {"specifications": "docs/specs"},
+                "dependency_discovery": True,
+            }
+        }
+    )
+    report = {
+        "findings": [
+            {
+                "relationship": "shared_contract",
+                "source": "docs/specs/contract.md",
+                "excerpt": "AccountId",
+                "current_behavior": "The contract names AccountId.",
+                "future_work": "The task may touch this contract.",
+                "approval_status": "not_applicable",
+                "effect_on_task": "Preserve compatibility.",
+            }
+        ],
+        "searched_sources": [],
+        "inaccessible_sources": [],
+        "incomplete_searches": [],
+        "budget_exhausted": False,
+    }
+    scripted = script()
+    scripted["dependency_analyst"] = [report]
+    adapter = PauseFirstPlanner(scripted)
+    roles = registry(adapter)
+    roles = RoleRegistry(
+        roles={
+            **roles.roles,
+            "dependency_analyst": RoleConfig(adapter="fake", model="m"),
+        },
+        adapters=roles.adapters,
+    )
+
+    paused = execute_run(git, config, roles, "update account behavior", tmp_path / "wt", CRITERIA)
+    assert paused.final_state is RunState.PAUSED_INTERRUPTED
+    assert adapter.seen.index("classifier") < adapter.seen.index("dependency_analyst")
+
+    resumed = resume_run(git, config, roles, paused.run_id)
+
+    assert resumed.final_state is RunState.COMPLETE_LOCAL
+    planner_requests = [item for item in adapter.requests if item.role == "planner"]
+    assert len(planner_requests) == 2
+    assert "AccountId" in planner_requests[-1].context.render()
+
+
+def test_imported_plan_is_reviewed_with_dependency_report(tmp_path):
+    # The fixture supplies semantic findings; this asserts framework propagation, not model recall.
+    git = repo(tmp_path)
+    (git.root / "src" / "app.py").write_text('customer_key = "CustomerKey"\n')
+    (git.root / "docs" / "plans").mkdir(parents=True)
+    (git.root / "docs" / "plans" / "epic-a.md").write_text(
+        "Epic A links to epic-b.md and shares CustomerId with the existing code.\n"
+    )
+    (git.root / "docs" / "plans" / "epic-b.md").write_text(
+        "Approved future work: keep CustomerId stable.\n"
+    )
+    (git.root / "docs" / "plans" / "epic-c.md").write_text("Draft proposal: replace CustomerId.\n")
+    subprocess.run(["git", "-C", str(git.root), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(git.root), "commit", "-qm", "plans"], check=True)
+    config = ProjectConfig.model_validate(
+        CONFIG.model_dump(mode="json")
+        | {
+            "context": {
+                "persistent": [],
+                "on_demand": {"plans": "docs/plans", "code": "src"},
+                "dependency_discovery": True,
+            }
+        }
+    )
+    report = {
+        "findings": [
+            {
+                "relationship": "shared_contract",
+                "source": "docs/plans/epic-a.md",
+                "excerpt": "shares CustomerId",
+                "current_behavior": "Existing code uses CustomerId.",
+                "future_work": "Epic B keeps that name stable.",
+                "approval_status": "approved",
+                "effect_on_task": "Preserve the interface.",
+            },
+            {
+                "relationship": "prerequisite",
+                "source": "docs/plans/epic-b.md",
+                "excerpt": "Approved future work",
+                "current_behavior": "The follow-up is not implemented yet.",
+                "future_work": "Approved work depends on a stable CustomerId.",
+                "approval_status": "approved",
+                "effect_on_task": "Keep this prerequisite ordered after the current change.",
+            },
+            {
+                "relationship": "conflict",
+                "source": "src/app.py",
+                "excerpt": "CustomerKey",
+                "current_behavior": "Current code exposes CustomerKey.",
+                "future_work": "The task changes callers to CustomerId.",
+                "approval_status": "not_applicable",
+                "effect_on_task": "Update the implementation and callers together.",
+            },
+            {
+                "relationship": "advisory",
+                "source": "docs/plans/epic-c.md",
+                "excerpt": "Draft proposal",
+                "current_behavior": "Existing code uses CustomerId.",
+                "future_work": "Draft suggests replacing it.",
+                "approval_status": "draft",
+                "effect_on_task": "No required change.",
+            },
+        ],
+        "searched_sources": [],
+        "inaccessible_sources": [],
+        "incomplete_searches": [],
+        "budget_exhausted": False,
+    }
+    scripted = script()
+    scripted["dependency_analyst"] = [report]
+    adapter = Scripted(scripted)
+    roles = registry(adapter)
+    roles = RoleRegistry(
+        roles={
+            **roles.roles,
+            "dependency_analyst": RoleConfig(adapter="fake", model="m"),
+        },
+        adapters=roles.adapters,
+    )
+    external_plan = tmp_path / "external-plan.md"
+    external_plan.write_text("# Imported plan\n")
+
+    outcome = execute_run(
+        git,
+        config,
+        roles,
+        "implement the approved plan",
+        tmp_path / "wt",
+        CRITERIA,
+        external_plan=external_plan,
+    )
+
+    reviewer = next(item for item in adapter.requests if item.role == "plan_reviewer")
+    implementation_reviewer = next(
+        item for item in adapter.requests if item.role == "implementation_reviewer"
+    )
+    saved = json.loads((outcome.store_root / "dependency-report.json").read_text())
+    assert outcome.final_state is RunState.COMPLETE_LOCAL
+    assert "planner" not in adapter.seen and "dependency_analyst" in adapter.seen
+    assert "Draft proposal" in reviewer.context.render()
+    assert "Draft proposal" in implementation_reviewer.context.render()
+    assert "CustomerKey" in implementation_reviewer.context.render()
+    assert "approved" in implementation_reviewer.context.render()
+    assert {item["path"] for item in saved["source_identities"]} == {
+        "docs/plans/epic-a.md",
+        "docs/plans/epic-b.md",
+        "docs/plans/epic-c.md",
+        "src/app.py",
+    }
 
 
 def test_implementing_declared_spec_gets_standard_path_and_classifier_context(tmp_path):

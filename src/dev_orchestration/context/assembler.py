@@ -39,6 +39,7 @@ class Category(StrEnum):
     BUILDER_NARRATION = "builder_narration"
     CONTEXT_NOTES = "context_notes"
     PRIOR_FAILURES = "prior_failures"
+    DEPENDENCY_REPORT = "dependency_report"
 
 
 STAGE_CONTRACTS: dict[str, frozenset[Category]] = {
@@ -51,6 +52,9 @@ STAGE_CONTRACTS: dict[str, frozenset[Category]] = {
             Category.CONTEXT_NOTES,
         }
     ),
+    "dependency_discovery": frozenset(
+        {Category.REQUEST, Category.INVARIANTS, Category.REFERENCES, Category.CONTEXT_NOTES}
+    ),
     "planning": frozenset(
         {
             Category.REQUEST,
@@ -60,6 +64,7 @@ STAGE_CONTRACTS: dict[str, frozenset[Category]] = {
             Category.REFERENCES,
             Category.SCOPE_FENCE,
             Category.CONTEXT_NOTES,
+            Category.DEPENDENCY_REPORT,
         }
     ),
     "plan_review": frozenset(
@@ -71,6 +76,7 @@ STAGE_CONTRACTS: dict[str, frozenset[Category]] = {
             Category.SCOPE_FENCE,
             Category.PROFILE_CONSTRAINTS,
             Category.CONTEXT_NOTES,
+            Category.DEPENDENCY_REPORT,
         }
     ),
     "reconciliation": frozenset(
@@ -81,6 +87,7 @@ STAGE_CONTRACTS: dict[str, frozenset[Category]] = {
             Category.PROPOSED_PLAN,
             Category.REVIEW_FINDINGS,
             Category.CONTEXT_NOTES,
+            Category.DEPENDENCY_REPORT,
         }
     ),
     "human_approval": frozenset({Category.APPROVAL_SUMMARY, Category.CONTEXT_NOTES}),
@@ -93,6 +100,7 @@ STAGE_CONTRACTS: dict[str, frozenset[Category]] = {
             Category.SCOPE_FENCE,
             Category.WORKTREE,
             Category.CONTEXT_NOTES,
+            Category.DEPENDENCY_REPORT,
             Category.PRIOR_FAILURES,
         }
     ),
@@ -105,6 +113,7 @@ STAGE_CONTRACTS: dict[str, frozenset[Category]] = {
             Category.PROFILE_CONSTRAINTS,
             Category.CONTEXT_NOTES,
             Category.PRIOR_FAILURES,
+            Category.DEPENDENCY_REPORT,
         }
     ),
     "remediation": frozenset(
@@ -115,6 +124,7 @@ STAGE_CONTRACTS: dict[str, frozenset[Category]] = {
             Category.DIFF,
             Category.VALIDATION_EVIDENCE,
             Category.CONTEXT_NOTES,
+            Category.DEPENDENCY_REPORT,
             Category.PRIOR_FAILURES,
         }
     ),
@@ -127,6 +137,7 @@ STAGE_CONTRACTS: dict[str, frozenset[Category]] = {
             Category.VALIDATION_EVIDENCE,
             Category.UNRESOLVED_FINDINGS,
             Category.CONTEXT_NOTES,
+            Category.DEPENDENCY_REPORT,
         }
     ),
 }

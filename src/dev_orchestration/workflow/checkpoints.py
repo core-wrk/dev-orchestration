@@ -24,10 +24,21 @@ def _within(root: Path, name: str) -> Path:
 
 
 def project_config_matches(saved: dict, current: ProjectConfig) -> bool:
-    """Compare saved config while accepting omission of the empty validation file default."""
+    """Compare saved config while accepting legacy omissions of false/empty defaults."""
     normalized = dict(saved)
     normalized.setdefault("validation_files", [])
+    context = dict(normalized.get("context", {}))
+    context.setdefault("dependency_discovery", False)
+    normalized["context"] = context
     return normalized == current.model_dump(mode="json")
+
+
+def dependency_discovery_default_omission(saved: dict, current: ProjectConfig) -> bool:
+    """Recognize old saved policy that predates the default-disabled discovery option."""
+    return (
+        "dependency_discovery" not in saved.get("context", {})
+        and not current.context.dependency_discovery
+    )
 
 
 def validation_files_default_omission(repo: GitRepo, base_commit: str) -> bool:
@@ -53,6 +64,7 @@ def input_hashes(
     registry: RoleRegistry,
     *,
     manifest_overrides: dict[str, object] | None = None,
+    allow_changed_dependency_sources: bool = False,
 ) -> dict[str, str]:
     manifest = store.read_manifest()
     fields = manifest.model_dump(
@@ -146,6 +158,46 @@ def input_hashes(
             if source.get("sha256") != digest:
                 raise CheckpointError(f"classification source {name} changed after selection")
             values[f"classification_source:{name}"] = digest
+    dependency_path = store.root / "dependency-report.json"
+    if dependency_path.is_file():
+        values["dependency-report.json"] = _digest(dependency_path.read_bytes())
+        try:
+            dependency = json.loads(dependency_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise CheckpointError("saved dependency report is invalid") from exc
+        if dependency.get("declared_sources") is not None:
+            from dev_orchestration.workflow.dependencies import dependency_sources
+
+            config = ProjectConfig.model_validate(manifest.config_layers[0])
+            _, inventory = dependency_sources(store.repo_root, config)
+            current_identity = _digest(
+                json.dumps(
+                    {
+                        "declared_sources": inventory["declared_sources"],
+                        "sources": inventory["sources"],
+                        "inaccessible_sources": inventory["inaccessible_sources"],
+                    },
+                    sort_keys=True,
+                ).encode()
+            )
+            if current_identity != dependency.get("source_inventory_identity"):
+                if not allow_changed_dependency_sources:
+                    raise CheckpointError(
+                        "authorized dependency source inventory changed after discovery"
+                    )
+                values["dependency_inventory"] = current_identity
+            else:
+                values["dependency_inventory"] = current_identity
+        for source in dependency.get("source_identities", []):
+            name, expected = source.get("path"), source.get("sha256")
+            if not isinstance(name, str) or not isinstance(expected, str):
+                raise CheckpointError("dependency source identity is invalid")
+            path = _within(store.repo_root, name)
+            if not path.is_file() or _digest(path.read_bytes()) != expected:
+                if allow_changed_dependency_sources:
+                    continue
+                raise CheckpointError(f"dependency source {name} changed after discovery")
+            values[f"dependency_source:{name}"] = expected
     if manifest.external_plan_artifact:
         path = store.root / manifest.external_plan_artifact
         if not path.is_file():
@@ -189,6 +241,9 @@ def record_stage(
     prior = store.root / "execution/prior-failures.json"
     if prior.is_file() and "execution/prior-failures.json" not in artifacts:
         artifacts = [*artifacts, "execution/prior-failures.json"]
+    dependency_report = store.root / "dependency-report.json"
+    if dependency_report.is_file() and "dependency-report.json" not in artifacts:
+        artifacts = [*artifacts, "dependency-report.json"]
     return store.checkpoint(
         next_stage=next_stage,
         artifacts=artifacts,

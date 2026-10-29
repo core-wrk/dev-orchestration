@@ -1,6 +1,7 @@
 """Provider-neutral workflow stages."""
 
 import difflib
+import hashlib
 import json
 import re
 from dataclasses import replace
@@ -19,12 +20,14 @@ from dev_orchestration.context.packet import ContextRef
 from dev_orchestration.domain.enums import ProjectClass
 from dev_orchestration.domain.findings import (
     Classification,
+    DependencyReport,
     Finding,
     ReviewResult,
     Verification,
     next_finding_id,
 )
 from dev_orchestration.roles.loader import load_role_prompt
+from dev_orchestration.workflow.dependencies import render_dependency_context
 from dev_orchestration.workflow.invoke import AgentInvocationError, invoke_structured
 from dev_orchestration.workflow.retry_feedback import context_ref as prior_failures_context
 from dev_orchestration.workflow.validation import ValidationOutcome
@@ -58,6 +61,15 @@ def _criteria_context(criteria: list[str]) -> ContextRef:
         path=None,
         content=json.dumps(criteria, ensure_ascii=False),
     )
+
+
+def _dependency_guidance(report: str) -> str:
+    try:
+        return render_dependency_context(json.loads(report))
+    except (ValueError, TypeError) as exc:
+        if "24,000 UTF-8 bytes" in str(exc):
+            raise AgentInvocationError(str(exc)) from exc
+        raise AgentInvocationError("saved dependency report is invalid") from exc
 
 
 def _agent_result_json(result: AgentResult) -> dict:
@@ -155,6 +167,75 @@ def classify(
     return result
 
 
+def discover_dependencies(
+    registry: RoleRegistry,
+    request_text: str,
+    inventory: str,
+    metadata: dict,
+    invariants: list[ContextRef],
+    store: RunStore,
+) -> str:
+    packet = assemble(
+        "dependency_discovery",
+        [
+            ContextRef(label=Category.REQUEST, path=None, content=request_text),
+            *invariants,
+            ContextRef(
+                label=Category.REFERENCES, path="dependency-source-inventory", content=inventory
+            ),
+        ],
+    )
+    request = _request(registry, "dependency_analyst", store, packet, store.repo_root)
+    report = invoke_structured(
+        registry.adapter_for("dependency_analyst"),
+        request,
+        DependencyReport,
+        store.root / "schemas",
+    )
+    supplied = metadata.get("supplied_excerpts", {})
+    eligible = set(supplied)
+    for finding in report.findings:
+        excerpt = finding.excerpt.strip()
+        if finding.source not in eligible or not excerpt or excerpt not in supplied[finding.source]:
+            raise AgentInvocationError(
+                f"dependency analyst cited unsupported evidence from {finding.source!r}"
+            )
+    report = report.model_copy(
+        update={
+            "searched_sources": [source["path"] for source in metadata["prompt_sources"]],
+            "inaccessible_sources": list(
+                dict.fromkeys(metadata["inaccessible_sources"] + report.inaccessible_sources)
+            ),
+            "budget_exhausted": metadata["budget_exhausted"],
+            "incomplete_searches": report.incomplete_searches
+            + (["source inventory byte budget exhausted"] if metadata["budget_exhausted"] else []),
+        }
+    )
+    artifact = {
+        **report.model_dump(mode="json"),
+        "source_identities": metadata["sources"],
+        "declared_sources": metadata["declared_sources"],
+        "inaccessible_sources": list(
+            dict.fromkeys(metadata["inaccessible_sources"] + report.inaccessible_sources)
+        ),
+        "source_inventory_identity": hashlib.sha256(
+            json.dumps(
+                {
+                    "declared_sources": metadata["declared_sources"],
+                    "sources": metadata["sources"],
+                    "inaccessible_sources": metadata["inaccessible_sources"],
+                },
+                sort_keys=True,
+            ).encode()
+        ).hexdigest(),
+        "inventory_budget_bytes": metadata["budget_bytes"],
+        "inventory_consumed_bytes": metadata["consumed_bytes"],
+    }
+    store.write_json_artifact("dependency-report.json", artifact, immutable=True)
+    render_dependency_context(artifact)
+    return json.dumps(artifact, ensure_ascii=False)
+
+
 def plan(
     registry: RoleRegistry,
     brief: str,
@@ -163,6 +244,7 @@ def plan(
     store: RunStore,
     scope_fence: ContextRef | None = None,
     acceptance_criteria: list[str] | None = None,
+    dependency_report: str = "",
 ) -> Path:
     packet = assemble(
         "planning",
@@ -173,6 +255,17 @@ def plan(
             *invariants,
             *references,
             *([scope_fence] if scope_fence is not None else []),
+            *(
+                [
+                    ContextRef(
+                        label=Category.DEPENDENCY_REPORT,
+                        path="dependency-report.json",
+                        content=_dependency_guidance(dependency_report),
+                    )
+                ]
+                if dependency_report
+                else []
+            ),
         ],
     )
     request = _request(registry, "planner", store, packet, store.repo_root)
@@ -194,6 +287,7 @@ def review_plan(
     store: RunStore,
     acceptance_criteria: list[str] | None = None,
     scope_fence: ContextRef | None = None,
+    dependency_report: str = "",
 ) -> ReviewResult:
     packet = assemble(
         "plan_review",
@@ -204,6 +298,17 @@ def review_plan(
             ContextRef(label=Category.PROPOSED_PLAN, path=None, content=plan_text),
             *profile_constraints,
             *([scope_fence] if scope_fence is not None else []),
+            *(
+                [
+                    ContextRef(
+                        label=Category.DEPENDENCY_REPORT,
+                        path="dependency-report.json",
+                        content=_dependency_guidance(dependency_report),
+                    )
+                ]
+                if dependency_report
+                else []
+            ),
         ],
     )
     request = _request(registry, "plan_reviewer", store, packet, store.repo_root)
@@ -298,6 +403,7 @@ def reconcile(
     request_text: str = "",
     acceptance_criteria: list[str] | None = None,
     scope_fence: ContextRef | None = None,
+    dependency_report: str = "",
 ) -> Path:
     packet = assemble(
         "reconciliation",
@@ -305,6 +411,17 @@ def reconcile(
             ContextRef(label=Category.REQUEST, path=None, content=request_text),
             _criteria_context(acceptance_criteria or []),
             *([scope_fence] if scope_fence is not None else []),
+            *(
+                [
+                    ContextRef(
+                        label=Category.DEPENDENCY_REPORT,
+                        path="dependency-report.json",
+                        content=_dependency_guidance(dependency_report),
+                    )
+                ]
+                if dependency_report
+                else []
+            ),
             ContextRef(label=Category.PROPOSED_PLAN, path=None, content=plan_text),
             ContextRef(
                 label=Category.REVIEW_FINDINGS,
@@ -362,6 +479,7 @@ def execute(
     store: RunStore,
     profile_constraints: list[ContextRef] | None = None,
     scope_fence: ContextRef | None = None,
+    dependency_report: str = "",
 ) -> AgentResult:
     packet = assemble(
         "execution",
@@ -373,6 +491,17 @@ def execute(
             *([scope_fence] if scope_fence is not None else []),
             ContextRef(label=Category.WORKTREE, path=None, content=str(worktree)),
             *_prior_failures(store),
+            *(
+                [
+                    ContextRef(
+                        label=Category.DEPENDENCY_REPORT,
+                        path="dependency-report.json",
+                        content=_dependency_guidance(dependency_report),
+                    )
+                ]
+                if dependency_report
+                else []
+            ),
         ],
     )
     request = _request(registry, "implementation_worker", store, packet, worktree)
@@ -403,6 +532,7 @@ def review_implementation(
     profile_constraints: list[ContextRef],
     store: RunStore,
     worktree: Path | None = None,
+    dependency_report: str = "",
 ) -> ReviewResult:
     packet = assemble(
         "implementation_review",
@@ -416,6 +546,17 @@ def review_implementation(
             ),
             *profile_constraints,
             *_prior_failures(store),
+            *(
+                [
+                    ContextRef(
+                        label=Category.DEPENDENCY_REPORT,
+                        path="dependency-report.json",
+                        content=_dependency_guidance(dependency_report),
+                    )
+                ]
+                if dependency_report
+                else []
+            ),
         ],
     )
     request = _request(
@@ -451,6 +592,7 @@ def remediate(
     worktree: Path,
     store: RunStore,
     cycle: int = 1,
+    dependency_report: str = "",
 ) -> AgentResult:
     if cycle > MAX_REMEDIATION_CYCLES:
         ids = [finding.id for finding in blocking]
@@ -472,6 +614,17 @@ def remediate(
             ContextRef(label=Category.APPROVED_PLAN, path=None, content=approved_plan),
             ContextRef(label=Category.CURRENT_STATE, path=None, content=current_state),
             *_prior_failures(store),
+            *(
+                [
+                    ContextRef(
+                        label=Category.DEPENDENCY_REPORT,
+                        path="dependency-report.json",
+                        content=_dependency_guidance(dependency_report),
+                    )
+                ]
+                if dependency_report
+                else []
+            ),
         ],
     )
     request = _request(registry, "implementation_worker", store, packet, worktree)
@@ -492,6 +645,7 @@ def repair_validation(
     outcomes: list[ValidationOutcome],
     worktree: Path,
     store: RunStore,
+    dependency_report: str = "",
 ) -> AgentResult:
     """Give the worker the failed command evidence for the run's sole repair."""
     failed = [outcome for outcome in outcomes if not outcome.passed]
@@ -508,6 +662,17 @@ def repair_validation(
             ContextRef(label=Category.DIFF, path=None, content=diff),
             ContextRef(label=Category.VALIDATION_EVIDENCE, path=None, content=evidence),
             *_prior_failures(store),
+            *(
+                [
+                    ContextRef(
+                        label=Category.DEPENDENCY_REPORT,
+                        path="dependency-report.json",
+                        content=_dependency_guidance(dependency_report),
+                    )
+                ]
+                if dependency_report
+                else []
+            ),
         ],
     )
     request = _request(registry, "implementation_worker", store, packet, worktree)
@@ -536,6 +701,7 @@ def verify(
     findings: list[Finding],
     store: RunStore,
     worktree: Path | None = None,
+    dependency_report: str = "",
 ) -> Verification:
     previous = [
         int(path.stem.rsplit("-v", 1)[1])
@@ -576,6 +742,17 @@ def verify(
                     [finding.model_dump(mode="json") for finding in findings],
                     indent=2,
                 ),
+            ),
+            *(
+                [
+                    ContextRef(
+                        label=Category.DEPENDENCY_REPORT,
+                        path="dependency-report.json",
+                        content=_dependency_guidance(dependency_report),
+                    )
+                ]
+                if dependency_report
+                else []
             ),
         ],
     )

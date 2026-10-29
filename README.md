@@ -37,3 +37,15 @@ Restart from validation also accepts changes to the command text of existing
 validation gates. Gate names, tiers, timeouts, input files, scope, roles,
 approval settings, and protected policy must remain unchanged. The linked run
 records the old and new commands and produces fresh validation results.
+
+## Dependency discovery
+
+Repositories can opt in with `context.dependency_discovery: true` in
+`.ai/project.yaml`. The read-only dependency analyst runs after classification,
+including for trivial tasks and imported plans. It searches only the files named
+by `context.persistent` and files under declared `context.on_demand` roots, within
+a bounded source budget. Its report records source hashes and is supplied to
+planning, review, implementation, repair, and verification. Discovery can miss
+relevant work; budget limits and inaccessible sources are reported, and findings
+require independent evidence before they can block a run. The analyst uses the
+verifier role binding unless `roles.dependency_analyst` is configured.

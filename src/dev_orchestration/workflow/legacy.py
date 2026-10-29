@@ -15,7 +15,12 @@ from dev_orchestration.domain.findings import ReviewResult
 from dev_orchestration.domain.run import GitBlock
 from dev_orchestration.git.repo import GitRepo
 from dev_orchestration.scope import ScopeFence
-from dev_orchestration.workflow.checkpoints import input_hashes
+from dev_orchestration.workflow.bootstrap import resolve_run_policy
+from dev_orchestration.workflow.checkpoints import (
+    dependency_discovery_default_omission,
+    input_hashes,
+    project_config_matches,
+)
 from dev_orchestration.workflow.scope_check import enforce_fence
 from dev_orchestration.workflow.snapshot import capture_snapshot
 
@@ -156,8 +161,8 @@ def recover_legacy(
             raise LegacyRecoveryError(f"old run is {manifest.status}; it cannot recover")
         if source.active_provider_alive():
             raise LegacyRecoveryError("recorded provider process is still alive")
-        if not manifest.config_layers or manifest.config_layers[0] != config.model_dump(
-            mode="json"
+        if not manifest.config_layers or not project_config_matches(
+            manifest.config_layers[0], config
         ):
             raise LegacyRecoveryError("project configuration changed")
         if manifest.approval_required and not (source.root / "approval/approved.json").is_file():
@@ -219,6 +224,12 @@ def recover_legacy(
                     branch=manifest.git.branch,
                     worktree=str(worktree),
                 )
+            )
+        if dependency_discovery_default_omission(manifest.config_layers[0], config):
+            normalized_layers = [config.model_dump(mode="json"), *manifest.config_layers[1:]]
+            target.update_manifest(
+                config_layers=normalized_layers,
+                resolved_config=resolve_run_policy(normalized_layers),
             )
         if not terminal:
             target.update_manifest(status=RunState.PAUSED_INTERRUPTED)

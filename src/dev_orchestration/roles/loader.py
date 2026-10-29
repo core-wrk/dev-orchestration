@@ -11,6 +11,7 @@ ROLE_TEMPLATES = frozenset(
         "implementation_worker",
         "implementation_reviewer",
         "verifier",
+        "dependency_analyst",
     }
 )
 

@@ -82,7 +82,7 @@ class RoleRegistry:
         """
         binding = self.binding_for(role)
         allowed = None
-        if role in READ_ONLY_ROLES:
+        if role in READ_ONLY_ROLES or role == "dependency_analyst":
             adapter = self.adapter_for(role)
             if not adapter.supports("read_only_review"):
                 raise ReadOnlyRoleUnsupportedError(
@@ -115,6 +115,10 @@ def default_registry(
     roles.update(global_config.roles)
     if project_config is not None:
         roles.update(project_config.roles)
+    # Dependency analysis inherits the independently configured verifier binding
+    # unless a repository explicitly supplies its own role binding.
+    if project_config is not None and project_config.context.dependency_discovery:
+        roles.setdefault("dependency_analyst", roles["verifier"])
     codex_override = None
     if global_config.codex_binary:
         codex_override = Path(global_config.codex_binary).expanduser()

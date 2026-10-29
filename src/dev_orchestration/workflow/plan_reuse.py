@@ -23,6 +23,7 @@ def _review_inputs(
     repo_root: Path,
     plan_bytes: bytes,
     profile_constraints: list | None = None,
+    dependency_report: dict | None = None,
 ) -> dict:
     roles = {}
     for role in ("plan_reviewer", "plan_reconciler"):
@@ -57,6 +58,7 @@ def _review_inputs(
         "resolved_policy": manifest.resolved_config,
         "context": context,
         "review_roles": roles,
+        "dependency_report": dependency_report,
     }
 
 
@@ -65,10 +67,13 @@ def create_receipt(
     plan_path: Path,
     review_path: Path,
     profile_constraints: list | None = None,
+    dependency_report: dict | None = None,
 ) -> dict:
     """Create immutable evidence for the accepted final review."""
     manifest = store.read_manifest()
-    inputs = _review_inputs(manifest, store.repo_root, plan_path.read_bytes(), profile_constraints)
+    inputs = _review_inputs(
+        manifest, store.repo_root, plan_path.read_bytes(), profile_constraints, dependency_report
+    )
     review_name = review_path.relative_to(store.root).as_posix()
     review_digest = _sha(review_path.read_bytes())
     receipt = {
@@ -160,12 +165,17 @@ def match_source(
     current: RunStore,
     plan_bytes: bytes,
     profile_constraints: list | None = None,
+    dependency_report: dict | None = None,
 ) -> tuple[bool, str, dict | None]:
     receipt, reviewed_bytes = validate_source(source)
     if receipt is None or reviewed_bytes is None:
         return False, "source has no plan review receipt; review will run", None
     expected = _review_inputs(
-        current.read_manifest(), current.repo_root, plan_bytes, profile_constraints
+        current.read_manifest(),
+        current.repo_root,
+        plan_bytes,
+        profile_constraints,
+        dependency_report,
     )
     mismatches = [key for key, value in expected.items() if receipt.get(key) != value]
     if mismatches:

@@ -85,6 +85,7 @@ class ContextPolicy(BaseModel):
     include_prior_artifacts: Literal["relevant_only", "none"] = "relevant_only"
     conflict_policy: Literal["fail_closed", "escalate"] = "fail_closed"
     persistent_budget_bytes: int = 8192
+    dependency_discovery: bool = False
 
 
 class ApprovalPolicy(BaseModel):

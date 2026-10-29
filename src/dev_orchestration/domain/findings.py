@@ -80,6 +80,28 @@ class Classification(BaseModel):
         return self
 
 
+class DependencyFinding(BaseModel):
+    model_config = {"frozen": True, "extra": "forbid"}
+
+    relationship: Literal["prerequisite", "shared_contract", "conflict", "advisory"]
+    source: str
+    excerpt: str
+    current_behavior: str
+    future_work: str
+    approval_status: Literal["approved", "draft", "ambiguous", "not_applicable"]
+    effect_on_task: str
+
+
+class DependencyReport(BaseModel):
+    model_config = {"frozen": True, "extra": "forbid"}
+
+    findings: list[DependencyFinding] = Field(default_factory=list)
+    searched_sources: list[str] = Field(default_factory=list)
+    inaccessible_sources: list[str] = Field(default_factory=list)
+    incomplete_searches: list[str] = Field(default_factory=list)
+    budget_exhausted: bool = False
+
+
 class AcceptanceVerdict(BaseModel):
     model_config = {"frozen": True, "extra": "forbid"}
 

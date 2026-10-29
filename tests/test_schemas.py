@@ -2,15 +2,27 @@ import json
 
 import pytest
 
-from dev_orchestration.domain.findings import Classification, ReviewResult, Verification
+from dev_orchestration.domain.findings import (
+    Classification,
+    DependencyReport,
+    ReviewResult,
+    Verification,
+)
 from dev_orchestration.schemas import SCHEMA_MODELS, schema_for, write_schema
 
 
 def test_every_structured_stage_has_a_schema():
-    assert set(SCHEMA_MODELS) == {"classification", "review_result", "verification"}
+    assert set(SCHEMA_MODELS) == {
+        "classification",
+        "review_result",
+        "verification",
+        "dependency_report",
+    }
 
 
-@pytest.mark.parametrize("name", ["classification", "review_result", "verification"])
+@pytest.mark.parametrize(
+    "name", ["classification", "review_result", "verification", "dependency_report"]
+)
 def test_schema_is_generated_from_the_model_not_hand_written(name, tmp_path):
     model = SCHEMA_MODELS[name]
     path = write_schema(model, tmp_path)
@@ -24,7 +36,7 @@ def test_schema_forbids_extra_keys_recursively():
 
 
 def test_schema_requires_every_provider_object_property():
-    for model in (Classification, ReviewResult, Verification):
+    for model in (Classification, ReviewResult, Verification, DependencyReport):
         schema = schema_for(model)
         objects = [schema, *schema.get("$defs", {}).values()]
         for object_schema in objects:
