@@ -22,6 +22,8 @@ from dev_orchestration.artifacts.events import append_event
 from dev_orchestration.domain.enums import RunState, Tier
 from dev_orchestration.domain.run import (
     MAX_REMEDIATION_CYCLES,
+    MAX_VALIDATION_REPAIRS,
+    MAX_VERIFICATION_REPAIRS,
     RepairBudget,
     RunManifest,
     StageActor,
@@ -75,6 +77,15 @@ _STOP_DIAGNOSTICS = {
     ),
     "restart_review_findings": ("reviewer rejected", "check-only review found blocking findings"),
     "verification_rejected": ("reviewer rejected", "final verification rejected the change"),
+    "verification_exhausted": (
+        "reviewer rejected",
+        "final verification repair budget exhausted",
+    ),
+    "verification_escalated": ("reviewer rejected", "final verification requested escalation"),
+    "repair_scope_unsafe": (
+        "reviewer rejected",
+        "rejection named no file the run is allowed to change",
+    ),
     "worker_no_changes": ("model behaviour", "worker produced no change"),
     "remediation_no_progress": ("model behaviour", "repair produced no change"),
     "scope_violation": ("model behaviour", "work exceeded the approved scope"),
@@ -114,9 +125,9 @@ def _stop_record(manifest: RunManifest, stage: RunState, code: str) -> StopRecor
         "plan_review": 0
         if manifest.restart_mode or manifest.tier is Tier.TRIVIAL
         else MAX_REMEDIATION_CYCLES,
-        "validation": 0 if check_only else 1,
+        "validation": 0 if check_only else (1 if manifest.restart_mode else MAX_VALIDATION_REPAIRS),
         "implementation_review": 0 if check_only else MAX_REMEDIATION_CYCLES,
-        "final_verification": 0,
+        "final_verification": 0 if manifest.restart_mode else MAX_VERIFICATION_REPAIRS,
     }
     repairs = {}
     for gate, allowed in limits.items():

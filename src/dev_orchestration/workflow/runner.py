@@ -22,7 +22,14 @@ from dev_orchestration.context.assembler import Category, ContextContractError, 
 from dev_orchestration.context.packet import ContextRef
 from dev_orchestration.domain.enums import Outcome, RunState, Tier
 from dev_orchestration.domain.findings import Verification, verification_allows_completion
-from dev_orchestration.domain.run import GitBlock, PauseRecord, RoleBinding, StageActor
+from dev_orchestration.domain.run import (
+    MAX_VALIDATION_REPAIRS,
+    MAX_VERIFICATION_REPAIRS,
+    GitBlock,
+    PauseRecord,
+    RoleBinding,
+    StageActor,
+)
 from dev_orchestration.git.repo import EmptySnapshotError, GitCommandError, GitRepo
 from dev_orchestration.git.worktree import remove_worktree
 from dev_orchestration.scope import ScopeFence
@@ -33,6 +40,20 @@ from dev_orchestration.workflow.bootstrap import (
     resolve_runtime_context,
 )
 from dev_orchestration.workflow.checkpoints import record_stage
+from dev_orchestration.workflow.contract import (
+    CONTRACT_ARTIFACT,
+    PRECHECK_NAME,
+    NoSafeRepairScope,
+    file_digests,
+    load_contract,
+    precheck,
+    repair_edit_violations,
+    review_repair_scope,
+    save_contract,
+    save_repair_scope,
+    validation_repair_scope,
+    verification_repair_scope,
+)
 from dev_orchestration.workflow.dependencies import dependency_sources
 from dev_orchestration.workflow.engine import Engine, IllegalTransitionError
 from dev_orchestration.workflow.invoke import AgentInvocationError, SchemaEscalation
@@ -86,6 +107,7 @@ from dev_orchestration.workflow.stages import (
     reconcile,
     remediate,
     repair_validation,
+    repair_verification,
     review_implementation,
     review_plan,
     verify,
@@ -397,6 +419,8 @@ def _record_no_progress(
     artifact_name = (
         "implementation-worker.json"
         if stage == "implementation_worker"
+        else f"verification-repair-v{cycle}.json"
+        if stage == "verification_repair"
         else f"remediation-v{cycle}.json"
     )
     artifact = f"execution/no-progress/{artifact_name}"
@@ -422,6 +446,8 @@ def _record_no_progress(
     reason = (
         "implementation worker produced no deliverable changes"
         if cause == "worker_no_changes"
+        else f"verification repair round {cycle} produced no deliverable progress"
+        if stage == "verification_repair"
         else f"implementation remediation cycle {cycle} produced no deliverable progress"
     )
     signature = (
@@ -811,6 +837,31 @@ def _effective_tier(
     return requested
 
 
+def _with_precheck(
+    outcomes: list[ValidationOutcome],
+    contract: dict | None,
+    worktree_repo: GitRepo,
+    base_commit: str,
+) -> list[ValidationOutcome]:
+    """Add a failed pseudo-check when a passing run still breaks its saved contract."""
+    if contract is None or not all_passed(outcomes):
+        return outcomes
+    failures = precheck(contract, worktree_repo.change_inventory(base_commit), worktree_repo.root)
+    if not failures:
+        return outcomes
+    return [
+        *outcomes,
+        ValidationOutcome(
+            name=PRECHECK_NAME,
+            command="acceptance contract pre-check",
+            exit_code=1,
+            passed=False,
+            stdout_tail="",
+            stderr_tail="; ".join(failures),
+        ),
+    ]
+
+
 def _run_worktree_stage(
     worktree_repo: GitRepo,
     base_commit: str,
@@ -990,40 +1041,8 @@ def execute_run(
                 cycle=cycle,
             )
 
-        def repair_failed_validation(
-            outcomes: list[ValidationOutcome], cycle: int, next_stage: str
-        ) -> tuple[list[ValidationOutcome], bool]:
-            if all_passed(outcomes):
-                artifact = store.read_manifest().validation_artifact
-                if artifact is None:
-                    raise CheckpointError("passed validation has no saved artifact pointer")
-                receipt(next_stage, [artifact], cycle)
-                return outcomes, False
-            if store.read_manifest().validation_repairs_reserved >= 1:
-                return outcomes, True
-            store.update_manifest(validation_repairs_reserved=1)
-            failed_artifact = store.read_manifest().validation_artifact
-            if failed_artifact is None:
-                raise CheckpointError("failed validation has no saved artifact pointer")
-            receipt("validation_repair", [failed_artifact], cycle)
-            engine.transition(RunState.REMEDIATION)
-            _run_worktree_stage(
-                worktree_repo,
-                base_commit,
-                fence,
-                lambda: repair_validation(
-                    registry,
-                    approved,
-                    worktree_repo.change_diff(base_commit),
-                    outcomes,
-                    worktree,
-                    store,
-                    dependency_report,
-                ),
-            )
-            receipt("validation", ["execution/validation-repair-v1.json"], cycle)
-            engine.transition(RunState.VALIDATING)
-            repaired = _run_validation_stage(
+        def validate() -> list[ValidationOutcome]:
+            outcomes = _run_validation_stage(
                 worktree_repo,
                 base_commit,
                 fence,
@@ -1035,9 +1054,79 @@ def execute_run(
                 store.read_manifest().validation_input_hashes,
                 store=store,
             )
-            artifact = _save_validation(store, repaired, cycle)
-            receipt(next_stage, [artifact], cycle)
-            return repaired, not all_passed(repaired)
+            # After the validation environment is torn down, so only real changes are seen.
+            return _with_precheck(outcomes, contract, worktree_repo, base_commit)
+
+        def saved(scope):
+            """Save a repair description before the checkpoint that precedes its worker."""
+            return scope, save_repair_scope(store, scope)
+
+        def guarded_repair(scope, call):
+            """Run a repair worker and refuse edits beyond the files it was allowed."""
+            before = file_digests(worktree, worktree_repo.change_inventory(base_commit))
+            result = _run_worktree_stage(worktree_repo, base_commit, fence, call)
+            stray = (
+                repair_edit_violations(
+                    worktree, before, worktree_repo.change_inventory(base_commit), scope
+                )
+                if scope is not None
+                else []
+            )
+            if stray:
+                raise ScopeViolation(
+                    f"{scope['gate']} repair changed files it was not allowed to change: {stray}"
+                )
+            return result
+
+        def repair_failed_validation(
+            outcomes: list[ValidationOutcome], cycle: int, next_stage: str
+        ) -> tuple[list[ValidationOutcome], bool]:
+            repaired_here = False
+            while True:
+                if all_passed(outcomes):
+                    artifact = store.read_manifest().validation_artifact
+                    if artifact is None:
+                        raise CheckpointError("passed validation has no saved artifact pointer")
+                    receipt(next_stage, [artifact], cycle)
+                    return outcomes, False
+                reserved = store.read_manifest().validation_repairs_reserved
+                if reserved >= MAX_VALIDATION_REPAIRS:
+                    if repaired_here:
+                        artifact = store.read_manifest().validation_artifact
+                        receipt(next_stage, [artifact], cycle)
+                    return outcomes, True
+                round_number = reserved + 1
+                scope, scope_artifact = saved(
+                    validation_repair_scope(outcomes, round_number, fence)
+                )
+                store.update_manifest(validation_repairs_reserved=round_number)
+                failed_artifact = store.read_manifest().validation_artifact
+                if failed_artifact is None:
+                    raise CheckpointError("failed validation has no saved artifact pointer")
+                receipt("validation_repair", [failed_artifact, scope_artifact], cycle)
+                engine.transition(RunState.REMEDIATION)
+                guarded_repair(
+                    scope,
+                    lambda scope=scope, round_number=round_number, outcomes=outcomes: (
+                        repair_validation(
+                            registry,
+                            approved,
+                            worktree_repo.change_diff(base_commit),
+                            outcomes,
+                            worktree,
+                            store,
+                            dependency_report,
+                            contract,
+                            scope,
+                            round_number,
+                        )
+                    ),
+                )
+                receipt("validation", [f"execution/validation-repair-v{round_number}.json"], cycle)
+                engine.transition(RunState.VALIDATING)
+                outcomes = validate()
+                _save_validation(store, outcomes, cycle)
+                repaired_here = True
 
         store.update_manifest(
             acceptance_criteria=acceptance_criteria,
@@ -1483,6 +1572,8 @@ def execute_run(
                 [*stage_artifacts, approval_artifact],
             )
 
+        save_contract(store, approved, project_config, effective_tier, acceptance_criteria)
+        contract = load_contract(store, approved)
         approval_required = _approval_required(
             project_config, effective_tier, classification.profiles
         )
@@ -1510,6 +1601,7 @@ def execute_run(
                         else []
                     ),
                     *([reused_review_artifact] if reused_review_artifact else []),
+                    *([CONTRACT_ARTIFACT] if contract is not None else []),
                 ],
             )
             store.append_event(
@@ -1537,6 +1629,7 @@ def execute_run(
                     else []
                 ),
                 *([reused_review_artifact] if reused_review_artifact else []),
+                *([CONTRACT_ARTIFACT] if contract is not None else []),
             ],
         )
         seed_patch_applied = apply_seed_patch_once(store, worktree_repo, base_commit, fence)
@@ -1578,6 +1671,7 @@ def execute_run(
                     runtime.profile_constraints,
                     scope_context,
                     dependency_report,
+                    contract,
                 ),
             )
             after_worker = _deliverable_patch(worktree_repo, base_commit)
@@ -1592,73 +1686,179 @@ def execute_run(
                 return _outcome(engine, repo=repo, worktree=worktree)
             receipt("validation", ["execution/worker-result.json"])
 
-        engine.transition(RunState.VALIDATING)
-        outcomes = _run_validation_stage(
-            worktree_repo,
-            base_commit,
-            fence,
-            lambda: run_validations(project_config.validation, effective_tier, worktree),
-            repo.root,
-            tuple(project_config.validation_links),
-            tuple(project_config.required_validation_links),
-            tuple(project_config.validation_files),
-            store.read_manifest().validation_input_hashes,
-            store=store,
-        )
-        review_next = (
-            "implementation_reviewer"
-            if _implementation_review_required(effective_tier, project_config.validation)
-            else "verifier"
-        )
-        _save_validation(store, outcomes)
-        outcomes, repair_failed = repair_failed_validation(outcomes, 0, review_next)
-        if repair_failed:
-            _terminal(
-                engine,
-                RunState.FAILED,
-                "required validation failed after repair",
-                "validation_failed",
-                failure_signature="validation:"
-                + ",".join(outcome.name for outcome in outcomes if not outcome.passed),
-            )
-            return _outcome(engine, repo=repo, worktree=worktree)
+        def review_repair(review, round_number):
+            """Describe the next remediation round while the review that caused it is fresh."""
+            scope = review_repair_scope(review, round_number, fence)
+            return (None, []) if scope is None else (scope, [saved(scope)[1]])
 
-        diff = worktree_repo.change_diff(base_commit)
-        review_inventory = worktree_repo.change_inventory(base_commit)
-        implementation_review = None
-        if _implementation_review_required(effective_tier, project_config.validation):
-            engine.transition(RunState.IMPLEMENTATION_REVIEW)
-            implementation_review = review_implementation(
-                registry,
-                approved,
-                diff,
-                _evidence(outcomes),
-                runtime.profile_constraints,
-                store,
-                worktree,
-                dependency_report,
-            )
-            receipt(
-                "remediation" if implementation_review.blocking_ids() else "verifier",
-                [
-                    f"review/{max((store.root / 'review').glob('implementation-review-v*.json')).name}",
-                    "review/finding-index.json",
-                ],
-            )
-            cleanup_ephemeral_paths(worktree_repo.root)
-            if worktree_repo.change_inventory(base_commit) != review_inventory:
-                raise ContextContractError("read-only implementation review changed the worktree")
-        else:
-            store.append_event(
-                {
-                    "event": "implementation_review_skipped",
-                    "tier": str(effective_tier),
-                    "reason": "tier stage path omits implementation review",
-                }
-            )
         cycle = 1
-        while implementation_review is not None and implementation_review.blocking_ids():
-            if implementation_review.outcome in {Outcome.BLOCKED, Outcome.ESCALATE}:
+        while True:
+            engine.transition(RunState.VALIDATING)
+            outcomes = validate()
+            review_next = (
+                "implementation_reviewer"
+                if _implementation_review_required(effective_tier, project_config.validation)
+                else "verifier"
+            )
+            _save_validation(store, outcomes, cycle - 1)
+            outcomes, repair_failed = repair_failed_validation(outcomes, cycle - 1, review_next)
+            if repair_failed:
+                _terminal(
+                    engine,
+                    RunState.FAILED,
+                    "required validation failed after repair",
+                    "validation_failed",
+                    failure_signature="validation:"
+                    + ",".join(outcome.name for outcome in outcomes if not outcome.passed),
+                )
+                return _outcome(engine, repo=repo, worktree=worktree)
+
+            diff = worktree_repo.change_diff(base_commit)
+            review_inventory = worktree_repo.change_inventory(base_commit)
+            implementation_review = None
+            if _implementation_review_required(effective_tier, project_config.validation):
+                engine.transition(RunState.IMPLEMENTATION_REVIEW)
+                implementation_review = review_implementation(
+                    registry,
+                    approved,
+                    diff,
+                    _evidence(outcomes),
+                    runtime.profile_constraints,
+                    store,
+                    worktree,
+                    dependency_report,
+                )
+                review_scope, review_scope_artifacts = review_repair(implementation_review, cycle)
+                receipt(
+                    "remediation" if implementation_review.blocking_ids() else "verifier",
+                    [
+                        f"review/{max((store.root / 'review').glob('implementation-review-v*.json')).name}",
+                        "review/finding-index.json",
+                        *review_scope_artifacts,
+                    ],
+                    cycle - 1,
+                )
+                cleanup_ephemeral_paths(worktree_repo.root)
+                if worktree_repo.change_inventory(base_commit) != review_inventory:
+                    raise ContextContractError(
+                        "read-only implementation review changed the worktree"
+                    )
+            else:
+                store.append_event(
+                    {
+                        "event": "implementation_review_skipped",
+                        "tier": str(effective_tier),
+                        "reason": "tier stage path omits implementation review",
+                    }
+                )
+            while implementation_review is not None and implementation_review.blocking_ids():
+                if implementation_review.outcome in {Outcome.BLOCKED, Outcome.ESCALATE}:
+                    target = (
+                        RunState.BLOCKED
+                        if implementation_review.outcome is Outcome.BLOCKED
+                        else RunState.ESCALATED
+                    )
+                    _terminal(
+                        engine,
+                        target,
+                        "implementation review: " + str(implementation_review.outcome),
+                        "implementation_review_escalated"
+                        if implementation_review.outcome is Outcome.ESCALATE
+                        else "other",
+                        stop_code="implementation_review_blocked"
+                        if target is RunState.BLOCKED
+                        else None,
+                    )
+                    return _outcome(engine, repo=repo, worktree=worktree)
+                engine.transition(RunState.REMEDIATION)
+                blocking = [
+                    finding
+                    for finding in implementation_review.findings
+                    if finding.id in implementation_review.blocking_ids()
+                ]
+                current_state = diff or "No committed or working-tree diff was observed."
+                before_remediation = _deliverable_patch(worktree_repo, base_commit)
+                guarded_repair(
+                    review_scope,
+                    lambda blocking=blocking, current_state=current_state, cycle=cycle, review_scope=review_scope: (
+                        remediate(
+                            registry,
+                            blocking,
+                            approved,
+                            current_state,
+                            worktree,
+                            store,
+                            cycle=cycle,
+                            dependency_report=dependency_report,
+                            contract=contract,
+                            repair=review_scope,
+                        )
+                    ),
+                )
+                after_remediation = _deliverable_patch(worktree_repo, base_commit)
+                if after_remediation == before_remediation:
+                    _record_no_progress(
+                        engine,
+                        cause="remediation_no_progress",
+                        stage="implementation_remediation",
+                        before=before_remediation,
+                        after=after_remediation,
+                        cycle=cycle,
+                    )
+                    return _outcome(engine, repo=repo, worktree=worktree)
+                receipt("validation", [f"execution/remediation-v{cycle}.json"], cycle)
+                engine.transition(RunState.VALIDATING)
+                outcomes = validate()
+                _save_validation(store, outcomes, cycle)
+                outcomes, repair_failed = repair_failed_validation(
+                    outcomes, cycle, "implementation_reviewer"
+                )
+                if repair_failed:
+                    _terminal(
+                        engine,
+                        RunState.FAILED,
+                        "required validation failed after repair",
+                        "validation_failed",
+                        failure_signature="validation:"
+                        + ",".join(outcome.name for outcome in outcomes if not outcome.passed),
+                    )
+                    return _outcome(engine, repo=repo, worktree=worktree)
+                diff = worktree_repo.change_diff(base_commit)
+                review_inventory = worktree_repo.change_inventory(base_commit)
+                engine.transition(RunState.IMPLEMENTATION_REVIEW)
+                implementation_review = review_implementation(
+                    registry,
+                    approved,
+                    diff,
+                    _evidence(outcomes),
+                    runtime.profile_constraints,
+                    store,
+                    worktree,
+                    dependency_report,
+                )
+                review_scope, review_scope_artifacts = review_repair(
+                    implementation_review, cycle + 1
+                )
+                receipt(
+                    "remediation" if implementation_review.blocking_ids() else "verifier",
+                    [
+                        f"review/{max((store.root / 'review').glob('implementation-review-v*.json')).name}",
+                        "review/finding-index.json",
+                        *review_scope_artifacts,
+                    ],
+                    cycle,
+                )
+                cleanup_ephemeral_paths(worktree_repo.root)
+                if worktree_repo.change_inventory(base_commit) != review_inventory:
+                    raise ContextContractError(
+                        "read-only implementation review changed the worktree"
+                    )
+                cycle += 1
+
+            if implementation_review is not None and implementation_review.outcome in {
+                Outcome.BLOCKED,
+                Outcome.ESCALATE,
+            }:
                 target = (
                     RunState.BLOCKED
                     if implementation_review.outcome is Outcome.BLOCKED
@@ -1676,143 +1876,37 @@ def execute_run(
                     else None,
                 )
                 return _outcome(engine, repo=repo, worktree=worktree)
-            engine.transition(RunState.REMEDIATION)
-            blocking = [
-                finding
-                for finding in implementation_review.findings
-                if finding.id in implementation_review.blocking_ids()
-            ]
-            current_state = diff or "No committed or working-tree diff was observed."
-            before_remediation = _deliverable_patch(worktree_repo, base_commit)
-            _run_worktree_stage(
-                worktree_repo,
-                base_commit,
-                fence,
-                lambda blocking=blocking, current_state=current_state, cycle=cycle: remediate(
-                    registry,
-                    blocking,
-                    approved,
-                    current_state,
-                    worktree,
-                    store,
-                    cycle=cycle,
-                    dependency_report=dependency_report,
-                ),
-            )
-            after_remediation = _deliverable_patch(worktree_repo, base_commit)
-            if after_remediation == before_remediation:
-                _record_no_progress(
-                    engine,
-                    cause="remediation_no_progress",
-                    stage="implementation_remediation",
-                    before=before_remediation,
-                    after=after_remediation,
-                    cycle=cycle,
-                )
-                return _outcome(engine, repo=repo, worktree=worktree)
-            receipt("validation", [f"execution/remediation-v{cycle}.json"], cycle)
-            engine.transition(RunState.VALIDATING)
-            outcomes = _run_validation_stage(
-                worktree_repo,
-                base_commit,
-                fence,
-                lambda: run_validations(project_config.validation, effective_tier, worktree),
+
+            engine.transition(RunState.FINAL_VERIFICATION)
+            with validation_environment(
                 repo.root,
+                worktree,
                 tuple(project_config.validation_links),
                 tuple(project_config.required_validation_links),
-                tuple(project_config.validation_files),
-                store.read_manifest().validation_input_hashes,
-                store=store,
-            )
-            _save_validation(store, outcomes, cycle)
-            outcomes, repair_failed = repair_failed_validation(
-                outcomes, cycle, "implementation_reviewer"
-            )
-            if repair_failed:
-                _terminal(
-                    engine,
-                    RunState.FAILED,
-                    "required validation failed after repair",
-                    "validation_failed",
-                    failure_signature="validation:"
-                    + ",".join(outcome.name for outcome in outcomes if not outcome.passed),
-                )
-                return _outcome(engine, repo=repo, worktree=worktree)
-            diff = worktree_repo.change_diff(base_commit)
-            review_inventory = worktree_repo.change_inventory(base_commit)
-            engine.transition(RunState.IMPLEMENTATION_REVIEW)
-            implementation_review = review_implementation(
+            ):
+                pass
+            verification = verify(
                 registry,
+                request_text,
                 approved,
+                acceptance_criteria,
                 diff,
                 _evidence(outcomes),
-                runtime.profile_constraints,
+                implementation_review.findings if implementation_review is not None else [],
                 store,
                 worktree,
                 dependency_report,
             )
-            receipt(
-                "remediation" if implementation_review.blocking_ids() else "verifier",
-                [
-                    f"review/{max((store.root / 'review').glob('implementation-review-v*.json')).name}",
-                    "review/finding-index.json",
-                ],
-                cycle,
-            )
+            receipt("commit", ["verification/final-verification.json"], cycle - 1)
             cleanup_ephemeral_paths(worktree_repo.root)
             if worktree_repo.change_inventory(base_commit) != review_inventory:
-                raise ContextContractError("read-only implementation review changed the worktree")
-            cycle += 1
-
-        if implementation_review is not None and implementation_review.outcome in {
-            Outcome.BLOCKED,
-            Outcome.ESCALATE,
-        }:
-            target = (
-                RunState.BLOCKED
-                if implementation_review.outcome is Outcome.BLOCKED
-                else RunState.ESCALATED
-            )
-            _terminal(
-                engine,
-                target,
-                "implementation review: " + str(implementation_review.outcome),
-                "implementation_review_escalated"
-                if implementation_review.outcome is Outcome.ESCALATE
-                else "other",
-                stop_code="implementation_review_blocked" if target is RunState.BLOCKED else None,
-            )
-            return _outcome(engine, repo=repo, worktree=worktree)
-
-        engine.transition(RunState.FINAL_VERIFICATION)
-        with validation_environment(
-            repo.root,
-            worktree,
-            tuple(project_config.validation_links),
-            tuple(project_config.required_validation_links),
-        ):
-            pass
-        verification = verify(
-            registry,
-            request_text,
-            approved,
-            acceptance_criteria,
-            diff,
-            _evidence(outcomes),
-            implementation_review.findings if implementation_review is not None else [],
-            store,
-            worktree,
-            dependency_report,
-        )
-        receipt("commit", ["verification/final-verification.json"])
-        cleanup_ephemeral_paths(worktree_repo.root)
-        if worktree_repo.change_inventory(base_commit) != review_inventory:
-            raise ContextContractError("read-only verification changed the worktree")
-        if not verification_allows_completion(
-            verification,
-            acceptance_criteria,
-            implementation_review.findings if implementation_review is not None else [],
-        ):
+                raise ContextContractError("read-only verification changed the worktree")
+            if verification_allows_completion(
+                verification,
+                acceptance_criteria,
+                implementation_review.findings if implementation_review is not None else [],
+            ):
+                break
             evidence_only = (
                 all(outcome.passed for outcome in outcomes)
                 and verification.criteria == acceptance_criteria
@@ -1824,15 +1918,89 @@ def execute_run(
                     )
                 )
             )
-            _terminal(
-                engine,
-                RunState.FAILED,
-                "final verification did not provide an unqualified PASS for the supplied criteria",
-                failure_class="evidence" if evidence_only else "product",
-                failure_signature="verification:acceptance-criteria",
-                stop_code="verification_rejected",
+            rejection_class = "evidence" if evidence_only else "product"
+            if (
+                verification.criteria != acceptance_criteria
+                or [verdict.criterion for verdict in verification.verdicts] != acceptance_criteria
+                or all(verdict.verdict == "PASS" for verdict in verification.verdicts)
+            ):
+                # Either the verifier did not judge the supplied criteria, or it failed none of
+                # them: there is no criterion for a worker repair to address.
+                _terminal(
+                    engine,
+                    RunState.FAILED,
+                    "final verification did not provide an unqualified PASS for the supplied "
+                    "criteria",
+                    failure_class=rejection_class,
+                    failure_signature="verification:acceptance-criteria",
+                    stop_code="verification_rejected",
+                )
+                return _outcome(engine, verification, repo=repo, worktree=worktree)
+            if verification.outcome in {Outcome.BLOCKED, Outcome.ESCALATE}:
+                _terminal(
+                    engine,
+                    RunState.ESCALATED,
+                    "final verification: " + str(verification.outcome),
+                    "verification_escalated",
+                    failure_class=rejection_class,
+                    failure_signature="verification:acceptance-criteria",
+                )
+                return _outcome(engine, verification, repo=repo, worktree=worktree)
+            reserved = store.read_manifest().verification_repairs_reserved
+            if reserved >= MAX_VERIFICATION_REPAIRS:
+                _terminal(
+                    engine,
+                    RunState.ESCALATED,
+                    f"final verification still rejected the change after {reserved} repair rounds",
+                    "verification_exhausted",
+                    failure_class=rejection_class,
+                    failure_signature="verification:acceptance-criteria",
+                )
+                return _outcome(engine, verification, repo=repo, worktree=worktree)
+            round_number = reserved + 1
+            repair_info, repair_artifact = saved(
+                verification_repair_scope(verification, round_number, fence)
             )
-            return _outcome(engine, verification, repo=repo, worktree=worktree)
+            store.update_manifest(verification_repairs_reserved=round_number)
+            receipt(
+                "verification_repair",
+                ["verification/final-verification.json", repair_artifact],
+                cycle - 1,
+            )
+            engine.transition(RunState.REMEDIATION)
+            before_repair = _deliverable_patch(worktree_repo, base_commit)
+            guarded_repair(
+                repair_info,
+                lambda verification=verification, diff=diff, outcomes=outcomes, repair_info=repair_info, round_number=round_number: (
+                    repair_verification(
+                        registry,
+                        approved,
+                        verification,
+                        diff,
+                        _evidence(outcomes),
+                        worktree,
+                        store,
+                        dependency_report,
+                        contract,
+                        repair_info,
+                        round_number,
+                    )
+                ),
+            )
+            after_repair = _deliverable_patch(worktree_repo, base_commit)
+            if after_repair == before_repair:
+                _record_no_progress(
+                    engine,
+                    cause="remediation_no_progress",
+                    stage="verification_repair",
+                    before=before_repair,
+                    after=after_repair,
+                    cycle=round_number,
+                )
+                return _outcome(engine, repo=repo, worktree=worktree)
+            receipt(
+                "validation", [f"execution/verification-repair-v{round_number}.json"], cycle - 1
+            )
 
         enforce_fence(worktree_repo, base_commit, fence)
         changed = worktree_repo.change_inventory(base_commit)
@@ -1876,6 +2044,7 @@ def execute_run(
         AgentInvocationError,
         ContextContractError,
         ReadOnlyRoleUnsupportedError,
+        NoSafeRepairScope,
     ) as exc:
         if isinstance(exc, AgentInvocationError):
             _terminal(
@@ -1891,6 +2060,8 @@ def execute_run(
             if isinstance(exc, RemediationExhausted)
             else "scope_violation"
             if isinstance(exc, ScopeViolation)
+            else "repair_scope_unsafe"
+            if isinstance(exc, NoSafeRepairScope)
             else "other"
         )
         stop_code = None

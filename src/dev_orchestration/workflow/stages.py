@@ -28,6 +28,7 @@ from dev_orchestration.domain.findings import (
 )
 from dev_orchestration.domain.run import MAX_REMEDIATION_CYCLES
 from dev_orchestration.roles.loader import load_role_prompt
+from dev_orchestration.workflow.contract import contract_context, repair_context
 from dev_orchestration.workflow.dependencies import render_dependency_context
 from dev_orchestration.workflow.invoke import AgentInvocationError, invoke_structured
 from dev_orchestration.workflow.retry_feedback import context_ref as prior_failures_context
@@ -71,6 +72,14 @@ def _dependency_guidance(report: str) -> str:
         if "24,000 UTF-8 bytes" in str(exc):
             raise AgentInvocationError(str(exc)) from exc
         raise AgentInvocationError("saved dependency report is invalid") from exc
+
+
+def _contract_items(contract: dict | None, repair: dict | None) -> list[ContextRef]:
+    """Stable instructions first; the changing repair evidence goes after them."""
+    return [
+        *([contract_context(contract)] if contract is not None else []),
+        *([repair_context(repair)] if repair is not None else []),
+    ]
 
 
 def _agent_result_json(result: AgentResult) -> dict:
@@ -484,11 +493,13 @@ def execute(
     profile_constraints: list[ContextRef] | None = None,
     scope_fence: ContextRef | None = None,
     dependency_report: str = "",
+    contract: dict | None = None,
 ) -> AgentResult:
     packet = assemble(
         "execution",
         [
             ContextRef(label=Category.APPROVED_PLAN, path=None, content=approved_plan),
+            *_contract_items(contract, None),
             *invariants,
             *references,
             *(profile_constraints or []),
@@ -594,6 +605,8 @@ def remediate(
     store: RunStore,
     cycle: int = 1,
     dependency_report: str = "",
+    contract: dict | None = None,
+    repair: dict | None = None,
 ) -> AgentResult:
     if cycle > MAX_REMEDIATION_CYCLES:
         ids = [finding.id for finding in blocking]
@@ -604,6 +617,8 @@ def remediate(
     packet = assemble(
         "remediation",
         [
+            ContextRef(label=Category.APPROVED_PLAN, path=None, content=approved_plan),
+            *_contract_items(contract, repair),
             ContextRef(
                 label=Category.BLOCKING_FINDINGS,
                 path=None,
@@ -612,7 +627,6 @@ def remediate(
                     for finding in blocking
                 ),
             ),
-            ContextRef(label=Category.APPROVED_PLAN, path=None, content=approved_plan),
             ContextRef(label=Category.CURRENT_STATE, path=None, content=current_state),
             *_prior_failures(store),
             *(
@@ -648,8 +662,11 @@ def repair_validation(
     worktree: Path,
     store: RunStore,
     dependency_report: str = "",
+    contract: dict | None = None,
+    repair: dict | None = None,
+    round_number: int = 1,
 ) -> AgentResult:
-    """Give the worker the failed command evidence for the run's sole repair."""
+    """Give the worker the failed command evidence for one validation repair round."""
     failed = [outcome for outcome in outcomes if not outcome.passed]
     evidence = "\n\n".join(
         f"{outcome.name}: exit {outcome.exit_code}\n"
@@ -661,6 +678,7 @@ def repair_validation(
         "remediation",
         [
             ContextRef(label=Category.APPROVED_PLAN, path=None, content=approved_plan),
+            *_contract_items(contract, repair),
             ContextRef(label=Category.DIFF, path=None, content=diff),
             ContextRef(label=Category.VALIDATION_EVIDENCE, path=None, content=evidence),
             *_prior_failures(store),
@@ -678,10 +696,12 @@ def repair_validation(
         ],
     )
     request = _request(registry, "implementation_worker", store, packet, worktree)
-    store.record_repair_round("validation", 1)
+    store.record_repair_round("validation", round_number)
     result = registry.adapter_for("implementation_worker").run(request)
     store.write_json_artifact(
-        "execution/validation-repair-v1.json", _agent_result_json(result), immutable=True
+        f"execution/validation-repair-v{round_number}.json",
+        _agent_result_json(result),
+        immutable=True,
     )
     if result.exit_code != 0:
         raise AgentInvocationError(provider_failure_reason("validation repair worker", result))
@@ -689,6 +709,71 @@ def repair_validation(
         {
             "event": "validation_repaired",
             "failed_commands": [outcome.name for outcome in failed],
+        }
+    )
+    return result
+
+
+def repair_verification(
+    registry: RoleRegistry,
+    approved_plan: str,
+    verification: Verification,
+    diff: str,
+    validation_evidence: str,
+    worktree: Path,
+    store: RunStore,
+    dependency_report: str = "",
+    contract: dict | None = None,
+    repair: dict | None = None,
+    round_number: int = 1,
+) -> AgentResult:
+    """Give the worker the rejected acceptance checks for one verification repair round."""
+    rejected = [verdict for verdict in verification.verdicts if verdict.verdict != "PASS"]
+    packet = assemble(
+        "remediation",
+        [
+            ContextRef(label=Category.APPROVED_PLAN, path=None, content=approved_plan),
+            *_contract_items(contract, repair),
+            ContextRef(
+                label=Category.BLOCKING_FINDINGS,
+                path=None,
+                content="\n".join(
+                    f"{verdict.criterion}: {verdict.verdict}: {verdict.evidence}"
+                    for verdict in rejected
+                )
+                or f"final verification returned {verification.outcome}",
+            ),
+            ContextRef(label=Category.DIFF, path=None, content=diff),
+            ContextRef(label=Category.VALIDATION_EVIDENCE, path=None, content=validation_evidence),
+            *_prior_failures(store),
+            *(
+                [
+                    ContextRef(
+                        label=Category.DEPENDENCY_REPORT,
+                        path="dependency-report.json",
+                        content=_dependency_guidance(dependency_report),
+                    )
+                ]
+                if dependency_report
+                else []
+            ),
+        ],
+    )
+    request = _request(registry, "implementation_worker", store, packet, worktree)
+    store.record_repair_round("final_verification", round_number)
+    result = registry.adapter_for("implementation_worker").run(request)
+    store.write_json_artifact(
+        f"execution/verification-repair-v{round_number}.json",
+        _agent_result_json(result),
+        immutable=True,
+    )
+    if result.exit_code != 0:
+        raise AgentInvocationError(provider_failure_reason("verification repair worker", result))
+    store.append_event(
+        {
+            "event": "verification_repaired",
+            "round": round_number,
+            "rejected_criteria": [verdict.criterion for verdict in rejected],
         }
     )
     return result

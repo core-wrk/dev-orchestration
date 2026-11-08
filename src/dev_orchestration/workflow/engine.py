@@ -43,7 +43,7 @@ LEGAL_TRANSITIONS: dict[RunState, frozenset[RunState]] = {
     | _PAUSE
     | {RunState.REMEDIATION, RunState.FINAL_VERIFICATION, RunState.BLOCKED},
     RunState.REMEDIATION: _ALWAYS | _PAUSE | {RunState.VALIDATING},
-    RunState.FINAL_VERIFICATION: _ALWAYS | _PAUSE | {RunState.COMPLETE_LOCAL},
+    RunState.FINAL_VERIFICATION: _ALWAYS | _PAUSE | {RunState.REMEDIATION, RunState.COMPLETE_LOCAL},
     RunState.PAUSED_USAGE: _ALWAYS
     | {
         RunState.CLASSIFIED,

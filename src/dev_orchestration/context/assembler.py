@@ -40,6 +40,8 @@ class Category(StrEnum):
     CONTEXT_NOTES = "context_notes"
     PRIOR_FAILURES = "prior_failures"
     DEPENDENCY_REPORT = "dependency_report"
+    ACCEPTANCE_CONTRACT = "acceptance_contract"
+    REPAIR_SCOPE = "repair_scope"
 
 
 STAGE_CONTRACTS: dict[str, frozenset[Category]] = {
@@ -102,6 +104,7 @@ STAGE_CONTRACTS: dict[str, frozenset[Category]] = {
             Category.CONTEXT_NOTES,
             Category.DEPENDENCY_REPORT,
             Category.PRIOR_FAILURES,
+            Category.ACCEPTANCE_CONTRACT,
         }
     ),
     "validation": frozenset({Category.COMMANDS, Category.WORKTREE, Category.CONTEXT_NOTES}),
@@ -126,6 +129,8 @@ STAGE_CONTRACTS: dict[str, frozenset[Category]] = {
             Category.CONTEXT_NOTES,
             Category.DEPENDENCY_REPORT,
             Category.PRIOR_FAILURES,
+            Category.ACCEPTANCE_CONTRACT,
+            Category.REPAIR_SCOPE,
         }
     ),
     "final_verification": frozenset(

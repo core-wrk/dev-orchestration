@@ -695,6 +695,8 @@ def restart_run(
                 "stop": None,
                 "repair_rounds": {},
                 "validation_repairs_reserved": 0,
+                "verification_repairs_reserved": 0,
+                "acceptance_contract_artifact": None,
                 "validation_artifact": None,
                 "roles": original.roles,
                 "config_layers": [

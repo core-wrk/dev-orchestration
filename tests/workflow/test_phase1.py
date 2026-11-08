@@ -53,7 +53,7 @@ def test_validation_stop_records_local_actor_and_exhausted_repair(tmp_path):
         None,
     )
     assert stop.category == "validation failed"
-    assert stop.repairs["validation"].model_dump() == {"used": 1, "allowed": 1, "exhausted": True}
+    assert stop.repairs["validation"].model_dump() == {"used": 2, "allowed": 2, "exhausted": True}
     assert "synthetic-private-evidence" not in stop.model_dump_json()
     events = read_events(outcome.store_root)
     transitions = [event for event in events if event["event"] == "state_changed"]

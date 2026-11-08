@@ -1992,7 +1992,7 @@ def test_reliability_environment_nonzero_validation_exit_remains_product_failure
 
     assert outcome.final_state is RunState.FAILED
     assert manifest.failure_class == "product"
-    assert adapter.seen.count("implementation_worker") == 2
+    assert adapter.seen.count("implementation_worker") == 3
 
 
 def test_pause_before_classification_refuses_changed_selected_spec_before_provider(tmp_path):

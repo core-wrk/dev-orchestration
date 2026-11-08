@@ -795,7 +795,7 @@ def test_failed_validation_gets_one_repair_then_uses_normal_review_path(tmp_path
     assert manifest["validation_artifact"] == "execution/validation-v2.json"
 
 
-def test_review_remediation_cannot_reserve_a_second_validation_repair(tmp_path):
+def test_review_remediation_cannot_reserve_a_third_validation_repair(tmp_path):
     class ReviewThenBreak(Scripted):
         def __init__(self, scripts):
             super().__init__(scripts)
@@ -847,10 +847,11 @@ def test_review_remediation_cannot_reserve_a_second_validation_repair(tmp_path):
         git, config, registry(adapter), "repair then remediate", tmp_path / "wt", CRITERIA
     )
     assert outcome.final_state is RunState.FAILED
-    assert adapter.worker_calls == 3
+    assert adapter.worker_calls == 4
     assert adapter.seen.count("implementation_reviewer") == 1
     assert (outcome.store_root / "execution/validation-repair-v1.json").is_file()
-    assert not (outcome.store_root / "execution/validation-repair-v2.json").exists()
+    assert (outcome.store_root / "execution/validation-repair-v2.json").is_file()
+    assert not (outcome.store_root / "execution/validation-repair-v3.json").exists()
     assert "verifier" not in adapter.seen
 
 

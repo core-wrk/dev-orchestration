@@ -19,7 +19,12 @@ from dev_orchestration.domain.findings import (
     Verification,
     verification_allows_completion,
 )
-from dev_orchestration.domain.run import GitBlock, PauseRecord
+from dev_orchestration.domain.run import (
+    MAX_VALIDATION_REPAIRS,
+    MAX_VERIFICATION_REPAIRS,
+    GitBlock,
+    PauseRecord,
+)
 from dev_orchestration.git.repo import GitCommandError, GitRepo
 from dev_orchestration.scope import ScopeFence
 from dev_orchestration.workflow.bootstrap import (
@@ -33,6 +38,19 @@ from dev_orchestration.workflow.checkpoints import (
     project_config_matches,
     record_stage,
     validation_files_default_omission,
+)
+from dev_orchestration.workflow.contract import (
+    CONTRACT_ARTIFACT,
+    NoSafeRepairScope,
+    file_digests,
+    load_contract,
+    load_repair_scope,
+    repair_edit_violations,
+    review_repair_scope,
+    save_contract,
+    save_repair_scope,
+    validation_repair_scope,
+    verification_repair_scope,
 )
 from dev_orchestration.workflow.dependencies import dependency_sources
 from dev_orchestration.workflow.engine import Engine
@@ -64,6 +82,7 @@ from dev_orchestration.workflow.runner import (
     _task_contract,
     _terminal,
     _tier_rank,
+    _with_precheck,
     apply_continued_change,
 )
 from dev_orchestration.workflow.scheduler import SchedulerQueue
@@ -92,6 +111,7 @@ from dev_orchestration.workflow.stages import (
     reconcile,
     remediate,
     repair_validation,
+    repair_verification,
     review_implementation,
     review_plan,
     verify,
@@ -120,6 +140,7 @@ _STAGE_STATE = {
     "implementation_worker": RunState.EXECUTING,
     "validation": RunState.VALIDATING,
     "validation_repair": RunState.REMEDIATION,
+    "verification_repair": RunState.REMEDIATION,
     "implementation_reviewer": RunState.IMPLEMENTATION_REVIEW,
     "remediation": RunState.REMEDIATION,
     "verifier": RunState.FINAL_VERIFICATION,
@@ -620,6 +641,7 @@ def resume_run(
             "plan_finalization": "orchestrator",
             "commit": "verifier",
             "validation_repair": "implementation_worker",
+            "verification_repair": "implementation_worker",
             "remediation": "implementation_worker",
         }.get(stage, stage)
         store.update_manifest(
@@ -663,6 +685,30 @@ def resume_run(
                     dependency_runtime.invariants,
                     store,
                 )
+
+            def guarded_repair(scope, call):
+                """Run a repair worker and refuse edits beyond the files it was allowed."""
+                before = file_digests(worktree, worktree_repo.change_inventory(base))
+                result = _run_worktree_stage(worktree_repo, base, fence, call)
+                stray = (
+                    repair_edit_violations(
+                        worktree, before, worktree_repo.change_inventory(base), scope
+                    )
+                    if scope is not None
+                    else []
+                )
+                if stray:
+                    raise ScopeViolation(
+                        f"{scope['gate']} repair changed files it was not allowed to change: "
+                        f"{stray}"
+                    )
+                return result
+
+            def repair_description(gate, round_number, build):
+                """Read the description saved with the checkpoint; older checkpoints have none."""
+                saved = load_repair_scope(store, gate, round_number)
+                return saved if saved is not None else build()
+
             while True:
                 current = store.read_manifest()
                 request_text = current.request_text or ""
@@ -809,6 +855,8 @@ def resume_run(
                         )
                         _persist_task_contract(store, approved)
                         artifacts.append("planning/task-contract.md")
+                        save_contract(store, approved, project_config, effective, criteria)
+                        artifacts.append(CONTRACT_ARTIFACT)
                     checkpoint(stage, artifacts)
                 elif stage == "planner":
                     if current.external_plan_artifact:
@@ -933,9 +981,10 @@ def resume_run(
                     store.update_manifest(
                         status=RunState.PLAN_FINALIZED, approval_required=approval_required
                     )
+                    save_contract(store, _approved(store), project_config, current.tier, criteria)
                     checkpoint(
                         "implementation_worker",
-                        ["planning/approved-plan.md", PLAN_REVIEW_RECEIPT],
+                        ["planning/approved-plan.md", PLAN_REVIEW_RECEIPT, CONTRACT_ARTIFACT],
                     )
                     stage = "implementation_worker"
                 elif stage == "implementation_worker":
@@ -1037,6 +1086,7 @@ def resume_run(
                                     runtime.profile_constraints,
                                     scope_context,
                                     dependency_report,
+                                    load_contract(store, approved),
                                 )
                             ),
                         )
@@ -1068,6 +1118,9 @@ def resume_run(
                         current.validation_input_hashes,
                         store=store,
                     )
+                    outcomes = _with_precheck(
+                        outcomes, load_contract(store, _approved(store)), worktree_repo, base
+                    )
                     artifact = _save_validation(store, outcomes, cycle)
                     if not all_passed(outcomes):
                         if current.restart_mode == "check_only":
@@ -1078,7 +1131,8 @@ def resume_run(
                                 "restart_validation_failed",
                             )
                             return _outcome(engine, repo=repo, worktree=worktree)
-                        if current.validation_repairs_reserved >= 1:
+                        validation_limit = 1 if current.restart_mode else MAX_VALIDATION_REPAIRS
+                        if current.validation_repairs_reserved >= validation_limit:
                             _terminal(
                                 engine,
                                 RunState.FAILED,
@@ -1086,8 +1140,11 @@ def resume_run(
                                 "validation_failed",
                             )
                             return _outcome(engine, repo=repo, worktree=worktree)
-                        store.update_manifest(validation_repairs_reserved=1)
-                        checkpoint("validation_repair", [artifact], cycle)
+                        round_number = current.validation_repairs_reserved + 1
+                        scope = validation_repair_scope(outcomes, round_number, fence)
+                        scope_artifact = save_repair_scope(store, scope)
+                        store.update_manifest(validation_repairs_reserved=round_number)
+                        checkpoint("validation_repair", [artifact, scope_artifact], cycle)
                         stage = "validation_repair"
                         continue
                     stage = (
@@ -1101,14 +1158,21 @@ def resume_run(
                     if all_passed(outcomes):
                         raise ResumeRefused("validation repair checkpoint has no failed checks")
                     current = store.read_manifest()
-                    if current.validation_repairs_reserved != 1:
+                    round_number = current.validation_repairs_reserved
+                    if not 1 <= round_number <= MAX_VALIDATION_REPAIRS:
                         raise ResumeRefused("validation repair was not reserved")
+                    scope = repair_description(
+                        "validation",
+                        round_number,
+                        lambda outcomes=outcomes, round_number=round_number: (
+                            validation_repair_scope(outcomes, round_number, fence)
+                        ),
+                    )
+                    save_repair_scope(store, scope)
                     store.update_manifest(status=RunState.REMEDIATION)
-                    _run_worktree_stage(
-                        worktree_repo,
-                        base,
-                        fence,
-                        lambda outcomes=outcomes, dependency_report=dependency_report: (
+                    guarded_repair(
+                        scope,
+                        lambda outcomes=outcomes, scope=scope, round_number=round_number, dependency_report=dependency_report: (
                             repair_validation(
                                 registry,
                                 _approved(store),
@@ -1117,10 +1181,17 @@ def resume_run(
                                 worktree,
                                 store,
                                 dependency_report,
+                                load_contract(store, _approved(store)),
+                                scope,
+                                round_number,
                             )
                         ),
                     )
-                    checkpoint("validation", ["execution/validation-repair-v1.json"], cycle)
+                    checkpoint(
+                        "validation",
+                        [f"execution/validation-repair-v{round_number}.json"],
+                        cycle,
+                    )
                     stage = "validation"
                 elif stage == "implementation_reviewer":
                     store.update_manifest(status=RunState.IMPLEMENTATION_REVIEW)
@@ -1157,6 +1228,7 @@ def resume_run(
                         )
                         return _outcome(engine, repo=repo, worktree=worktree)
                     stage = "remediation" if reviewed.blocking_ids() else "verifier"
+                    review_scope = review_repair_scope(reviewed, cycle + 1, fence)
                     checkpoint(
                         stage,
                         [
@@ -1166,6 +1238,7 @@ def resume_run(
                                 )
                             ),
                             "review/finding-index.json",
+                            *([save_repair_scope(store, review_scope)] if review_scope else []),
                         ],
                     )
                     if current.restart_mode == "check_only" and reviewed.blocking_ids():
@@ -1211,12 +1284,18 @@ def resume_run(
                         return _outcome(engine, repo=repo, worktree=worktree)
                     store.update_manifest(status=RunState.REMEDIATION)
                     blocking = [f for f in reviewed.findings if f.id in reviewed.blocking_ids()]
+                    scope = repair_description(
+                        "implementation_review",
+                        cycle,
+                        lambda reviewed=reviewed, cycle=cycle: review_repair_scope(
+                            reviewed, cycle, fence
+                        ),
+                    )
+                    save_repair_scope(store, scope)
                     before_remediation = _deliverable_patch(worktree_repo, base)
-                    _run_worktree_stage(
-                        worktree_repo,
-                        base,
-                        fence,
-                        lambda blocking=blocking, cycle=cycle, dependency_report=dependency_report: (
+                    guarded_repair(
+                        scope,
+                        lambda blocking=blocking, cycle=cycle, dependency_report=dependency_report, scope=scope: (
                             remediate(
                                 registry,
                                 blocking,
@@ -1226,6 +1305,8 @@ def resume_run(
                                 store,
                                 cycle=cycle,
                                 dependency_report=dependency_report,
+                                contract=load_contract(store, _approved(store)),
+                                repair=scope,
                             )
                         ),
                     )
@@ -1281,6 +1362,62 @@ def resume_run(
                     require_snapshot(worktree_repo, before)
                     stage = "commit"
                     checkpoint(stage, ["verification/final-verification.json"])
+                elif stage == "verification_repair":
+                    current = store.read_manifest()
+                    round_number = current.verification_repairs_reserved
+                    if not 1 <= round_number <= MAX_VERIFICATION_REPAIRS:
+                        raise ResumeRefused("verification repair was not reserved")
+                    verification = Verification.model_validate_json(
+                        (store.root / "verification/final-verification.json").read_text(
+                            encoding="utf-8"
+                        )
+                    )
+                    outcomes = _validation(store, cycle)
+                    scope = repair_description(
+                        "final_verification",
+                        round_number,
+                        lambda verification=verification, round_number=round_number: (
+                            verification_repair_scope(verification, round_number, fence)
+                        ),
+                    )
+                    save_repair_scope(store, scope)
+                    store.update_manifest(status=RunState.REMEDIATION)
+                    before_repair = _deliverable_patch(worktree_repo, base)
+                    guarded_repair(
+                        scope,
+                        lambda verification=verification, outcomes=outcomes, dependency_report=dependency_report, scope=scope, round_number=round_number: (
+                            repair_verification(
+                                registry,
+                                _approved(store),
+                                verification,
+                                worktree_repo.change_diff(base),
+                                _evidence(outcomes),
+                                worktree,
+                                store,
+                                dependency_report,
+                                load_contract(store, _approved(store)),
+                                scope,
+                                round_number,
+                            )
+                        ),
+                    )
+                    after_repair = _deliverable_patch(worktree_repo, base)
+                    if after_repair == before_repair:
+                        _record_no_progress(
+                            engine,
+                            cause="remediation_no_progress",
+                            stage="verification_repair",
+                            before=before_repair,
+                            after=after_repair,
+                            cycle=round_number,
+                        )
+                        return _outcome(engine, repo=repo, worktree=worktree)
+                    checkpoint(
+                        "validation",
+                        [f"execution/verification-repair-v{round_number}.json"],
+                        cycle,
+                    )
+                    stage = "validation"
                 elif stage == "commit":
                     verification = Verification.model_validate_json(
                         (store.root / "verification/final-verification.json").read_text(
@@ -1304,16 +1441,46 @@ def resume_run(
                         criteria,
                         reviewed.findings if reviewed else [],
                     ):
-                        _terminal(
-                            engine,
-                            RunState.FAILED,
-                            "final verification did not pass",
-                            "restart_verification_failed"
-                            if current.restart_mode is not None
-                            else "other",
-                            stop_code="verification_rejected",
+                        judged_criteria = (
+                            verification.criteria == criteria
+                            and [v.criterion for v in verification.verdicts] == criteria
+                            and any(v.verdict != "PASS" for v in verification.verdicts)
                         )
-                        return _outcome(engine, verification, repo=repo, worktree=worktree)
+                        if current.restart_mode is not None or not judged_criteria:
+                            _terminal(
+                                engine,
+                                RunState.FAILED,
+                                "final verification did not pass",
+                                "restart_verification_failed"
+                                if current.restart_mode is not None
+                                else "other",
+                                stop_code="verification_rejected",
+                            )
+                            return _outcome(engine, verification, repo=repo, worktree=worktree)
+                        if verification.outcome in {Outcome.BLOCKED, Outcome.ESCALATE}:
+                            _terminal(
+                                engine,
+                                RunState.ESCALATED,
+                                f"final verification: {verification.outcome}",
+                                "verification_escalated",
+                            )
+                            return _outcome(engine, verification, repo=repo, worktree=worktree)
+                        if current.verification_repairs_reserved >= MAX_VERIFICATION_REPAIRS:
+                            _terminal(
+                                engine,
+                                RunState.ESCALATED,
+                                "final verification still rejected the change after "
+                                f"{current.verification_repairs_reserved} repair rounds",
+                                "verification_exhausted",
+                            )
+                            return _outcome(engine, verification, repo=repo, worktree=worktree)
+                        round_number = current.verification_repairs_reserved + 1
+                        scope = verification_repair_scope(verification, round_number, fence)
+                        scope_artifact = save_repair_scope(store, scope)
+                        store.update_manifest(verification_repairs_reserved=round_number)
+                        stage = "verification_repair"
+                        checkpoint(stage, ["verification/final-verification.json", scope_artifact])
+                        continue
                     enforce_fence(worktree_repo, base, fence)
                     changed = worktree_repo.change_inventory(base)
                     if not changed:
@@ -1431,6 +1598,9 @@ def resume_run(
         except SchemaEscalation:
             store.record_stop("schema_rejected")
             raise
+        except NoSafeRepairScope as exc:
+            _terminal(engine, RunState.ESCALATED, str(exc), "repair_scope_unsafe")
+            return _outcome(engine, repo=repo, worktree=worktree)
         except (ContextContractError, CheckpointError, ResumeRefused) as exc:
             restart_mode = store.read_manifest().restart_mode
             cause = "other"

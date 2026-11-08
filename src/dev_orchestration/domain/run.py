@@ -6,6 +6,8 @@ from pydantic import BaseModel, Field
 from dev_orchestration.domain.enums import ProjectClass, RunState, Tier
 
 MAX_REMEDIATION_CYCLES = 2
+MAX_VALIDATION_REPAIRS = 2
+MAX_VERIFICATION_REPAIRS = 2
 
 
 class GitBlock(BaseModel):
@@ -141,6 +143,8 @@ class RunManifest(BaseModel):
     plan_review_provenance: dict = Field(default_factory=dict)
     stage_attempts: dict[str, int] = Field(default_factory=dict)
     validation_repairs_reserved: int = 0
+    verification_repairs_reserved: int = 0
+    acceptance_contract_artifact: str | None = None
     stage_actor: StageActor | None = None
     stage_error: Literal["provider_context_limit"] | None = None
     repair_rounds: dict[str, int] = Field(default_factory=dict)

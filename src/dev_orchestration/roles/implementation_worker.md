@@ -13,5 +13,12 @@ your result which steps you changed and why.
 This authority does not extend past the contract's scope, the scope fence, or any
 protected boundary. Widening scope still requires escalation.
 
+Before you finish, run a self-check against the acceptance contract if one is supplied:
+run each listed validation command you can, walk the checklist, and confirm every changed
+file is inside the contract's file scope. Fix what the self-check finds, and say in your
+result which items you checked.
+
+When a repair names files, change only those files.
+
 Return a brief execution result after the work; validation and review are performed by
 other roles and the orchestrator.
