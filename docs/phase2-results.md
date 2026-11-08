@@ -4,9 +4,10 @@ Measured 2026-11-08 on branch `ai/phase2-efficiency` at commit `15b7c97`.
 
 ## Result in one line
 
-None of the eight epics measured completed. The rollout gate cannot be shown to be met, and
-the three expansion epics (which all completed in their original runs) do not support it.
-Phase 3 should wait for a controlled comparison (see "Recommended next step").
+None of the eight epics measured completed, so the rollout gate is not shown to be met. A
+control run of the pre-Phase-2 code under identical conditions also completed none of the
+three expansion epics, and got no further than Phase 2 at any gate. The failures come from
+the replay conditions and the model, not from Phase 2 (see "Control run").
 
 ## What was run
 
@@ -221,7 +222,8 @@ These are listed so the results are not over- or under-read.
 
 ## Usage
 
-74 recorded hosted calls (limit 120) and $5.05 of recorded Claude spend (limit $150). Of the
+Phase 2 runs: 74 recorded hosted calls (limit 120) and $5.05 of recorded Claude spend
+(limit $150). With the control run: 91 calls (limit raised to 170) and $6.53. Of the first 74
 calls, 5 were small test calls made by hand while checking the sandbox, and 1 belongs to the
 aborted d07b. The dollar figure is Claude Code's API-equivalent estimate; Claude Code is
 logged in through claude.ai. Whether Codex ignores `OPENAI_API_KEY` in this environment was
@@ -242,11 +244,42 @@ not confirmed.
    times with the same kind of repair. A repair that sees its previous attempt's result could
    differ.
 
+## Control run: the pre-Phase-2 code under the same conditions
+
+Approved 2026-11-08 with the call limit raised to 170 ($150 limit unchanged). The
+pre-Phase-2 code (`ff6a49b`) ran through the same harness on fresh copies of the three
+expansion snapshots. Each copy matched the conditions of the valid Phase 2 attempt it is
+compared with: d02 without the proposal (as the Phase 2 d02 run had), d05 and d07 with it,
+the same plans and criteria, the same models and umask 022. The launcher checked that the old
+code was the one loaded, and also hid earlier run worktrees from agents. (Those worktrees were
+visible during the Phase 2 runs. They were checked afterwards and held only unmodified
+baseline copies, so nothing leaked.) One attempt per epic, run concurrently.
+
+| Epic | Phase 2 code | Pre-Phase-2 code |
+|---|---|---|
+| d02 | FAILED at validation after 2 repairs. One test still failing. | FAILED at validation after 1 repair (its whole budget). The same test still failing, plus formatting. |
+| d05 | Final verification said BLOCKED on criterion 2 (UNKNOWN: cases not demonstrated). | Final verification said CHANGES_REQUIRED on criterion 2 (FAIL: a filename-quoting defect). FAILED `verification_rejected`. |
+| d07 | Reached final verification three times. ESCALATED `verification_exhausted`. | Review remediation, then FAILED at validation on formatting alone, its one validation repair already used. |
+
+17 hosted calls (c02 4, c05 7, c07 6), $1.48 recorded.
+
+**Conclusion.** The old code completed none of the three either. The 0-of-3 result comes from
+the replay conditions and the model, not from Phase 2. Under identical conditions Phase 2 did
+no worse at any gate, and in d07 it got further. The old code stopped on a formatting failure
+that Phase 2's second validation round exists to repair. The d02 failure is the same test
+under both versions, which confirms it as a defect in the worker's change. In d05, both
+versions rejected the same criterion. The verifier judged it differently from run to run
+(UNKNOWN once, FAIL the other time), which is ordinary model variation.
+
+One attempt per epic cannot measure a completion-rate difference. What the comparison shows
+is that Phase 2 is not the cause of the failures. The rollout gate (more completions) is
+still not demonstrated.
+
 ## Recommended next step
 
-Run the pre-Phase-2 code (`ff6a49b`) through the same harness on the same three expansion
-snapshots, with the proposal supplied and a normal umask, then compare gate by gate. That is
-the only comparison that separates Phase 2 from the harness and from model variation. It
-needs fresh approval: roughly 45 calls, which would bring the total past the 120-call limit
-(74 used), so it needs the limit raised or a smaller scope (for example d07 only, about 15
-calls).
+Proceed to Phase 3 (plans in `docs/phase3a-plan.md` and `docs/phase3b-plan.md`): make
+"not demonstrated" verdicts repairable, which is the stop d05 hit.
+
+Decided 2026-11-08:
+- Evidence repairs share the final-verification repair budget, raised from 2 rounds to 3.
+- An evidence repair may change product code inside the approved scope.
