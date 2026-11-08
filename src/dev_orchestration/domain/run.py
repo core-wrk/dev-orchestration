@@ -7,7 +7,7 @@ from dev_orchestration.domain.enums import ProjectClass, RunState, Tier
 
 MAX_REMEDIATION_CYCLES = 2
 MAX_VALIDATION_REPAIRS = 2
-MAX_VERIFICATION_REPAIRS = 2
+MAX_VERIFICATION_REPAIRS = 3
 
 
 class GitBlock(BaseModel):

@@ -729,6 +729,13 @@ def repair_verification(
 ) -> AgentResult:
     """Give the worker the rejected acceptance checks for one verification repair round."""
     rejected = [verdict for verdict in verification.verdicts if verdict.verdict != "PASS"]
+    evidence_note = (
+        "Evidence repair: final verification could not see these criteria demonstrated. "
+        "Add or extend tests that directly demonstrate each one; change product code only "
+        "where such a test exposes a defect, inside the approved scope.\n"
+        if repair is not None and repair.get("mode") == "evidence"
+        else ""
+    )
     packet = assemble(
         "remediation",
         [
@@ -737,11 +744,14 @@ def repair_verification(
             ContextRef(
                 label=Category.BLOCKING_FINDINGS,
                 path=None,
-                content="\n".join(
-                    f"{verdict.criterion}: {verdict.verdict}: {verdict.evidence}"
-                    for verdict in rejected
-                )
-                or f"final verification returned {verification.outcome}",
+                content=evidence_note
+                + (
+                    "\n".join(
+                        f"{verdict.criterion}: {verdict.verdict}: {verdict.evidence}"
+                        for verdict in rejected
+                    )
+                    or f"final verification returned {verification.outcome}"
+                ),
             ),
             ContextRef(label=Category.DIFF, path=None, content=diff),
             ContextRef(label=Category.VALIDATION_EVIDENCE, path=None, content=validation_evidence),

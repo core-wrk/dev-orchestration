@@ -194,15 +194,35 @@ def file_digests(root: Path, paths: list[str]) -> dict[str, str | None]:
     return digests
 
 
+def edited_paths(
+    root: Path, before: dict[str, str | None], inventory_after: list[str]
+) -> list[str]:
+    """Files whose content changed since ``before`` was taken."""
+    current = file_digests(root, sorted({*before, *inventory_after}))
+    return sorted(path for path, digest in current.items() if before.get(path) != digest)
+
+
 def repair_edit_violations(
     root: Path, before: dict[str, str | None], inventory_after: list[str], scope: dict
 ) -> list[str]:
     """Files a repair changed beyond the ones it was allowed to change."""
     if not scope["restricted"]:
         return []
-    current = file_digests(root, sorted({*before, *inventory_after}))
-    edited = [path for path, digest in current.items() if before.get(path) != digest]
-    return sorted(path for path in edited if path not in scope["files"])
+    edited = edited_paths(root, before, inventory_after)
+    return [path for path in edited if path not in scope["files"]]
+
+
+def is_test_path(path: str) -> bool:
+    """A test file by the usual naming conventions of Python and JavaScript projects."""
+    parts = path.split("/")
+    name = parts[-1]
+    return (
+        any(part in {"tests", "test", "__tests__"} for part in parts[:-1])
+        or name.startswith("test_")
+        or name.endswith(("_test.py", "_test.go"))
+        or ".test." in name
+        or ".spec." in name
+    )
 
 
 def validation_repair_scope(
@@ -238,19 +258,41 @@ def review_repair_scope(review: ReviewResult, round_number: int, fence: ScopeFen
     )
 
 
+def verification_route(verification: Verification) -> str | None:
+    """How a rejected final verification is repaired, decided by its criterion verdicts.
+
+    ``product`` when any criterion failed; ``evidence`` when the only non-passing verdicts
+    are UNKNOWN for want of a test; None when no worker repair can help and the run escalates.
+    The verifier's own BLOCKED or CHANGES_REQUIRED label does not decide it; ESCALATE does.
+    """
+    if verification.outcome is Outcome.ESCALATE:
+        return None
+    rejected = [verdict for verdict in verification.verdicts if verdict.verdict != "PASS"]
+    if any(verdict.verdict == "FAIL" for verdict in rejected):
+        return "product"
+    if rejected and all(verdict.missing_evidence == "test" for verdict in rejected):
+        return "evidence"
+    return None
+
+
 def verification_repair_scope(
     verification: Verification, round_number: int, fence: ScopeFence
 ) -> dict:
     rejected = [verdict for verdict in verification.verdicts if verdict.verdict != "PASS"]
-    if not rejected:
+    mode = verification_route(verification)
+    if not rejected or mode is None:
         raise NoSafeRepairScope(
-            "final verification rejected the change without failing any criterion"
+            "final verification rejected the change without a criterion a worker can repair"
         )
-    return repair_scope(
+    scope = repair_scope(
         "final_verification",
         round_number,
         "; ".join(verdict.criterion for verdict in rejected),
-        "every acceptance criterion has a PASS verdict",
+        "every acceptance criterion has a PASS verdict"
+        if mode == "product"
+        else "a test demonstrates each listed criterion, and every criterion has a PASS verdict",
         [],
         fence,
     )
+    scope["mode"] = mode
+    return scope

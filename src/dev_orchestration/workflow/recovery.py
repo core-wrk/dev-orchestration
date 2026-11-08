@@ -42,7 +42,9 @@ from dev_orchestration.workflow.checkpoints import (
 from dev_orchestration.workflow.contract import (
     CONTRACT_ARTIFACT,
     NoSafeRepairScope,
+    edited_paths,
     file_digests,
+    is_test_path,
     load_contract,
     load_repair_scope,
     repair_edit_violations,
@@ -51,6 +53,7 @@ from dev_orchestration.workflow.contract import (
     save_repair_scope,
     validation_repair_scope,
     verification_repair_scope,
+    verification_route,
 )
 from dev_orchestration.workflow.dependencies import dependency_sources
 from dev_orchestration.workflow.engine import Engine
@@ -1383,6 +1386,7 @@ def resume_run(
                     save_repair_scope(store, scope)
                     store.update_manifest(status=RunState.REMEDIATION)
                     before_repair = _deliverable_patch(worktree_repo, base)
+                    before_files = file_digests(worktree, worktree_repo.change_inventory(base))
                     guarded_repair(
                         scope,
                         lambda verification=verification, outcomes=outcomes, dependency_report=dependency_report, scope=scope, round_number=round_number: (
@@ -1402,7 +1406,13 @@ def resume_run(
                         ),
                     )
                     after_repair = _deliverable_patch(worktree_repo, base)
-                    if after_repair == before_repair:
+                    missing_test = scope.get("mode") == "evidence" and not any(
+                        is_test_path(path)
+                        for path in edited_paths(
+                            worktree, before_files, worktree_repo.change_inventory(base)
+                        )
+                    )
+                    if after_repair == before_repair or missing_test:
                         _record_no_progress(
                             engine,
                             cause="remediation_no_progress",
@@ -1410,6 +1420,7 @@ def resume_run(
                             before=before_repair,
                             after=after_repair,
                             cycle=round_number,
+                            missing_test=missing_test,
                         )
                         return _outcome(engine, repo=repo, worktree=worktree)
                     checkpoint(
@@ -1457,7 +1468,7 @@ def resume_run(
                                 stop_code="verification_rejected",
                             )
                             return _outcome(engine, verification, repo=repo, worktree=worktree)
-                        if verification.outcome in {Outcome.BLOCKED, Outcome.ESCALATE}:
+                        if verification_route(verification) is None:
                             _terminal(
                                 engine,
                                 RunState.ESCALATED,

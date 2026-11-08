@@ -44,7 +44,9 @@ from dev_orchestration.workflow.contract import (
     CONTRACT_ARTIFACT,
     PRECHECK_NAME,
     NoSafeRepairScope,
+    edited_paths,
     file_digests,
+    is_test_path,
     load_contract,
     precheck,
     repair_edit_violations,
@@ -53,6 +55,7 @@ from dev_orchestration.workflow.contract import (
     save_repair_scope,
     validation_repair_scope,
     verification_repair_scope,
+    verification_route,
 )
 from dev_orchestration.workflow.dependencies import dependency_sources
 from dev_orchestration.workflow.engine import Engine, IllegalTransitionError
@@ -412,8 +415,12 @@ def _record_no_progress(
     before: bytes,
     after: bytes,
     cycle: int | None = None,
+    missing_test: bool = False,
 ) -> None:
-    """Record a stable no-progress failure while leaving any partial patch recoverable."""
+    """Record a stable no-progress failure while leaving any partial patch recoverable.
+
+    ``missing_test`` marks an evidence repair that changed files but no test file.
+    """
     is_empty = not after
     unchanged = before == after
     artifact_name = (
@@ -430,7 +437,11 @@ def _record_no_progress(
             "cause": cause,
             "stage": stage,
             "cycle": cycle,
-            "comparison": "empty_change_patch" if is_empty else "unchanged_change_patch",
+            "comparison": "no_test_change"
+            if missing_test
+            else "empty_change_patch"
+            if is_empty
+            else "unchanged_change_patch",
             "comparison_format": "git-change-patch-bytes",
             "changed": not unchanged,
             "before_digest": _patch_digest(before),
@@ -446,6 +457,8 @@ def _record_no_progress(
     reason = (
         "implementation worker produced no deliverable changes"
         if cause == "worker_no_changes"
+        else f"evidence repair round {cycle} changed no test file"
+        if missing_test
         else f"verification repair round {cycle} produced no deliverable progress"
         if stage == "verification_repair"
         else f"implementation remediation cycle {cycle} produced no deliverable progress"
@@ -1936,7 +1949,7 @@ def execute_run(
                     stop_code="verification_rejected",
                 )
                 return _outcome(engine, verification, repo=repo, worktree=worktree)
-            if verification.outcome in {Outcome.BLOCKED, Outcome.ESCALATE}:
+            if verification_route(verification) is None:
                 _terminal(
                     engine,
                     RunState.ESCALATED,
@@ -1969,6 +1982,7 @@ def execute_run(
             )
             engine.transition(RunState.REMEDIATION)
             before_repair = _deliverable_patch(worktree_repo, base_commit)
+            before_files = file_digests(worktree, worktree_repo.change_inventory(base_commit))
             guarded_repair(
                 repair_info,
                 lambda verification=verification, diff=diff, outcomes=outcomes, repair_info=repair_info, round_number=round_number: (
@@ -1988,7 +2002,13 @@ def execute_run(
                 ),
             )
             after_repair = _deliverable_patch(worktree_repo, base_commit)
-            if after_repair == before_repair:
+            missing_test = repair_info.get("mode") == "evidence" and not any(
+                is_test_path(path)
+                for path in edited_paths(
+                    worktree, before_files, worktree_repo.change_inventory(base_commit)
+                )
+            )
+            if after_repair == before_repair or missing_test:
                 _record_no_progress(
                     engine,
                     cause="remediation_no_progress",
@@ -1996,6 +2016,7 @@ def execute_run(
                     before=before_repair,
                     after=after_repair,
                     cycle=round_number,
+                    missing_test=missing_test,
                 )
                 return _outcome(engine, repo=repo, worktree=worktree)
             receipt(

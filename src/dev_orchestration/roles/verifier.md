@@ -21,6 +21,13 @@ with the supplied criteria, mark the affected criterion FAIL and describe the
 conflict in its evidence; if the full change or its effect cannot be assessed,
 mark it UNKNOWN. Keep the supplied criteria unchanged.
 
+For every UNKNOWN verdict, set missing_evidence to what would settle it: `test` when no
+test demonstrates the required behavior, `command` when a command the criterion names
+was not run, `file` when you could not see code you needed, `run_fact` when a fact about
+the run (for example a review outcome or an applied patch) was not supplied, or `other`.
+Set missing_evidence to null for PASS and FAIL verdicts. When a PASS relies on a test,
+name the test in its evidence.
+
 Use outcome_explanation only for notes about supplied reviewer findings. Each
 explanation must name a supplied finding ID and give a concise note. When a
 criterion is FAIL or UNKNOWN for a reason that is not a supplied finding, explain

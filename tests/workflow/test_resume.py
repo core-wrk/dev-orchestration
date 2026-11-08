@@ -619,7 +619,8 @@ def test_resumed_fail_or_unknown_verification_cannot_complete(tmp_path, verdict)
 
     resumed = resume_run(git, CONFIG, registry(ResumeWithVerdict()), paused.run_id)
 
-    assert resumed.final_state is RunState.FAILED
+    expected = RunState.FAILED if verdict == "FAIL" else RunState.ESCALATED
+    assert resumed.final_state is expected
     saved = json.loads((paused.store_root / "verification/final-verification.json").read_text())
     assert saved["verdicts"][0]["verdict"] == verdict
 

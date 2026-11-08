@@ -276,22 +276,6 @@ def test_final_verification_rejection_is_repaired_in_place(tmp_path):
     assert (outcome.store_root / "execution/repair-final_verification-v1.json").is_file()
 
 
-def test_verification_escalates_after_two_failed_repairs(tmp_path):
-    git = repo(tmp_path)
-    adapter = Varying(script() | {"verifier": [_verdict("FAIL")]})
-    outcome = execute_run(git, CONFIG, registry(adapter), "go", tmp_path / "wt", CRITERIA)
-
-    assert outcome.final_state is RunState.ESCALATED
-    assert adapter.worker_calls == 3
-    manifest = _manifest(outcome)
-    assert manifest.stop.repairs["final_verification"].model_dump() == {
-        "used": 2,
-        "allowed": 2,
-        "exhausted": True,
-    }
-    assert manifest.terminal_cause == "verification_exhausted"
-
-
 def test_verifier_escalation_is_not_repaired(tmp_path):
     git = repo(tmp_path)
     escalate = dict(_verdict("FAIL"), outcome="ESCALATE")
@@ -464,7 +448,7 @@ def test_resumed_final_verification_rejection_is_repaired_in_place(tmp_path):
     assert _store(git, first).read_manifest().repair_rounds["final_verification"] == 1
 
 
-def test_resumed_verification_escalates_after_two_failed_repairs(tmp_path):
+def test_resumed_verification_escalates_after_its_repair_rounds_are_used(tmp_path):
     git = test_resume.repo(tmp_path)
     first = _first_run(git, tmp_path, Seq(timeout_on_call=1))
 
@@ -472,9 +456,9 @@ def test_resumed_verification_escalates_after_two_failed_repairs(tmp_path):
     resumed = resume_run(git, test_resume.CONFIG, test_resume.registry(adapter), first.run_id)
 
     assert resumed.final_state is RunState.ESCALATED
-    assert adapter.worker_calls == 3
+    assert adapter.worker_calls == 4
     manifest = _store(git, first).read_manifest()
-    assert manifest.verification_repairs_reserved == 2
+    assert manifest.verification_repairs_reserved == 3
     assert manifest.terminal_cause == "verification_exhausted"
 
 

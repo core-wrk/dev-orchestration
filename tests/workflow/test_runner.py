@@ -984,7 +984,10 @@ def test_fail_or_unknown_verification_cannot_complete_local(tmp_path, verdict):
     outcome = execute_run(
         git, CONFIG, registry(Scripted(script(verifier=failed))), "bad", tmp_path / "wt", CRITERIA
     )
-    assert outcome.final_state is RunState.FAILED
+    # FAIL goes to a repair that changes nothing (FAILED); an UNKNOWN that names no missing
+    # test cannot be repaired by the worker (ESCALATED). Neither completes.
+    expected = RunState.FAILED if verdict == "FAIL" else RunState.ESCALATED
+    assert outcome.final_state is expected
     saved = json.loads((outcome.store_root / "verification/final-verification.json").read_text())
     assert saved["outcome_explanation"] == []
     assert saved["unresolved_finding_ids"] == []

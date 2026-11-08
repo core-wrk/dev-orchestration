@@ -108,6 +108,9 @@ class AcceptanceVerdict(BaseModel):
     criterion: str
     verdict: Literal["PASS", "FAIL", "UNKNOWN"]
     evidence: str
+    # What would settle an UNKNOWN verdict. Answers saved before this field existed have none,
+    # and the orchestrator treats that like "other": not something a worker repair can supply.
+    missing_evidence: Literal["test", "command", "file", "run_fact", "other"] | None = None
 
 
 class OutcomeExplanation(BaseModel):

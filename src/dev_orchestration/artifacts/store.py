@@ -81,7 +81,10 @@ _STOP_DIAGNOSTICS = {
         "reviewer rejected",
         "final verification repair budget exhausted",
     ),
-    "verification_escalated": ("reviewer rejected", "final verification requested escalation"),
+    "verification_escalated": (
+        "reviewer rejected",
+        "final verification requested escalation or evidence no worker repair can supply",
+    ),
     "repair_scope_unsafe": (
         "reviewer rejected",
         "rejection named no file the run is allowed to change",

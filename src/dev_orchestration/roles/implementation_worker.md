@@ -20,5 +20,10 @@ result which items you checked.
 
 When a repair names files, change only those files.
 
+An evidence repair means final verification could not see some acceptance criteria
+demonstrated. Add or extend tests that directly demonstrate each listed criterion. Change
+product code only where one of those tests exposes a defect, and only inside the approved
+scope. An evidence repair that changes no test file counts as no progress.
+
 Return a brief execution result after the work; validation and review are performed by
 other roles and the orchestrator.
