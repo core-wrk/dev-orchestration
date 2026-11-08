@@ -109,6 +109,7 @@ class RunManifest(BaseModel):
     git: GitBlock = Field(default_factory=GitBlock)
     resolved_config: dict = Field(default_factory=dict)
     status: RunState = RunState.CREATED
+    state_entered_at: datetime | None = None
     created_at: datetime | None = None
     completed_at: datetime | None = None
     terminal_reason: str | None = None

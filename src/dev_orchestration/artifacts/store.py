@@ -12,6 +12,7 @@ import re
 import signal
 import subprocess
 import time
+import uuid
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -193,6 +194,8 @@ class RunStore:
         return root / ".ai" / "runs"
 
     def initialize(self, manifest: RunManifest) -> None:
+        if manifest.epic_id is not None and manifest.state_entered_at is None:
+            manifest = manifest.model_copy(update={"state_entered_at": datetime.now(UTC)})
         self.root.mkdir(parents=True, exist_ok=False)
         for sub in SUBDIRECTORIES:
             (self.root / sub).mkdir()
@@ -220,6 +223,8 @@ class RunStore:
         manifest = previous.model_copy(update=fields)
         changed = manifest.status != previous.status
         if changed:
+            boundary = datetime.now(UTC)
+            manifest.state_entered_at = boundary
             role = transition_role or _STAGE_ROLES.get(manifest.status, "orchestrator")
             actor = _stage_actor(manifest, role)
             default_stop = _STOP_STATES.get(manifest.status)
@@ -244,6 +249,14 @@ class RunStore:
                     "event": "state_changed",
                     "from": str(previous.status),
                     "to": str(manifest.status),
+                    "from_started_at": previous.state_entered_at.isoformat()
+                    if previous.state_entered_at
+                    else None,
+                    "from_ended_at": boundary.isoformat(),
+                    "to_started_at": boundary.isoformat(),
+                    "from_actor": previous.stage_actor.model_dump()
+                    if previous.stage_actor
+                    else None,
                     **actor.model_dump(),
                 }
             )
@@ -256,6 +269,44 @@ class RunStore:
                     }
                 )
         return manifest
+
+    @contextmanager
+    def stage_operation(self, operation: str, actor: StageActor):
+        """Record an operation interval, including an interrupted or failed call."""
+        manifest = self.read_manifest()
+        if manifest.epic_id is None:
+            yield
+            return
+        operation_id = uuid.uuid4().hex
+        started = datetime.now(UTC)
+        details = {
+            "operation_id": operation_id,
+            "run_id": manifest.run_id,
+            "epic_id": manifest.epic_id,
+            "operation": operation,
+            "started_at": started.isoformat(),
+            **actor.model_dump(),
+        }
+        self.append_event({"event": "stage_started", **details})
+        outcome = "completed"
+        try:
+            yield
+        except BaseException:
+            outcome = "interrupted"
+            raise
+        finally:
+            ended = datetime.now(UTC)
+            current_actor = self.read_manifest().stage_actor
+            if current_actor is not None and current_actor.role == actor.role:
+                details.update(current_actor.model_dump())
+            self.append_event(
+                {
+                    "event": "stage_finished",
+                    **details,
+                    "ended_at": ended.isoformat(),
+                    "outcome": outcome,
+                }
+            )
 
     def record_stop(self, code: str) -> None:
         """Capture a failed execution attempt that leaves the run recoverable."""

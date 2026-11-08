@@ -92,6 +92,14 @@ def test_plan_reconciliation_records_rounds_and_each_call(tmp_path):
         ("fake", "m", 1),
         ("fake", "m", 2),
     ]
+    intervals = [
+        event
+        for event in read_events(outcome.store_root)
+        if event["event"] == "stage_finished" and event["operation"] == "plan_reconciler"
+    ]
+    assert len(intervals) == 2
+    assert len({event["operation_id"] for event in intervals}) == 2
+    assert intervals[0]["ended_at"] <= intervals[1]["started_at"]
 
 
 def test_bootstrap_failure_keeps_safe_stop_and_epic_id(tmp_path, monkeypatch):
@@ -226,6 +234,13 @@ def test_planning_provider_stop_names_active_operation(tmp_path, role, stage, ru
     assert stop.stage == stage
     assert stop.run_state is run_state
     assert (stop.role, stop.provider, stop.model) == (role, "fake", "m")
+    interval = next(
+        event
+        for event in read_events(outcome.store_root)
+        if event["event"] == "stage_finished" and event["operation"] == role
+    )
+    assert interval["outcome"] == "interrupted"
+    assert interval["started_at"] <= interval["ended_at"]
 
 
 def test_resumed_planning_failure_keeps_operation_attribution(tmp_path):
@@ -311,6 +326,53 @@ def test_manual_resume_records_actor_and_pause(tmp_path):
     assert action["actor"]
     assert datetime.fromisoformat(action["ts"]).tzinfo is not None
     assert summarize_epics(git.root)["completed_with_human_intervention"] == 1
+    intervals = [
+        event
+        for event in read_events(store.root)
+        if event["event"] == "stage_finished" and event["operation"] == "implementation_worker"
+    ]
+    assert [event["outcome"] for event in intervals] == ["interrupted", "completed"]
+    assert all(event["started_at"] <= event["ended_at"] for event in intervals)
+
+
+def test_stage_timing_uses_actual_operations_and_transition_boundaries(tmp_path):
+    git = test_runner.repo(tmp_path)
+    adapter = test_runner.Scripted(test_runner.script())
+    outcome = test_runner.execute_run(
+        git,
+        test_runner.CONFIG,
+        test_runner.registry(adapter),
+        "synthetic timing",
+        tmp_path / "wt",
+        test_runner.CRITERIA,
+        goal_id="timing-epic",
+    )
+    events = read_events(outcome.store_root)
+    started = {
+        event["operation_id"]: event for event in events if event["event"] == "stage_started"
+    }
+    finished = [event for event in events if event["event"] == "stage_finished"]
+    assert len(finished) == len(started)
+    assert {event["operation_id"] for event in finished} == set(started)
+    for event in finished:
+        start = started[event["operation_id"]]
+        assert event["epic_id"] == "timing-epic"
+        assert event["started_at"] == start["started_at"]
+        assert datetime.fromisoformat(event["started_at"]).tzinfo is not None
+        assert event["started_at"] <= event["ended_at"]
+    planner = next(event for event in finished if event["operation"] == "planner")
+    planned = next(
+        event for event in events if event["event"] == "state_changed" and event["to"] == "PLANNED"
+    )
+    assert planner["ended_at"] <= planned["from_ended_at"]
+    assert planned["from_ended_at"] == planned["to_started_at"]
+    assert planned["from_started_at"] <= planned["from_ended_at"]
+    validation = next(event for event in finished if event["operation"] == "validation")
+    assert (validation["role"], validation["provider"], validation["model"]) == (
+        "validator",
+        None,
+        None,
+    )
 
 
 def test_scheduled_resume_counts_as_autonomous(tmp_path):

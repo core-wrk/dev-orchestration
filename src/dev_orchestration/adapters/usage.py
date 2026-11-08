@@ -285,6 +285,15 @@ class UsageAwareAdapter:
         self.store.append_event(event)
 
     def run(self, request: AgentRequest) -> AgentResult:
+        if self.store is None:
+            return self._run(request)
+        actor = StageActor(
+            role=request.role, provider=self.name, model=self.model_id(request.model_alias)
+        )
+        with self.store.stage_operation(request.role, actor):
+            return self._run(request)
+
+    def _run(self, request: AgentRequest) -> AgentResult:
         actor = StageActor(
             role=request.role, provider=self.name, model=self.model_id(request.model_alias)
         )

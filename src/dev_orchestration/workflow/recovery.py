@@ -1066,6 +1066,7 @@ def resume_run(
                         tuple(project_config.required_validation_links),
                         tuple(project_config.validation_files),
                         current.validation_input_hashes,
+                        store=store,
                     )
                     artifact = _save_validation(store, outcomes, cycle)
                     if not all_passed(outcomes):

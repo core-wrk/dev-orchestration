@@ -5,7 +5,7 @@ import json
 import re
 import subprocess
 import tempfile
-from contextlib import suppress
+from contextlib import nullcontext, suppress
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -22,7 +22,7 @@ from dev_orchestration.context.assembler import Category, ContextContractError, 
 from dev_orchestration.context.packet import ContextRef
 from dev_orchestration.domain.enums import Outcome, RunState, Tier
 from dev_orchestration.domain.findings import Verification, verification_allows_completion
-from dev_orchestration.domain.run import GitBlock, PauseRecord, RoleBinding
+from dev_orchestration.domain.run import GitBlock, PauseRecord, RoleBinding, StageActor
 from dev_orchestration.git.repo import EmptySnapshotError, GitCommandError, GitRepo
 from dev_orchestration.git.worktree import remove_worktree
 from dev_orchestration.scope import ScopeFence
@@ -846,31 +846,34 @@ def _run_validation_stage(
     required_paths: tuple[str, ...] = (),
     validation_files: tuple[str, ...] = (),
     expected_input_hashes: dict[str, str] | None = None,
+    store: RunStore | None = None,
 ):
     """Run validation while ensuring its ignored caches do not become residue."""
-    ignored_before = worktree_repo.ignored_paths()
-    try:
-        if validation_files:
-            actual = validation_file_hashes(
-                GitRepo(validation_root or worktree_repo.root), list(validation_files)
-            )
-            if expected_input_hashes is not None and actual != expected_input_hashes:
-                raise ValidationEnvironmentError(
-                    "declared validation files changed during the run; restart from validation"
+    timing = (
+        store.stage_operation("validation", StageActor(role="validator"))
+        if store
+        else nullcontext()
+    )
+    with timing:
+        ignored_before = worktree_repo.ignored_paths()
+        try:
+            if validation_files:
+                actual = validation_file_hashes(
+                    GitRepo(validation_root or worktree_repo.root), list(validation_files)
                 )
-        with validation_environment(
-            validation_root,
-            worktree_repo.root,
-            link_paths,
-            required_paths,
-            validation_files,
-        ):
-            result = action()
-        enforce_fence(worktree_repo, base_commit, fence)
-        return result
-    finally:
-        worktree_repo.restore_ignored_snapshot(ignored_before)
-        cleanup_ephemeral_paths(worktree_repo.root)
+                if expected_input_hashes is not None and actual != expected_input_hashes:
+                    raise ValidationEnvironmentError(
+                        "declared validation files changed during the run; restart from validation"
+                    )
+            with validation_environment(
+                validation_root, worktree_repo.root, link_paths, required_paths, validation_files
+            ):
+                result = action()
+            enforce_fence(worktree_repo, base_commit, fence)
+            return result
+        finally:
+            worktree_repo.restore_ignored_snapshot(ignored_before)
+            cleanup_ephemeral_paths(worktree_repo.root)
 
 
 def execute_run(
@@ -1030,6 +1033,7 @@ def execute_run(
                 tuple(project_config.required_validation_links),
                 tuple(project_config.validation_files),
                 store.read_manifest().validation_input_hashes,
+                store=store,
             )
             artifact = _save_validation(store, repaired, cycle)
             receipt(next_stage, [artifact], cycle)
@@ -1599,6 +1603,7 @@ def execute_run(
             tuple(project_config.required_validation_links),
             tuple(project_config.validation_files),
             store.read_manifest().validation_input_hashes,
+            store=store,
         )
         review_next = (
             "implementation_reviewer"
@@ -1717,6 +1722,7 @@ def execute_run(
                 tuple(project_config.required_validation_links),
                 tuple(project_config.validation_files),
                 store.read_manifest().validation_input_hashes,
+                store=store,
             )
             _save_validation(store, outcomes, cycle)
             outcomes, repair_failed = repair_failed_validation(

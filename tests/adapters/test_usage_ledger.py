@@ -120,6 +120,7 @@ def test_transient_provider_retry_is_bounded_and_skips_mutating_calls(
     tmp_path, monkeypatch, read_only, failures, attempts
 ):
     store = _store(tmp_path)
+    store.update_manifest(epic_id="synthetic-epic")
     delays = []
     monkeypatch.setattr(usage_module, "sleep", delays.append)
 
@@ -145,6 +146,11 @@ def test_transient_provider_retry_is_bounded_and_skips_mutating_calls(
     assert [event["usage"] for event in ledger] == [{"total_tokens": 3}] * attempts
     assert delays == [1, 2, 4][: attempts - 1]
     assert (result.exit_code == 0) == (attempts > failures)
+    events = [json.loads(line) for line in (store.root / "events.jsonl").read_text().splitlines()]
+    started = [event for event in events if event["event"] == "stage_started"]
+    finished = [event for event in events if event["event"] == "stage_finished"]
+    assert len(started) == len(finished) == 1
+    assert started[0]["operation_id"] == finished[0]["operation_id"]
 
 
 def test_transient_prelaunch_error_can_retry_worker(tmp_path, monkeypatch):
