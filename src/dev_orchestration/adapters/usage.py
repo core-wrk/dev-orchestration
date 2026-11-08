@@ -1,8 +1,12 @@
 """Provider-reported subscription usage, kept separate from token accounting."""
 
+import errno
+import json
 import re
+import subprocess
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
+from time import sleep
 
 from dev_orchestration.adapters.base import (
     AgentAdapter,
@@ -12,7 +16,58 @@ from dev_orchestration.adapters.base import (
     AgentTimeoutError,
     agent_result_record,
 )
+from dev_orchestration.adapters.tokens import claude_usage, codex_usage
 from dev_orchestration.artifacts.store import RunStore
+from dev_orchestration.domain.run import StageActor
+
+RETRY_BACKOFF = (1, 2, 4)
+TRANSIENT_LAUNCH_ERRNOS = frozenset({errno.EAGAIN, errno.EINTR})
+
+
+class ProviderLaunchError(OSError):
+    """A provider subprocess could not be launched."""
+
+
+def launch_provider(command: list[str], **kwargs) -> subprocess.Popen:
+    try:
+        return subprocess.Popen(command, **kwargs)
+    except OSError as exc:
+        if exc.errno not in TRANSIENT_LAUNCH_ERRNOS:
+            raise
+        raise ProviderLaunchError(*exc.args) from exc
+
+
+_TRANSIENT_PROVIDER = re.compile(
+    r"overloaded_error|server_overloaded|temporarily unavailable|"
+    r"connection (?:reset|refused)|\b(?:502 bad gateway|503 service unavailable|504 gateway timeout)\b",
+    re.IGNORECASE,
+)
+_CONTEXT_LIMIT = re.compile(
+    r"context(?:[ _-]?window)?[ _-]?(?:length|limit|exceeded)|"
+    r"(?:token|output token)[ _-]?limit|prompt is too long",
+    re.IGNORECASE,
+)
+
+
+def _reported_error(result: AgentResult) -> str:
+    diagnostic = result.diagnostic or {}
+    return f"{diagnostic.get('code', '')} {diagnostic.get('error', '')} {result.stderr}"
+
+
+def _partial_usage(exc: OSError | RuntimeError, provider: str) -> dict | None:
+    output = getattr(exc.__cause__, "output", None)
+    if isinstance(output, bytes):
+        output = output.decode(errors="replace")
+    if not isinstance(output, str):
+        return None
+    if provider == "codex":
+        return codex_usage(output)
+    if provider == "claude":
+        try:
+            return claude_usage(json.loads(output))
+        except ValueError:
+            pass
+    return None
 
 
 @dataclass(frozen=True)
@@ -192,6 +247,10 @@ class UsageAwareAdapter:
         probe = getattr(self.adapter, "observe_usage", None)
         return probe() if callable(probe) else UsageObservation(provider=self.name)
 
+    def model_id(self, alias: str | None) -> str | None:
+        resolve = getattr(self.adapter, "model_id", None)
+        return resolve(alias) if callable(resolve) else alias
+
     def _record_call(
         self,
         request: AgentRequest,
@@ -199,6 +258,7 @@ class UsageAwareAdapter:
         *,
         result: AgentResult | None = None,
         outcome: str | None = None,
+        usage: dict | None = None,
     ) -> None:
         """Append one token_usage event per provider call; retries count too."""
         if self.store is None:
@@ -206,8 +266,9 @@ class UsageAwareAdapter:
         event: dict = {
             "event": "token_usage",
             "role": request.role,
-            "provider": self.name,
-            "model": result.model if result is not None else request.model_alias,
+            "provider": result.provider if result is not None else self.name,
+            "model": (result.model if result is not None else None)
+            or self.model_id(request.model_alias),
             "reasoning": request.reasoning,
             "attempt": attempt,
         }
@@ -220,10 +281,15 @@ class UsageAwareAdapter:
             event["usage"] = result.usage
         else:
             event["outcome"] = outcome
-            event["usage"] = None
+            event["usage"] = usage
         self.store.append_event(event)
 
     def run(self, request: AgentRequest) -> AgentResult:
+        actor = StageActor(
+            role=request.role, provider=self.name, model=self.model_id(request.model_alias)
+        )
+        if self.store is not None:
+            self.store.update_manifest(stage_actor=actor, stage_error=None)
         observation = None
         if self.auto_resume:
             try:
@@ -243,20 +309,62 @@ class UsageAwareAdapter:
                 )
             ):
                 raise UsageLimitError(observation, request.role)
-        if self.store is not None:
-            attempts = dict(self.store.read_manifest().stage_attempts)
-            attempts[request.role] = attempts.get(request.role, 0) + 1
-            self.store.update_manifest(stage_attempts=attempts)
-        attempt = attempts[request.role] if self.store is not None else None
-        try:
-            result = self.adapter.run(request)
-        except (AgentTimeoutError, AgentInterruptedError) as exc:
-            # Tokens spent before a timeout or signal are unknowable, but the
-            # call itself is still a cost sink worth seeing in the ledger.
-            self._record_call(request, attempt, outcome=type(exc).__name__)
-            raise
-        self._record_call(request, attempt, result=result)
-        limited = rejection(result)
+        for delay in (*RETRY_BACKOFF, None):
+            attempt = None
+            if self.store is not None:
+                attempts = self.store.read_manifest().stage_attempts
+                attempt = attempts.get(request.role, 0) + 1
+                self.store.update_manifest(stage_attempts={**attempts, request.role: attempt})
+            try:
+                result = self.adapter.run(request)
+            except (AgentTimeoutError, AgentInterruptedError, OSError) as exc:
+                self._record_call(
+                    request,
+                    attempt,
+                    outcome=type(exc).__name__,
+                    usage=_partial_usage(exc, self.name),
+                )
+                if not (
+                    delay is not None
+                    and isinstance(exc, ProviderLaunchError)
+                    and exc.errno in TRANSIENT_LAUNCH_ERRNOS
+                ):
+                    raise
+            else:
+                self._record_call(request, attempt, result=result)
+                limited = rejection(result)
+                error = _reported_error(result) if result.exit_code != 0 else ""
+                context_limit = bool(_CONTEXT_LIMIT.search(error))
+                if self.store is not None:
+                    self.store.update_manifest(
+                        stage_actor=actor.model_copy(
+                            update={
+                                "provider": result.provider,
+                                "model": result.model or actor.model,
+                            }
+                        ),
+                        stage_error="provider_context_limit" if context_limit else None,
+                    )
+                if not (
+                    delay is not None
+                    and limited is None
+                    and not context_limit
+                    and not _NON_SUBSCRIPTION.search(error)
+                    and request.allowed_tools
+                    and self.supports("read_only_review")
+                    and _TRANSIENT_PROVIDER.search(error)
+                ):
+                    return self._finish(request, result, limited, observation)
+            sleep(delay)
+        raise AssertionError("final provider attempt must return or raise")
+
+    def _finish(
+        self,
+        request: AgentRequest,
+        result: AgentResult,
+        limited: UsageObservation | None,
+        observation: UsageObservation | None,
+    ) -> AgentResult:
         if limited is not None:
             if observation is not None and limited.account_id is None:
                 limited = replace(limited, account_id=observation.account_id)

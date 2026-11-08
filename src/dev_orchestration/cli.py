@@ -57,6 +57,7 @@ from dev_orchestration.workflow.reporting import (
     read_events,
     read_finding_summaries,
     render_token_usage,
+    summarize_epics,
     summarize_token_usage,
 )
 from dev_orchestration.workflow.restart import restart_run, restart_status
@@ -309,6 +310,7 @@ def run(
             reviewed_plan_from=review_source,
             auto_resume=auto_resume,
             seed_patch=seed_patch,
+            manual_start=True,
         )
         _report_plan_review_reuse(outcome)
     except EXPECTED_ERRORS as exc:
@@ -820,6 +822,42 @@ def scheduler_tick() -> None:
                     typer.echo(f"{run_id}: another wakeup owns this run")
             else:
                 queue.cancel(repo_root, run_id)
+
+
+@app.command()
+def record_edit(run_id: str = typer.Argument(..., help="Run with an operator-made edit")) -> None:
+    """Record an out-of-band edit without storing its contents."""
+    try:
+        repo = discover_repo(Path.cwd())
+        store = RunStore(repo.root, run_id)
+        if (
+            store.root.resolve().parent != RunStore.runs_directory(repo.root).resolve()
+            or not (store.root / "manifest.json").is_file()
+        ):
+            raise NoSuchRunError(f"run {run_id!r} does not exist")
+        with store.claim():
+            if store.read_manifest().epic_id is None:
+                raise ContextContractError("this run predates epic instrumentation")
+            store.record_human_action("edit")
+    except EXPECTED_ERRORS + (NoSuchRunError,) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+    typer.echo("Recorded a human edit.")
+
+
+@app.command()
+def epic_report(as_json: bool = typer.Option(False, "--json", help="Emit counts as JSON")) -> None:
+    """Count epics that completed without human intervention in this repository."""
+    try:
+        counts = summarize_epics(discover_repo(Path.cwd()).root)
+    except EXPECTED_ERRORS + (OSError, ValueError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+    if as_json:
+        typer.echo(json.dumps(counts, indent=2))
+    else:
+        for key, count in counts.items():
+            typer.echo(f"{key.replace('_', ' ').capitalize()}  {count}")
 
 
 @app.command()

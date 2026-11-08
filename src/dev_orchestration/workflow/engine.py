@@ -84,24 +84,27 @@ class Engine:
     def state(self) -> RunState:
         return self.store.read_manifest().status
 
-    def transition(self, to: RunState) -> RunManifest:
+    def transition(
+        self, to: RunState, *, role: str | None = None, stop_code: str | None = None
+    ) -> RunManifest:
         current = self.state
         allowed = LEGAL_TRANSITIONS.get(current, frozenset())
         if to not in allowed:
             raise IllegalTransitionError(
                 f"{current} -> {to} is not a legal transition; legal targets are {sorted(allowed)}"
             )
-        manifest = self.store.update_manifest(
+        return self.store.update_manifest(
             status=to,
+            transition_role=role,
+            stop_code=stop_code,
             completed_at=datetime.now(UTC) if to in TERMINAL_STATES else None,
         )
-        self.store.append_event({"event": "state_changed", "from": str(current), "to": str(to)})
-        return manifest
 
     def cancel(self, reason: str = "operator requested cancellation") -> RunManifest:
         """Move a non-terminal run to CANCELLED with an auditable reason."""
         if self.state in TERMINAL_STATES:
             raise IllegalTransitionError(f"{self.state} is already terminal")
         self.store.update_manifest(terminal_reason=reason)
+        self.store.record_human_action("cancel")
         self.store.append_event({"event": "run_cancel_requested", "detail": reason})
         return self.transition(RunState.CANCELLED)

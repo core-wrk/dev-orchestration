@@ -11,7 +11,7 @@ from dev_orchestration.adapters.registry import RoleRegistry
 from dev_orchestration.adapters.usage import UsageAwareAdapter, UsageLimitError, next_attempt
 from dev_orchestration.artifacts.store import CheckpointError, RunStore
 from dev_orchestration.config.models import ProjectConfig
-from dev_orchestration.context.assembler import Category, ContextContractError
+from dev_orchestration.context.assembler import Category, ContextContractError, PromptBudgetError
 from dev_orchestration.context.packet import ContextRef
 from dev_orchestration.domain.enums import Outcome, RunState, Tier
 from dev_orchestration.domain.findings import (
@@ -36,7 +36,7 @@ from dev_orchestration.workflow.checkpoints import (
 )
 from dev_orchestration.workflow.dependencies import dependency_sources
 from dev_orchestration.workflow.engine import Engine
-from dev_orchestration.workflow.invoke import AgentInvocationError
+from dev_orchestration.workflow.invoke import AgentInvocationError, SchemaEscalation
 from dev_orchestration.workflow.legacy import recover_legacy
 from dev_orchestration.workflow.plan_reuse import (
     RECEIPT as PLAN_REVIEW_RECEIPT,
@@ -310,6 +310,7 @@ def _check_run(
             )
         store.write_json_artifact("execution/adopted-worktree.json", current, immutable=True)
         store.append_event({"event": "worktree_adopted", "digest": current["digest"]})
+        store.record_human_action("edit")
     # Context is first resolved after classification; a run that paused before
     # then has none saved, so there is nothing to compare against.
     if receipt["next_stage"] != "classifier":
@@ -461,6 +462,7 @@ def approve_run(
         store.append_event(
             {"event": "human_approval_recorded", "plan_sha256": manifest.plan_sha256}
         )
+        store.record_human_action("approval")
         Engine(store).transition(RunState.APPROVED)
         return hashlib.sha256(
             (store.root / store.read_manifest().checkpoint).read_bytes()
@@ -502,6 +504,7 @@ def resume_run(
     run_id: str,
     *,
     automatic: bool = False,
+    manual_resume: bool = True,
     adopt_worktree: bool = False,
     auto_resume: bool | None = None,
     now: datetime | None = None,
@@ -530,6 +533,7 @@ def resume_run(
             registry,
             recovered_id,
             automatic=False,
+            manual_resume=manual_resume,
             adopt_worktree=False,
             now=now,
             restored_worktree=restored_worktree,
@@ -604,8 +608,30 @@ def resume_run(
         cycle = receipt["cycle"]
         if stage not in _STAGE_STATE:
             raise ResumeRefused(f"unknown saved next stage {stage!r}")
-        store.update_manifest(status=_STAGE_STATE[stage], pause=None, terminal_reason=None)
-        store.append_event({"event": "run_resumed", "stage": stage, "automatic": automatic})
+        queued_cloud_resume = (
+            expected_checkpoint_digest is not None
+            and manifest.cloud_session is not None
+            and expected_checkpoint_digest == manifest.cloud_session.last_delivery_digest
+        )
+        if manual_resume and not automatic and not queued_cloud_resume:
+            store.record_human_action("resume")
+        stage_role = {
+            "validation": "validator",
+            "plan_finalization": "orchestrator",
+            "commit": "verifier",
+            "validation_repair": "implementation_worker",
+            "remediation": "implementation_worker",
+        }.get(stage, stage)
+        store.update_manifest(
+            status=_STAGE_STATE[stage],
+            transition_role=stage_role,
+            pause=None,
+            terminal_reason=None,
+            stop=None,
+        )
+        store.append_event(
+            {"event": "run_resumed", "stage": stage, "automatic": automatic or queued_cloud_resume}
+        )
 
         def checkpoint(next_stage: str, artifacts: list[str], cycle_number: int = cycle) -> None:
             if store.read_manifest().seed_patch_artifact:
@@ -800,7 +826,10 @@ def resume_run(
                             acceptance_criteria=criteria,
                             dependency_report=dependency_report,
                         )
-                    store.update_manifest(status=RunState.PLANNED)
+                    store.update_manifest(
+                        status=RunState.PLANNED,
+                        transition_role="orchestrator" if current.external_plan_artifact else None,
+                    )
                     checkpoint("plan_reviewer", [f"planning/{version.name}"])
                     stage = "plan_reviewer"
                 elif stage == "plan_reviewer":
@@ -841,11 +870,18 @@ def resume_run(
                             "plan_review_escalated"
                             if reviewed.outcome is Outcome.ESCALATE
                             else "other",
+                            stop_code="plan_review_blocked" if target is RunState.BLOCKED else None,
                         )
                         return _outcome(engine, repo=repo, worktree=worktree)
                     cycle += 1
                     if cycle > MAX_REMEDIATION_CYCLES:
-                        raise ResumeRefused("plan reconciliation budget exhausted")
+                        _terminal(
+                            engine,
+                            RunState.ESCALATED,
+                            "plan reconciliation budget exhausted",
+                            stop_code="plan_review_exhausted",
+                        )
+                        return _outcome(engine, repo=repo, worktree=worktree)
                     version = reconcile(
                         registry,
                         _latest_plan(store).read_text(encoding="utf-8"),
@@ -855,8 +891,11 @@ def resume_run(
                         criteria,
                         scope_context,
                         dependency_report,
+                        cycle=cycle,
                     )
-                    store.update_manifest(status=RunState.PLANNED)
+                    store.update_manifest(
+                        status=RunState.PLANNED, transition_role="plan_reconciler"
+                    )
                     checkpoint("plan_reviewer", [f"planning/{version.name}"], cycle)
                     stage = "plan_reviewer"
                 elif stage == "plan_finalization":
@@ -876,6 +915,7 @@ def resume_run(
                             "plan_review_escalated"
                             if reviewed.outcome is Outcome.ESCALATE
                             else "other",
+                            stop_code="plan_review_blocked" if target is RunState.BLOCKED else None,
                         )
                         return _outcome(engine, repo=repo, worktree=worktree)
                     store.approve_plan(_latest_plan(store))
@@ -1062,6 +1102,7 @@ def resume_run(
                     current = store.read_manifest()
                     if current.validation_repairs_reserved != 1:
                         raise ResumeRefused("validation repair was not reserved")
+                    store.update_manifest(status=RunState.REMEDIATION)
                     _run_worktree_stage(
                         worktree_repo,
                         base,
@@ -1109,6 +1150,9 @@ def resume_run(
                             "implementation_review_escalated"
                             if reviewed.outcome is Outcome.ESCALATE
                             else "other",
+                            stop_code="implementation_review_blocked"
+                            if target is RunState.BLOCKED
+                            else None,
                         )
                         return _outcome(engine, repo=repo, worktree=worktree)
                     stage = "remediation" if reviewed.blocking_ids() else "verifier"
@@ -1150,11 +1194,20 @@ def resume_run(
                             "implementation_review_escalated"
                             if reviewed.outcome is Outcome.ESCALATE
                             else "other",
+                            stop_code="implementation_review_blocked"
+                            if target is RunState.BLOCKED
+                            else None,
                         )
                         return _outcome(engine, repo=repo, worktree=worktree)
                     cycle += 1
                     if cycle > MAX_REMEDIATION_CYCLES:
-                        raise ResumeRefused("remediation budget exhausted")
+                        _terminal(
+                            engine,
+                            RunState.ESCALATED,
+                            "remediation budget exhausted",
+                            stop_code="implementation_review_exhausted",
+                        )
+                        return _outcome(engine, repo=repo, worktree=worktree)
                     store.update_manifest(status=RunState.REMEDIATION)
                     blocking = [f for f in reviewed.findings if f.id in reviewed.blocking_ids()]
                     before_remediation = _deliverable_patch(worktree_repo, base)
@@ -1257,12 +1310,18 @@ def resume_run(
                             "restart_verification_failed"
                             if current.restart_mode is not None
                             else "other",
+                            stop_code="verification_rejected",
                         )
                         return _outcome(engine, verification, repo=repo, worktree=worktree)
                     enforce_fence(worktree_repo, base, fence)
                     changed = worktree_repo.change_inventory(base)
                     if not changed:
-                        _terminal(engine, RunState.FAILED, "run produced no change to commit")
+                        _terminal(
+                            engine,
+                            RunState.FAILED,
+                            "run produced no change to commit",
+                            stop_code="worker_no_changes",
+                        )
                         return _outcome(engine, verification, repo=repo, worktree=worktree)
                     final_commit = worktree_repo.commit_snapshot(
                         f"ai({run_id}): complete orchestrated run", changed
@@ -1331,11 +1390,19 @@ def resume_run(
             return _outcome(engine, repo=repo, worktree=worktree)
         except ScopeViolation as exc:
             if store.read_manifest().restart_mode is None:
+                store.record_stop("scope_violation")
                 raise
-            _terminal(engine, RunState.ESCALATED, str(exc), "restart_governance_blocked")
+            _terminal(
+                engine,
+                RunState.ESCALATED,
+                str(exc),
+                "restart_governance_blocked",
+                stop_code="scope_violation",
+            )
             return _outcome(engine, repo=repo, worktree=worktree)
         except RemediationExhausted as exc:
             if store.read_manifest().restart_mode is None:
+                store.record_stop(exc.cause)
                 raise
             _terminal(engine, RunState.ESCALATED, str(exc), "restart_remediation_exhausted")
             return _outcome(engine, repo=repo, worktree=worktree)
@@ -1360,6 +1427,9 @@ def resume_run(
                 failure_class="environment",
             )
             return _outcome(engine, repo=repo, worktree=worktree)
+        except SchemaEscalation:
+            store.record_stop("schema_rejected")
+            raise
         except (ContextContractError, CheckpointError, ResumeRefused) as exc:
             restart_mode = store.read_manifest().restart_mode
             cause = "other"
@@ -1370,8 +1440,12 @@ def resume_run(
                     if any(word in detail for word in ("scope", "approval", "policy", "protected"))
                     else "restart_evidence_invalid"
                 )
-            _terminal(engine, RunState.ESCALATED, str(exc), cause)
+            stop_code = "prompt_budget" if isinstance(exc, PromptBudgetError) else None
+            _terminal(engine, RunState.ESCALATED, str(exc), cause, stop_code=stop_code)
             return _outcome(engine, repo=repo, worktree=worktree)
+        except BaseException:
+            store.record_stop("other")
+            raise
 
 
 def _validation(store: RunStore, cycle: int) -> list[ValidationOutcome]:

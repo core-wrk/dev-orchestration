@@ -200,7 +200,12 @@ def recover_legacy(
                     update={
                         "run_id": new_id,
                         "linked_source_run": run_id,
-                        "status": RunState.PAUSED_INTERRUPTED,
+                        "epic_id": manifest.goal_id,
+                        "status": RunState.CREATED,
+                        "stage_actor": None,
+                        "stage_error": None,
+                        "repair_rounds": {},
+                        "stop": None,
                         "completed_at": None,
                         "terminal_reason": None,
                         "terminal_cause": None,
@@ -231,8 +236,9 @@ def recover_legacy(
                 config_layers=normalized_layers,
                 resolved_config=resolve_run_policy(normalized_layers),
             )
-        if not terminal:
-            target.update_manifest(status=RunState.PAUSED_INTERRUPTED)
+        target.update_manifest(status=RunState.PAUSED_INTERRUPTED)
+        if snapshot["entries"]:
+            target.record_human_action("edit")
         hashes = input_hashes(target, registry)
         target.checkpoint(
             next_stage=stage,

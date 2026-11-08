@@ -15,12 +15,126 @@ import time
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from pwd import getpwuid
 
 from dev_orchestration.artifacts.events import append_event
-from dev_orchestration.domain.run import RunManifest
+from dev_orchestration.domain.enums import RunState, Tier
+from dev_orchestration.domain.run import (
+    MAX_REMEDIATION_CYCLES,
+    RepairBudget,
+    RunManifest,
+    StageActor,
+    StopRecord,
+)
 from dev_orchestration.git.repo import GitCommandError, GitRepo
 
 SUBDIRECTORIES = ("planning", "execution", "review", "verification", "approval", "checkpoints")
+
+_STOP_STATES = {
+    RunState.AWAITING_APPROVAL: "approval_required",
+    RunState.PAUSED_USAGE: "usage_pause",
+    RunState.PAUSED_INTERRUPTED: "provider_interrupted",
+    RunState.BLOCKED: "other",
+    RunState.ESCALATED: "other",
+    RunState.FAILED: "other",
+    RunState.CANCELLED: "operator_cancelled",
+}
+_STAGE_ROLES = {
+    RunState.CLASSIFIED: "classifier",
+    RunState.PLANNED: "planner",
+    RunState.PLAN_REVIEWED: "plan_reviewer",
+    RunState.EXECUTING: "implementation_worker",
+    RunState.VALIDATING: "validator",
+    RunState.IMPLEMENTATION_REVIEW: "implementation_reviewer",
+    RunState.REMEDIATION: "implementation_worker",
+    RunState.FINAL_VERIFICATION: "verifier",
+}
+_STOP_DIAGNOSTICS = {
+    "approval_required": ("unknown", "waiting for human approval"),
+    "usage_pause": ("infrastructure", "provider subscription window unavailable"),
+    "provider_interrupted": ("infrastructure", "provider call interrupted or timed out"),
+    "operator_cancelled": ("operator cancelled", "operator requested cancellation"),
+    "bootstrap_failed": ("infrastructure", "could not create the run worktree"),
+    "bootstrap_integrity_failed": ("infrastructure", "bootstrap integrity check failed"),
+    "environment": ("infrastructure", "provider or local tool invocation failed"),
+    "validation_failed": ("validation failed", "required local check failed"),
+    "restart_validation_failed": ("validation failed", "required local check failed on restart"),
+    "plan_review_escalated": ("plan rejected", "plan review requested escalation"),
+    "plan_review_blocked": ("plan rejected", "plan review blocked the plan"),
+    "plan_review_exhausted": ("plan rejected", "plan reconciliation budget exhausted"),
+    "implementation_review_escalated": ("reviewer rejected", "implementation review escalated"),
+    "implementation_review_blocked": ("reviewer rejected", "implementation review blocked"),
+    "implementation_review_exhausted": (
+        "reviewer rejected",
+        "implementation repair budget exhausted",
+    ),
+    "restart_remediation_exhausted": (
+        "reviewer rejected",
+        "implementation repair budget exhausted",
+    ),
+    "restart_review_findings": ("reviewer rejected", "check-only review found blocking findings"),
+    "verification_rejected": ("reviewer rejected", "final verification rejected the change"),
+    "worker_no_changes": ("model behaviour", "worker produced no change"),
+    "remediation_no_progress": ("model behaviour", "repair produced no change"),
+    "scope_violation": ("model behaviour", "work exceeded the approved scope"),
+    "schema_rejected": ("model behaviour", "structured result failed its schema twice"),
+    "prompt_budget": ("context or token limit", "prompt exceeded the local size limit"),
+    "provider_context_limit": (
+        "context or token limit",
+        "provider reported a context or token limit",
+    ),
+    "other": ("unknown", "workflow stopped without a classified cause"),
+}
+
+
+def local_actor() -> str:
+    uid = os.getuid()
+    try:
+        return getpwuid(uid).pw_name
+    except KeyError:
+        return str(uid)
+
+
+def _stage_actor(manifest: RunManifest, role: str) -> StageActor:
+    binding = manifest.roles.get(role)
+    if manifest.stage_actor and manifest.stage_actor.role == role:
+        return manifest.stage_actor
+    return StageActor(
+        role=role,
+        provider=binding.adapter if binding else None,
+        model=(binding.model_id or binding.model_alias) if binding else None,
+    )
+
+
+def _stop_record(manifest: RunManifest, stage: RunState, code: str) -> StopRecord:
+    category, evidence = _STOP_DIAGNOSTICS.get(code, _STOP_DIAGNOSTICS["other"])
+    check_only = manifest.restart_mode == "check_only"
+    limits = {
+        "plan_review": 0
+        if manifest.restart_mode or manifest.tier is Tier.TRIVIAL
+        else MAX_REMEDIATION_CYCLES,
+        "validation": 0 if check_only else 1,
+        "implementation_review": 0 if check_only else MAX_REMEDIATION_CYCLES,
+        "final_verification": 0,
+    }
+    repairs = {}
+    for gate, allowed in limits.items():
+        used = manifest.repair_rounds.get(gate, 0)
+        repairs[gate] = RepairBudget(used=used, allowed=allowed, exhausted=0 < allowed <= used)
+    actor = manifest.stage_actor or StageActor(role="orchestrator")
+    active_operation = {
+        "planner": "PLANNING",
+        "plan_reviewer": "PLAN_REVIEW",
+        "plan_reconciler": "PLAN_RECONCILIATION",
+    }.get(actor.role)
+    return StopRecord(
+        stage=active_operation or stage,
+        run_state=stage if active_operation else None,
+        category=category,
+        evidence=evidence,
+        repairs=repairs,
+        **actor.model_dump(),
+    )
 
 
 class PlanOverwriteError(RuntimeError):
@@ -99,10 +213,70 @@ class RunStore:
             (self.root / "manifest.json").read_text(encoding="utf-8")
         )
 
-    def update_manifest(self, **fields: object) -> RunManifest:
-        manifest = self.read_manifest().model_copy(update=fields)
+    def update_manifest(
+        self, *, transition_role: str | None = None, stop_code: str | None = None, **fields: object
+    ) -> RunManifest:
+        previous = self.read_manifest()
+        manifest = previous.model_copy(update=fields)
+        changed = manifest.status != previous.status
+        if changed:
+            role = transition_role or _STAGE_ROLES.get(manifest.status, "orchestrator")
+            actor = _stage_actor(manifest, role)
+            default_stop = _STOP_STATES.get(manifest.status)
+            if default_stop or manifest.status is RunState.COMPLETE_LOCAL:
+                actor = manifest.stage_actor or actor
+            if manifest.epic_id is not None:
+                if default_stop:
+                    code = stop_code or default_stop
+                    if default_stop == "other":
+                        code = (
+                            stop_code or manifest.stage_error or manifest.terminal_cause or "other"
+                        )
+                    manifest.stop = _stop_record(manifest, previous.status, code)
+                else:
+                    manifest.stop = None
+                    manifest.stage_actor = actor
+                    manifest.stage_error = None
         self._write_manifest(manifest)
+        if changed:
+            self.append_event(
+                {
+                    "event": "state_changed",
+                    "from": str(previous.status),
+                    "to": str(manifest.status),
+                    **actor.model_dump(),
+                }
+            )
+            if manifest.stop is not None:
+                self.append_event(
+                    {
+                        "event": "run_stopped",
+                        "status": str(manifest.status),
+                        **manifest.stop.model_dump(mode="json"),
+                    }
+                )
         return manifest
+
+    def record_stop(self, code: str) -> None:
+        """Capture a failed execution attempt that leaves the run recoverable."""
+        manifest = self.read_manifest()
+        if manifest.epic_id is None:
+            return
+        stop = _stop_record(manifest, manifest.status, code)
+        self.update_manifest(stop=stop)
+        self.append_event(
+            {"event": "run_stopped", "status": str(manifest.status), **stop.model_dump(mode="json")}
+        )
+
+    def record_repair_round(self, gate: str, round_number: int) -> None:
+        manifest = self.read_manifest()
+        rounds = manifest.repair_rounds
+        if manifest.epic_id is not None and round_number > rounds.get(gate, 0):
+            self.update_manifest(repair_rounds={**rounds, gate: round_number})
+
+    def record_human_action(self, action: str) -> None:
+        if self.read_manifest().epic_id is not None:
+            self.append_event({"event": "human_action", "action": action, "actor": local_actor()})
 
     @contextmanager
     def claim(self, *, wait_seconds: float = 0):

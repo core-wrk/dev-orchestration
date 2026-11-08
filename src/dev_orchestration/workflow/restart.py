@@ -625,7 +625,14 @@ def restart_run(
     }[from_stage]
     config = project_config
     store, worktree = bootstrap_run(
-        repo, config, original.request_text or "", original.tier, worktree_root, original.goal_id
+        repo,
+        config,
+        original.request_text or "",
+        original.tier,
+        worktree_root,
+        original.goal_id,
+        manual_start=True,
+        supplied_edit=patch_path is not None,
     )
     try:
         worktree_repo = GitRepo(worktree)
@@ -659,6 +666,7 @@ def restart_run(
                 "repository": str(repo.root),
                 "git": store.read_manifest().git,
                 "goal_id": original.goal_id,
+                "epic_id": original.goal_id,
                 "goal_attempt": store.read_manifest().goal_attempt,
                 "goal_generation": store.read_manifest().goal_generation,
                 "status": RunState.VALIDATING,
@@ -682,6 +690,10 @@ def restart_run(
                 "restart_source_base_commit": source_base,
                 "restart_destination_base_commit": destination_base,
                 "stage_attempts": {},
+                "stage_actor": None,
+                "stage_error": None,
+                "stop": None,
+                "repair_rounds": {},
                 "validation_repairs_reserved": 0,
                 "validation_artifact": None,
                 "roles": original.roles,
@@ -842,7 +854,7 @@ def restart_run(
         artifacts.append(patch_target.relative_to(store.root).as_posix())
         initial = "validation" if requested_next == "validation" else requested_next
         record_stage(store, registry, worktree, next_stage=initial, artifacts=artifacts)
-        return resume_run(repo, config, registry, store.run_id)
+        return resume_run(repo, config, registry, store.run_id, manual_resume=False)
     except Exception as exc:
         current = store.read_manifest()
         if current.status not in {RunState.FAILED, RunState.ESCALATED, RunState.CANCELLED}:
@@ -855,6 +867,7 @@ def restart_run(
             store.update_manifest(
                 status=RunState.ESCALATED,
                 terminal_cause=cause,
+                stop_code="scope_violation" if isinstance(exc, ScopeViolation) else None,
                 terminal_reason=str(exc),
                 failure_class="human_decision"
                 if cause == "restart_governance_blocked"

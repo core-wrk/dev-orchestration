@@ -1,8 +1,10 @@
 """Human-readable run status and run listing."""
 
 import json
+from datetime import datetime
 from pathlib import Path
 
+from dev_orchestration.artifacts.goals import GoalError, GoalLedger
 from dev_orchestration.artifacts.store import RunStore
 from dev_orchestration.domain.enums import RunState
 from dev_orchestration.domain.run import RunManifest
@@ -181,6 +183,98 @@ def list_runs(repo_root: Path) -> list[tuple[str, str]]:
         manifest = RunManifest.model_validate_json(manifest_path.read_text(encoding="utf-8"))
         listed.append((manifest.run_id, str(manifest.status)))
     return listed
+
+
+def _event_time(event: dict) -> datetime | None:
+    value = event.get("ts") or event.get("recorded_at")
+    if not isinstance(value, str):
+        return None
+    try:
+        stamp = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return stamp if stamp.tzinfo is not None else None
+
+
+def _completion_coverage(
+    runs: list[tuple[Path, RunManifest]], ledger: GoalLedger, epic: str
+) -> str:
+    completed = [manifest for _, manifest in runs if manifest.status is RunState.COMPLETE_LOCAL]
+    if not completed:
+        return "incomplete_epics"
+    if any(m.completed_at is None or m.completed_at.tzinfo is None for m in completed):
+        return "unknown_coverage_epics"
+    first = min(completed, key=lambda manifest: manifest.completed_at)
+    cutoff = first.completed_at
+    try:
+        actions = ledger.intervention_events(epic)
+    except GoalError:
+        return "unknown_coverage_epics"
+
+    incomplete_coverage = False
+    completion_logged = False
+    for root, manifest in runs:
+        if manifest.created_at is not None and manifest.created_at.tzinfo is not None:
+            if manifest.created_at > cutoff:
+                continue
+        else:
+            incomplete_coverage = True
+        if manifest.epic_id is None or not (root / "events.jsonl").is_file():
+            incomplete_coverage = True
+            continue
+        try:
+            events = read_events(root)
+        except (OSError, ValueError):
+            incomplete_coverage = True
+            continue
+        if any(not isinstance(event, dict) for event in events):
+            incomplete_coverage = True
+            continue
+        if not any(
+            event.get("event") in {"run_branch_reserved", "legacy_recovered"} for event in events
+        ):
+            incomplete_coverage = True
+        actions.extend(event for event in events if event.get("event") == "human_action")
+        if manifest.run_id == first.run_id:
+            completion_logged = any(
+                event.get("event") == "state_changed" and event.get("to") == "COMPLETE_LOCAL"
+                for event in events
+            )
+    action_times = [_event_time(event) for event in actions]
+    if any(stamp is not None and stamp <= cutoff for stamp in action_times):
+        return "completed_with_human_intervention"
+    if incomplete_coverage or not completion_logged or None in action_times:
+        return "unknown_coverage_epics"
+    return "completed_without_human_intervention"
+
+
+def summarize_epics(repo_root: Path) -> dict[str, int]:
+    """Count first completions, keeping incomplete and unmeasurable history separate."""
+    counts = dict.fromkeys(
+        (
+            "total_linked_epics",
+            "completed_without_human_intervention",
+            "completed_with_human_intervention",
+            "incomplete_epics",
+            "unknown_coverage_epics",
+            "unlinked_runs",
+        ),
+        0,
+    )
+    runs_dir = RunStore.runs_directory(repo_root)
+    ledger = GoalLedger(repo_root)
+    epics: dict[str, list[tuple[Path, RunManifest]]] = {}
+    for path in sorted(runs_dir.glob("*/manifest.json")):
+        manifest = RunManifest.model_validate_json(path.read_text(encoding="utf-8"))
+        epic = manifest.epic_id or manifest.goal_id
+        if epic is None:
+            counts["unlinked_runs"] += 1
+        else:
+            epics.setdefault(epic, []).append((path.parent, manifest))
+    counts["total_linked_epics"] = len(epics)
+    for epic, runs in epics.items():
+        counts[_completion_coverage(runs, ledger, epic)] += 1
+    return counts
 
 
 TOKEN_FIELDS = (

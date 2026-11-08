@@ -1,16 +1,21 @@
+import errno
 import json
+import subprocess
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
+import dev_orchestration.adapters.usage as usage_module
 from dev_orchestration.adapters.base import (
     AgentRequest,
     AgentResult,
     AgentTimeoutError,
     FakeAdapter,
 )
-from dev_orchestration.adapters.usage import UsageAwareAdapter
+from dev_orchestration.adapters.claude import claude_call_usage
+from dev_orchestration.adapters.usage import ProviderLaunchError, UsageAwareAdapter
 from dev_orchestration.artifacts.store import RunStore
 from dev_orchestration.domain.enums import ProjectClass, Tier
 from dev_orchestration.domain.run import RunManifest
@@ -106,3 +111,91 @@ def test_timeout_is_recorded_and_still_raised(tmp_path):
 def test_no_store_records_nothing_and_does_not_fail():
     result = UsageAwareAdapter(_Metered({"total_tokens": 1}), auto_resume=False).run(_request())
     assert result.usage == {"total_tokens": 1}
+
+
+@pytest.mark.parametrize(
+    "read_only, failures, attempts", [(True, 2, 3), (True, 4, 4), (False, 1, 1)]
+)
+def test_transient_provider_retry_is_bounded_and_skips_mutating_calls(
+    tmp_path, monkeypatch, read_only, failures, attempts
+):
+    store = _store(tmp_path)
+    delays = []
+    monkeypatch.setattr(usage_module, "sleep", delays.append)
+
+    class Transient(_Metered):
+        calls = 0
+
+        def run(self, request):
+            self.calls += 1
+            result = super().run(request)
+            if self.calls <= failures:
+                return replace(result, exit_code=1, diagnostic={"code": "server_overloaded"})
+            return result
+
+    request = replace(
+        _request("plan_reconciler" if read_only else "implementation_worker"),
+        allowed_tools=["Read"] if read_only else None,
+    )
+    result = UsageAwareAdapter(Transient({"total_tokens": 3}), auto_resume=False, store=store).run(
+        request
+    )
+    ledger = _events(store)
+    assert [event["attempt"] for event in ledger] == list(range(1, attempts + 1))
+    assert [event["usage"] for event in ledger] == [{"total_tokens": 3}] * attempts
+    assert delays == [1, 2, 4][: attempts - 1]
+    assert (result.exit_code == 0) == (attempts > failures)
+
+
+def test_transient_prelaunch_error_can_retry_worker(tmp_path, monkeypatch):
+    store = _store(tmp_path)
+    delays = []
+    monkeypatch.setattr(usage_module, "sleep", delays.append)
+
+    class LaunchOnce(_Metered):
+        launched = False
+
+        def run(self, request):
+            if not self.launched:
+                self.launched = True
+                raise ProviderLaunchError(errno.EAGAIN, "synthetic transient launch error")
+            return super().run(request)
+
+    wrapped = UsageAwareAdapter(LaunchOnce({"total_tokens": 3}), auto_resume=False, store=store)
+    assert wrapped.run(_request("implementation_worker")).exit_code == 0
+    assert delays == [1]
+    assert [e["usage"] for e in _events(store)] == [None, {"total_tokens": 3}]
+
+
+def test_timeout_preserves_any_reported_partial_usage(tmp_path):
+    store = _store(tmp_path)
+    partial = b'{"type":"turn.completed","usage":{"input_tokens":7,"output_tokens":2}}\n'
+
+    class Timeout(_Metered):
+        def run(self, request):
+            raise AgentTimeoutError(request.role, 5, "codex") from subprocess.TimeoutExpired(
+                "synthetic", 5, output=partial
+            )
+
+    with pytest.raises(AgentTimeoutError):
+        UsageAwareAdapter(Timeout(), auto_resume=False, store=store).run(_request())
+    assert _events(store)[0]["usage"]["total_tokens"] == 9
+
+
+def test_claude_reports_model_ids_and_per_model_token_counts():
+    model, usage = claude_call_usage(
+        {
+            "usage": {"input_tokens": 11, "output_tokens": 6},
+            "modelUsage": {
+                "fixture-version": {
+                    "inputTokens": 11,
+                    "outputTokens": 6,
+                    "cacheReadInputTokens": 2,
+                }
+            },
+        },
+        "fixture-alias",
+    )
+    assert model == "fixture-version"
+    assert usage["by_model"][model]["cached_input_tokens"] == 2
+    assert usage["by_model"][model]["total_tokens"] == 19

@@ -16,7 +16,7 @@ from dev_orchestration.adapters.base import (
     compose_prompt,
 )
 from dev_orchestration.adapters.tokens import claude_usage
-from dev_orchestration.adapters.usage import UsageObservation
+from dev_orchestration.adapters.usage import UsageObservation, launch_provider
 
 READ_ONLY_TOOLS = ("Read", "Grep", "Glob")
 
@@ -125,7 +125,7 @@ class ClaudeAdapter:
             except subprocess.TimeoutExpired as exc:
                 raise AgentTimeoutError(request.role, timeout, self.name) from exc
         else:
-            proc = subprocess.Popen(
+            proc = launch_provider(
                 self.build_command(request),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -155,7 +155,9 @@ class ClaudeAdapter:
                     request.on_process_finished()
             returncode = proc.returncode
         if returncode < 0:
-            raise AgentInterruptedError(request.role, self.name, -returncode)
+            raise AgentInterruptedError(request.role, self.name, -returncode) from (
+                subprocess.CalledProcessError(returncode, self.binary, output=stdout)
+            )
         output = _decode_output(stdout)
         try:
             envelope = json.loads(stdout)
@@ -169,17 +171,47 @@ class ClaudeAdapter:
                 "error": envelope.get("result") or envelope.get("error"),
                 "reset_at": envelope.get("reset_at"),
             }
+            returncode = returncode or 1
+        model, usage = claude_call_usage(envelope, request.model_alias)
         return AgentResult(
             provider=self.name,
-            model=request.model_alias,
+            model=model,
             exit_code=returncode,
             output=output,
             started_at=started,
             completed_at=datetime.now(UTC),
-            usage=claude_usage(envelope),
+            usage=usage,
             stderr=stderr or "",
             diagnostic=diagnostic,
         )
+
+
+def claude_call_usage(
+    envelope: object, requested_model: str | None
+) -> tuple[str | None, dict | None]:
+    usage = claude_usage(envelope)
+    models = envelope.get("modelUsage") if isinstance(envelope, dict) else None
+    if not isinstance(models, dict) or not models:
+        return requested_model, usage
+    by_model = {}
+    for model, counts in models.items():
+        if not isinstance(counts, dict):
+            continue
+        by_model[model] = claude_usage(
+            {
+                "usage": {
+                    "input_tokens": counts.get("inputTokens"),
+                    "output_tokens": counts.get("outputTokens"),
+                    "cache_read_input_tokens": counts.get("cacheReadInputTokens"),
+                    "cache_creation_input_tokens": counts.get("cacheCreationInputTokens"),
+                },
+                "total_cost_usd": counts.get("costUSD"),
+            }
+        )
+    if not by_model:
+        return requested_model, usage
+    model = next(iter(by_model)) if len(by_model) == 1 else requested_model
+    return model, {**(usage or {}), "by_model": by_model}
 
 
 def _decode_output(stdout: str) -> dict | str:

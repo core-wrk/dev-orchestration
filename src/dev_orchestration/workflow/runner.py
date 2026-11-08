@@ -5,6 +5,7 @@ import json
 import re
 import subprocess
 import tempfile
+from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -17,7 +18,7 @@ from dev_orchestration.artifacts.goals import validate_goal_id
 from dev_orchestration.artifacts.store import CheckpointError, RunStore
 from dev_orchestration.config.models import ProjectConfig, ValidationCommand
 from dev_orchestration.config.resolver import PROTECTED_DEFAULTS
-from dev_orchestration.context.assembler import Category, ContextContractError
+from dev_orchestration.context.assembler import Category, ContextContractError, PromptBudgetError
 from dev_orchestration.context.packet import ContextRef
 from dev_orchestration.domain.enums import Outcome, RunState, Tier
 from dev_orchestration.domain.findings import Verification, verification_allows_completion
@@ -239,9 +240,11 @@ def _record_roles(store, registry: RoleRegistry) -> None:
     for role, binding in registry.roles.items():
         adapter = registry.adapters.get(binding.adapter)
         binary = getattr(adapter, "binary", None)
+        resolve_model = getattr(adapter, "model_id", None)
         roles[role] = RoleBinding(
             adapter=binding.adapter,
             model_alias=binding.model,
+            model_id=resolve_model(binding.model) if callable(resolve_model) else binding.model,
             reasoning=binding.reasoning,
             timeout_seconds=binding.timeout_seconds,
             resolved_binary=str(binary) if binary is not None else None,
@@ -314,6 +317,8 @@ def _terminal(
     cause: str = "other",
     failure_class: str | None = None,
     failure_signature: str | None = None,
+    *,
+    stop_code: str | None = None,
 ) -> None:
     store = engine.store
     is_failure = state in {RunState.FAILED, RunState.ESCALATED}
@@ -365,7 +370,7 @@ def _terminal(
         RunState.FAILED,
         RunState.CANCELLED,
     }:
-        engine.transition(state)
+        engine.transition(state, stop_code=stop_code)
 
 
 def _deliverable_patch(worktree_repo: GitRepo, base_commit: str) -> bytes:
@@ -889,6 +894,7 @@ def execute_run(
     retry_resolution_reason: str | None = None,
     reviewed_plan_from: RunStore | None = None,
     seed_patch: Path | None = None,
+    manual_start: bool = False,
 ) -> RunOutcome:
     """Execute a run; every started run is returned in a terminal state."""
     if not request_text.strip():
@@ -932,6 +938,8 @@ def execute_run(
         decision_resolution=(retry_of, retry_resolution_reason)
         if retry_of is not None and retry_resolution_reason
         else None,
+        manual_start=manual_start or retry_of is not None,
+        supplied_edit=seed_patch is not None,
     )
     if retry_of is not None:
         store.update_manifest(retry_of=retry_of)
@@ -1086,8 +1094,22 @@ def execute_run(
             fence,
             persist_if_missing=True,
         )
-    except BaseException:
-        claim.__exit__(None, None, None)
+    except BaseException as exc:
+        with suppress(BaseException):
+            _terminal(
+                engine,
+                RunState.FAILED,
+                "run setup failed",
+                "environment" if isinstance(exc, OSError) else "other",
+                failure_signature="setup:before-classification",
+                stop_code="environment" if isinstance(exc, OSError) else "other",
+            )
+        try:
+            with suppress(BaseException):
+                cleanup_worktree_if_unproductive(engine, repo, worktree)
+        finally:
+            with suppress(BaseException):
+                claim.__exit__(None, None, None)
         raise
 
     try:
@@ -1275,8 +1297,8 @@ def execute_run(
                         "receipt": PLAN_REVIEW_RECEIPT,
                     }
                 )
-                engine.transition(RunState.PLANNED)
-                engine.transition(RunState.PLAN_REVIEWED)
+                engine.transition(RunState.PLANNED, role="orchestrator")
+                engine.transition(RunState.PLAN_REVIEWED, role="orchestrator")
                 store.approve_plan(version)
                 create_plan_review_receipt(
                     store,
@@ -1332,7 +1354,9 @@ def execute_run(
                         dependency_report=dependency_report,
                     )
             if not reuse_matches:
-                engine.transition(RunState.PLANNED)
+                engine.transition(
+                    RunState.PLANNED, role="orchestrator" if external_plan is not None else None
+                )
                 receipt("plan_reviewer", [f"planning/{version.name}"])
                 plan_text = version.read_text(encoding="utf-8")
                 plan_review = review_plan(
@@ -1368,6 +1392,7 @@ def execute_run(
                         "plan_review_escalated"
                         if plan_review.outcome is Outcome.ESCALATE
                         else "other",
+                        stop_code="plan_review_blocked" if target is RunState.BLOCKED else None,
                     )
                     return _outcome(engine, repo=repo, worktree=worktree)
                 reconciliation_cycles += 1
@@ -1377,7 +1402,7 @@ def execute_run(
                         f"{MAX_REMEDIATION_CYCLES} reconciliation cycles",
                         cause="plan_review_exhausted",
                     )
-                engine.transition(RunState.PLANNED)
+                engine.transition(RunState.PLANNED, role="plan_reconciler")
                 version = reconcile(
                     registry,
                     plan_text,
@@ -1387,6 +1412,7 @@ def execute_run(
                     acceptance_criteria,
                     scope_context,
                     dependency_report,
+                    cycle=reconciliation_cycles,
                 )
                 receipt("plan_reviewer", [f"planning/{version.name}"], reconciliation_cycles)
                 plan_text = version.read_text(encoding="utf-8")
@@ -1420,6 +1446,7 @@ def execute_run(
                     target,
                     "plan review: " + str(plan_review.outcome),
                     "plan_review_escalated" if plan_review.outcome is Outcome.ESCALATE else "other",
+                    stop_code="plan_review_blocked" if target is RunState.BLOCKED else None,
                 )
                 return _outcome(engine, repo=repo, worktree=worktree)
             if not reuse_matches:
@@ -1639,6 +1666,9 @@ def execute_run(
                     "implementation_review_escalated"
                     if implementation_review.outcome is Outcome.ESCALATE
                     else "other",
+                    stop_code="implementation_review_blocked"
+                    if target is RunState.BLOCKED
+                    else None,
                 )
                 return _outcome(engine, repo=repo, worktree=worktree)
             engine.transition(RunState.REMEDIATION)
@@ -1744,6 +1774,7 @@ def execute_run(
                 "implementation_review_escalated"
                 if implementation_review.outcome is Outcome.ESCALATE
                 else "other",
+                stop_code="implementation_review_blocked" if target is RunState.BLOCKED else None,
             )
             return _outcome(engine, repo=repo, worktree=worktree)
 
@@ -1793,13 +1824,19 @@ def execute_run(
                 "final verification did not provide an unqualified PASS for the supplied criteria",
                 failure_class="evidence" if evidence_only else "product",
                 failure_signature="verification:acceptance-criteria",
+                stop_code="verification_rejected",
             )
             return _outcome(engine, verification, repo=repo, worktree=worktree)
 
         enforce_fence(worktree_repo, base_commit, fence)
         changed = worktree_repo.change_inventory(base_commit)
         if not changed:
-            _terminal(engine, RunState.FAILED, "the run produced no change to commit")
+            _terminal(
+                engine,
+                RunState.FAILED,
+                "the run produced no change to commit",
+                stop_code="worker_no_changes",
+            )
             return _outcome(engine, verification, repo=repo, worktree=worktree)
         final_commit = worktree_repo.commit_snapshot(
             f"ai({store.run_id}): complete orchestrated run", changed
@@ -1850,7 +1887,12 @@ def execute_run(
             if isinstance(exc, ScopeViolation)
             else "other"
         )
-        _terminal(engine, RunState.ESCALATED, str(exc), cause)
+        stop_code = None
+        if isinstance(exc, PromptBudgetError):
+            stop_code = "prompt_budget"
+        elif isinstance(exc, SchemaEscalation):
+            stop_code = "schema_rejected"
+        _terminal(engine, RunState.ESCALATED, str(exc), cause, stop_code=stop_code)
         return _outcome(engine, repo=repo, worktree=worktree)
     except (IllegalTransitionError, UnsupportedTierError, TierDowngradeError) as exc:
         _terminal(engine, RunState.ESCALATED, str(exc))

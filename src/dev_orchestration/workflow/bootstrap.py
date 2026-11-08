@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 import secrets
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -20,7 +21,7 @@ from dev_orchestration.context.assembler import ContextContractError, read_refer
 from dev_orchestration.context.packet import ContextRef
 from dev_orchestration.domain.enums import RunState, Tier
 from dev_orchestration.domain.run import GitBlock, RunManifest
-from dev_orchestration.git.repo import GitRepo
+from dev_orchestration.git.repo import GitCommandError, GitRepo
 from dev_orchestration.git.worktree import create_worktree
 
 
@@ -273,6 +274,9 @@ def bootstrap_run(
     worktree_root: Path,
     goal_id: str,
     decision_resolution: tuple[str, str] | None = None,
+    *,
+    manual_start: bool = False,
+    supplied_edit: bool = False,
 ) -> tuple[RunStore, Path]:
     """Create the durable run record and isolated worktree from a clean base."""
     repo.ensure_clean_for_run()
@@ -315,10 +319,17 @@ def bootstrap_run(
                 resolved_config=policy,
                 git=GitBlock(base_commit=base_commit, branch=branch, worktree=str(worktree)),
                 goal_id=reservation.goal_id,
+                epic_id=reservation.goal_id,
                 goal_attempt=reservation.attempt,
                 goal_generation=reservation.generation,
             )
         )
+        if manual_start and reservation.has_prior_run:
+            store.record_human_action("rerun")
+        if supplied_edit:
+            store.record_human_action("edit")
+        if decision_resolution is not None:
+            store.record_human_action("escalation_answer")
         store.append_event(
             {
                 "event": "run_branch_reserved",
@@ -347,8 +358,29 @@ def bootstrap_run(
 
             cleanup_worktree_if_unproductive(Engine(store), repo)
             raise
-    current_commit = repo.current_commit()
-    worktree_repo = GitRepo(worktree)
+    try:
+        current_commit = repo.current_commit()
+        is_descendant = current_commit == base_commit and GitRepo(worktree).is_ancestor(base_commit)
+    except (GitCommandError, OSError):
+        from dev_orchestration.workflow.engine import Engine
+        from dev_orchestration.workflow.runner import (
+            _terminal,
+            cleanup_worktree_if_unproductive,
+        )
+
+        engine = Engine(store)
+        with suppress(Exception):
+            _terminal(
+                engine,
+                RunState.FAILED,
+                "bootstrap integrity check failed",
+                "environment",
+                failure_signature="bootstrap:integrity-check",
+                stop_code="bootstrap_integrity_failed",
+            )
+        with suppress(Exception):
+            cleanup_worktree_if_unproductive(engine, repo, worktree)
+        raise
     if current_commit != base_commit:
         reason = (
             f"base commit moved during bootstrap: recorded {base_commit}, current {current_commit}"
@@ -368,7 +400,7 @@ def bootstrap_run(
 
         cleanup_worktree_if_unproductive(Engine(store), repo)
         raise BootstrapIntegrityError(reason)
-    if not worktree_repo.is_ancestor(base_commit):
+    if not is_descendant:
         reason = f"run worktree {worktree} does not descend from recorded base {base_commit}"
         store.update_manifest(
             status=RunState.FAILED,

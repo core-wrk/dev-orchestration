@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
 
+from dev_orchestration.adapters.claude import claude_call_usage
 from dev_orchestration.artifacts.store import CheckpointError, RunStore
 from dev_orchestration.domain.enums import RunState
 from dev_orchestration.domain.run import CloudSession
@@ -33,6 +34,8 @@ class CloudDelivery:
     session_id: str
     reason: str = ""
     permanent_failure: bool = False
+    model: str | None = None
+    usage: dict | None = None
 
 
 class CloudGateway(Protocol):
@@ -71,6 +74,8 @@ class ClaudeCloudGateway:
             result = json.loads(raw.stdout)
         except json.JSONDecodeError:
             result = {}
+        if not isinstance(result, dict):
+            result = {}
         accepted = (
             raw.returncode == 0
             and result.get("ok") is True
@@ -89,11 +94,14 @@ class ClaudeCloudGateway:
                 "unsupported provider",
             )
         )
+        model, usage = claude_call_usage(result, None)
         return CloudDelivery(
             accepted,
             session.session_id,
             "" if accepted else reason,
             permanent_failure=not accepted and permanent,
+            model=model,
+            usage=usage,
         )
 
 
@@ -223,7 +231,27 @@ def resume_cloud_due(
             "merge, deploy, or publish. If the run artifacts or worktree snapshot are missing, "
             "stop and report that state."
         )
-        result = gateway.read_delivery(gateway.deliver(session, message), session)
+        usage_event = {
+            "event": "token_usage",
+            "role": "cloud_continuation",
+            "provider": session.provider,
+            "attempt": pause.retry_count + 1,
+        }
+        try:
+            result = gateway.read_delivery(gateway.deliver(session, message), session)
+        except Exception as exc:
+            store.append_event(
+                {**usage_event, "model": None, "usage": None, "outcome": type(exc).__name__}
+            )
+            raise
+        store.append_event(
+            {
+                **usage_event,
+                "model": result.model,
+                "usage": result.usage,
+                "outcome": "ok" if result.accepted else "failed",
+            }
+        )
         if result.session_id != session.session_id:
             raise ResumeRefused("cloud delivery changed the linked session ID")
         if not result.accepted:

@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from dev_orchestration.artifacts.store import local_actor
 from dev_orchestration.domain.enums import RunState
 from dev_orchestration.domain.run import RunManifest
 from dev_orchestration.git.repo import GitRepo
@@ -57,6 +58,7 @@ class GoalReservation:
     goal_id: str
     attempt: int
     generation: int
+    has_prior_run: bool = False
 
 
 def _requires_human_decision(manifest: RunManifest) -> bool:
@@ -93,6 +95,13 @@ class GoalLedger:
             ]
         except (OSError, ValueError) as exc:
             raise GoalError(f"goal history for {goal_id} is unreadable; review {path}") from exc
+
+    def intervention_events(self, goal_id: str) -> list[dict]:
+        return [
+            event
+            for event in self._read_events(validate_goal_id(goal_id))
+            if event.get("event") in {"human_decision_recorded", "goal_reopened"}
+        ]
 
     @staticmethod
     def _generation(events: list[dict]) -> int:
@@ -220,13 +229,15 @@ class GoalLedger:
                 goal_id,
                 {
                     "event": "human_decision_recorded",
+                    "actor": local_actor(),
+                    "ts": datetime.now(UTC).isoformat(),
                     "generation": generation,
                     "run_id": item.run_id,
                     "reason": decision_resolution[1].strip(),
                     "recorded_at": datetime.now(UTC).isoformat(),
                 },
             )
-        return GoalReservation(goal_id, len(failed) + 1, generation)
+        return GoalReservation(goal_id, len(failed) + 1, generation, bool(runs))
 
     @contextmanager
     def reserve(
@@ -281,6 +292,8 @@ class GoalLedger:
                 goal_id,
                 {
                     "event": "goal_reopened",
+                    "actor": local_actor(),
+                    "ts": datetime.now(UTC).isoformat(),
                     "generation": generation,
                     "reason": reason.strip(),
                     "recorded_at": datetime.now(UTC).isoformat(),

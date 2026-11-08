@@ -5,6 +5,8 @@ from pydantic import BaseModel, Field
 
 from dev_orchestration.domain.enums import ProjectClass, RunState, Tier
 
+MAX_REMEDIATION_CYCLES = 2
+
 
 class GitBlock(BaseModel):
     base_commit: str | None = None
@@ -16,6 +18,7 @@ class GitBlock(BaseModel):
 class RoleBinding(BaseModel):
     adapter: str
     model_alias: str | None = None
+    model_id: str | None = None
     reasoning: str | None = None
     timeout_seconds: int | None = None
     resolved_binary: str | None = None
@@ -48,6 +51,35 @@ class CloudSession(BaseModel):
     continuation_verified: bool = False
     last_delivery_digest: str | None = None
     last_delivery_at: datetime | None = None
+
+
+class StageActor(BaseModel):
+    role: str
+    provider: str | None = None
+    model: str | None = None
+
+
+class RepairBudget(BaseModel):
+    used: int
+    allowed: int
+    exhausted: bool
+
+
+class StopRecord(StageActor):
+    stage: RunState | Literal["PLANNING", "PLAN_REVIEW", "PLAN_RECONCILIATION"]
+    run_state: RunState | None = None
+    category: Literal[
+        "reviewer rejected",
+        "validation failed",
+        "plan rejected",
+        "model behaviour",
+        "infrastructure",
+        "operator cancelled",
+        "unknown",
+        "context or token limit",
+    ]
+    evidence: str
+    repairs: dict[str, RepairBudget]
 
 
 class RunManifest(BaseModel):
@@ -88,6 +120,7 @@ class RunManifest(BaseModel):
     failure_signature: str | None = None
     retry_of: str | None = None
     goal_id: str | None = None
+    epic_id: str | None = None
     goal_attempt: int | None = None
     goal_generation: int = 0
     checkpoint: str | None = None
@@ -107,5 +140,9 @@ class RunManifest(BaseModel):
     plan_review_provenance: dict = Field(default_factory=dict)
     stage_attempts: dict[str, int] = Field(default_factory=dict)
     validation_repairs_reserved: int = 0
+    stage_actor: StageActor | None = None
+    stage_error: Literal["provider_context_limit"] | None = None
+    repair_rounds: dict[str, int] = Field(default_factory=dict)
+    stop: StopRecord | None = None
     validation_artifact: str | None = None
     validation_input_hashes: dict[str, str] = Field(default_factory=dict)

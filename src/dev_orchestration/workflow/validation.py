@@ -8,9 +8,11 @@ import subprocess
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
+from time import sleep
 
 from pydantic import BaseModel
 
+from dev_orchestration.adapters.usage import RETRY_BACKOFF, TRANSIENT_LAUNCH_ERRNOS
 from dev_orchestration.config.models import ValidationCommand
 from dev_orchestration.domain.enums import Tier
 from dev_orchestration.git.repo import GitCommandError, GitRepo
@@ -251,14 +253,7 @@ def run_validations(
         if tier not in spec.required_for:
             continue
         try:
-            proc = subprocess.run(
-                ["/bin/sh", "-c", spec.command],
-                capture_output=True,
-                text=True,
-                cwd=cwd,
-                timeout=spec.timeout_seconds,
-                check=False,
-            )
+            proc = _run_check(spec, cwd)
         except subprocess.TimeoutExpired:
             outcomes.append(
                 ValidationOutcome(
@@ -286,6 +281,24 @@ def run_validations(
                 )
             )
     return outcomes
+
+
+def _run_check(spec: ValidationCommand, cwd: Path) -> subprocess.CompletedProcess:
+    for delay in (*RETRY_BACKOFF, None):
+        try:
+            return subprocess.run(
+                ["/bin/sh", "-c", spec.command],
+                capture_output=True,
+                text=True,
+                cwd=cwd,
+                timeout=spec.timeout_seconds,
+                check=False,
+            )
+        except OSError as exc:
+            if delay is None or exc.errno not in TRANSIENT_LAUNCH_ERRNOS:
+                raise
+            sleep(delay)
+    raise AssertionError("final validation attempt must return or raise")
 
 
 def all_passed(outcomes: list[ValidationOutcome]) -> bool:

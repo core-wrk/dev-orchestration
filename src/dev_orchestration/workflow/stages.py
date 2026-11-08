@@ -26,6 +26,7 @@ from dev_orchestration.domain.findings import (
     Verification,
     next_finding_id,
 )
+from dev_orchestration.domain.run import MAX_REMEDIATION_CYCLES
 from dev_orchestration.roles.loader import load_role_prompt
 from dev_orchestration.workflow.dependencies import render_dependency_context
 from dev_orchestration.workflow.invoke import AgentInvocationError, invoke_structured
@@ -404,6 +405,8 @@ def reconcile(
     acceptance_criteria: list[str] | None = None,
     scope_fence: ContextRef | None = None,
     dependency_report: str = "",
+    *,
+    cycle: int = 1,
 ) -> Path:
     packet = assemble(
         "reconciliation",
@@ -434,6 +437,7 @@ def reconcile(
         ],
     )
     request = _request(registry, "plan_reconciler", store, packet, store.repo_root)
+    store.record_repair_round("plan_review", cycle)
     result = registry.adapter_for("plan_reconciler").run(request)
     store.write_json_artifact("execution/reconciler-result.json", _agent_result_json(result))
     if result.exit_code != 0:
@@ -511,9 +515,6 @@ def execute(
         raise AgentInvocationError(provider_failure_reason("implementation worker", result))
     store.append_event({"event": "executed", "exit_code": result.exit_code})
     return result
-
-
-MAX_REMEDIATION_CYCLES = 2
 
 
 class RemediationExhausted(RuntimeError):
@@ -628,6 +629,7 @@ def remediate(
         ],
     )
     request = _request(registry, "implementation_worker", store, packet, worktree)
+    store.record_repair_round("implementation_review", cycle)
     result = registry.adapter_for("implementation_worker").run(request)
     store.write_json_artifact(f"execution/remediation-v{cycle}.json", _agent_result_json(result))
     if result.exit_code != 0:
@@ -676,6 +678,7 @@ def repair_validation(
         ],
     )
     request = _request(registry, "implementation_worker", store, packet, worktree)
+    store.record_repair_round("validation", 1)
     result = registry.adapter_for("implementation_worker").run(request)
     store.write_json_artifact(
         "execution/validation-repair-v1.json", _agent_result_json(result), immutable=True

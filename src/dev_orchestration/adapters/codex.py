@@ -27,7 +27,7 @@ from dev_orchestration.adapters.base import (
     compose_prompt,
 )
 from dev_orchestration.adapters.tokens import codex_usage
-from dev_orchestration.adapters.usage import UsageObservation, parse_codex_snapshot
+from dev_orchestration.adapters.usage import UsageObservation, launch_provider, parse_codex_snapshot
 
 CODEX_BUNDLE_PATH = Path("/Applications/ChatGPT.app/Contents/Resources/codex")
 
@@ -245,10 +245,14 @@ class CodexAdapter:
         cmd.append(compose_prompt(request))
         return cmd
 
+    @staticmethod
+    def model_id(alias: str | None) -> str | None:
+        return MODEL_ALIASES.get(alias or "", alias)
+
     def run(self, request: AgentRequest) -> AgentResult:
         started = datetime.now(UTC)
         timeout = request.timeout_seconds or DEFAULT_TIMEOUT_SECONDS
-        proc = subprocess.Popen(
+        proc = launch_provider(
             self.build_exec_command(request),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -267,10 +271,12 @@ class CodexAdapter:
             if request.on_process_finished is not None:
                 request.on_process_finished()
         if proc.returncode < 0:
-            raise AgentInterruptedError(request.role, self.name, -proc.returncode)
+            raise AgentInterruptedError(request.role, self.name, -proc.returncode) from (
+                subprocess.CalledProcessError(proc.returncode, self.binary, output=stdout)
+            )
         return AgentResult(
             provider=self.name,
-            model=MODEL_ALIASES.get(request.model_alias or "", request.model_alias),
+            model=self.model_id(request.model_alias),
             exit_code=proc.returncode,
             output=_last_json_object(stdout) or _last_agent_message(stdout) or stdout,
             started_at=started,
