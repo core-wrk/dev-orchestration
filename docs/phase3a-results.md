@@ -82,3 +82,35 @@ What this suggests (not decided):
   non-minor findings to a findings repair.
 - Stop formatting from using up repair rounds. Either the worker runs the project's format
   command before finishing, or a failure that is only formatting gets its own allowance.
+
+## Third replay (g05): minor notes and validation repairs per worker change
+
+Measured 2026-11-08 at commit `449e69a`, one attempt, same setup as e05 and f05. It used 11
+hosted calls and $0.83 recorded (running total 119 of 170 calls, $8.86).
+
+Result: ESCALATED `verification_escalated` at the second final verification, after 1 of 3
+verification repair rounds.
+
+1. **Criterion IDs:** both verifier answers were accepted again.
+2. **Evidence repair:** the first verification marked criterion 3 UNKNOWN, missing a test. The
+   worker added a test, and criterion 3 then passed. The important finding F001
+   (`checkpoints.py` compatibility) was also resolved; the second review found only one minor
+   finding.
+3. **Per-change validation repairs worked.** The evidence repair broke formatting and a test.
+   It got a third validation repair, which the old per-run budget of 2 would have refused, and
+   validation passed.
+4. **Why it stopped:** the second verification passed criteria 1, 3 and 4 but marked criterion 2
+   UNKNOWN with missing kind `file`. It could not see whether a helper handles both sides of a
+   rename, and it saw no tests for the changed-policy and patch-conflict refusals. A `file`
+   gap is not something a worker repair supplies, so the run escalated by design. Criterion 2 had
+   passed at the first verification in this same run.
+5. The PASS-with-minor-notes rule was not exercised: no answer was all-PASS.
+
+What this suggests (not decided):
+- This is the stop Phase 3b targets: give the verifier read access to whole files, and ask it
+  once more, before escalating on a `file` gap.
+- The verifier mixed two reasons in one verdict (a file it could not see, and a missing test)
+  and reported only one kind. Phase 3b could let a verdict name more than one missing kind, or
+  route a mixed verdict to an evidence repair when a test is among them.
+- Criterion 2 went PASS then UNKNOWN within one run with little relevant change. The verifier's
+  run-to-run variance remains the largest single source of stops.
