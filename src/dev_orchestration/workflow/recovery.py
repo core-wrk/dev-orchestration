@@ -691,10 +691,12 @@ def resume_run(
                     store,
                 )
 
+            worker_links = (repo.root, tuple(project_config.validation_links))
+
             def guarded_repair(scope, call):
                 """Run a repair worker and refuse edits beyond the files it was allowed."""
                 before = file_digests(worktree, worktree_repo.change_inventory(base))
-                result = _run_worktree_stage(worktree_repo, base, fence, call)
+                result = _run_worktree_stage(worktree_repo, base, fence, call, worker_links)
                 stray = (
                     repair_edit_violations(
                         worktree, before, worktree_repo.change_inventory(base), scope
@@ -1080,7 +1082,8 @@ def resume_run(
                             worktree_repo,
                             base,
                             fence,
-                            lambda approved=approved, invariants=invariants, runtime=runtime, scope_context=scope_context, dependency_report=dependency_report: (
+                            links=worker_links,
+                            action=lambda approved=approved, invariants=invariants, runtime=runtime, scope_context=scope_context, dependency_report=dependency_report: (
                                 execute(
                                     registry,
                                     approved,

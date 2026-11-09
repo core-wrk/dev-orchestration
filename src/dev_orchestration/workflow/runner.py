@@ -909,11 +909,21 @@ def _run_worktree_stage(
     base_commit: str,
     fence: ScopeFence,
     action,
+    links: tuple[Path, tuple[str, ...]] | None = None,
 ):
-    """Run an agent stage and restore all ignored side effects afterward."""
+    """Run an agent stage and restore all ignored side effects afterward.
+
+    ``links`` (base checkout, relative paths) exposes the validation links, such as ``.venv``,
+    for the length of the stage, so a worker can run the validation commands it is asked to
+    self-check with. They are removed before the fence and ignored-write checks.
+    """
     ignored_before = worktree_repo.ignored_paths()
     try:
-        result = action()
+        if links is None:
+            result = action()
+        else:
+            with validation_environment(links[0], worktree_repo.root, links[1]):
+                result = action()
         enforce_fence(worktree_repo, base_commit, fence)
         enforce_ignored_writes(worktree_repo, ignored_before, fence)
     except Exception:
@@ -1103,10 +1113,12 @@ def execute_run(
             """Save a repair description before the checkpoint that precedes its worker."""
             return scope, save_repair_scope(store, scope)
 
+        worker_links = (repo.root, tuple(project_config.validation_links))
+
         def guarded_repair(scope, call):
             """Run a repair worker and refuse edits beyond the files it was allowed."""
             before = file_digests(worktree, worktree_repo.change_inventory(base_commit))
-            result = _run_worktree_stage(worktree_repo, base_commit, fence, call)
+            result = _run_worktree_stage(worktree_repo, base_commit, fence, call, worker_links)
             stray = (
                 repair_edit_violations(
                     worktree, before, worktree_repo.change_inventory(base_commit), scope
@@ -1704,7 +1716,8 @@ def execute_run(
                 worktree_repo,
                 base_commit,
                 fence,
-                lambda: execute(
+                links=worker_links,
+                action=lambda: execute(
                     registry,
                     approved,
                     invariants,
