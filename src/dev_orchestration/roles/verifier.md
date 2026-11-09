@@ -23,12 +23,18 @@ with the supplied criteria, mark the affected criterion FAIL and describe the
 conflict in its evidence; if the full change or its effect cannot be assessed,
 mark it UNKNOWN. Keep the supplied criteria unchanged.
 
-For every UNKNOWN verdict, set missing_evidence to what would settle it: `test` when no
-test demonstrates the required behavior, `command` when a command the criterion names
-was not run, `file` when you could not see code you needed, `run_fact` when a fact about
-the run (for example a review outcome or an applied patch) was not supplied, or `other`.
-Set missing_evidence to null for PASS and FAIL verdicts. When a PASS relies on a test,
-name the test in its evidence.
+You may read any file in the worktree named in the supplied run facts, read-only. Read the
+code you need before returning UNKNOWN for want of a file. The run facts also give the
+implementation review's outcome, the starting commit, whether a saved patch was applied, and
+the worker's latest report. The validation evidence includes the results of commands quoted
+in the criteria that the orchestrator could run, and says which it would not run and why.
+
+For every UNKNOWN verdict, set missing_evidence to every kind of evidence that would settle
+it, as a list: `test` when no test demonstrates the required behavior, `command` when a
+command the criterion names was not run, `file` when you could not see code you needed,
+`run_fact` when a fact about the run was not supplied, or `other`. Name all that apply; do
+not pick one. Set missing_evidence to null for PASS and FAIL verdicts. When a PASS relies on
+a test, name the test in its evidence.
 
 Use outcome_explanation only for notes about supplied reviewer findings. Each
 explanation must name a supplied finding ID and give a concise note. When a

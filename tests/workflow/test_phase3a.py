@@ -58,7 +58,7 @@ def test_verdict_names_what_is_missing_and_older_answers_still_load():
     assert Verification.model_validate(saved).verdicts[0].missing_evidence is None
 
     new = VerifierAnswer.model_validate(_unknown("test")).to_verification(CRITERIA)
-    assert new.verdicts[0].missing_evidence == "test"
+    assert new.verdicts[0].missing_evidence == ["test"]
 
     schema = schema_for(SCHEMA_MODELS["verification"])["$defs"]["CriterionVerdict"]
     assert "missing_evidence" in schema["required"]

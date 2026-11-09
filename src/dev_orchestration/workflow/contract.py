@@ -277,8 +277,10 @@ def verification_route(
 ) -> str | None:
     """How a rejected final verification is repaired, decided by its criterion verdicts.
 
-    ``product`` when any criterion failed; ``evidence`` when the only non-passing verdicts
-    are UNKNOWN for want of a test; ``findings`` when every criterion passed and the rejection
+    ``product`` when any criterion failed; ``evidence`` when the only non-passing verdicts are
+    UNKNOWN and at least one wants a test; ``ask`` when they want only evidence the orchestrator
+    supplies (a command result, a run fact, or a file), so the verifier is asked once more with
+    no worker call; ``findings`` when every criterion passed and the rejection
     rests only on supplied review findings, at least one is not minor, and each one that is not
     minor names a file; None when no worker repair can help. The verifier's own BLOCKED or CHANGES_REQUIRED label does not decide it; ESCALATE
     does.
@@ -288,9 +290,12 @@ def verification_route(
     rejected = [verdict for verdict in verification.verdicts if verdict.verdict != "PASS"]
     if any(verdict.verdict == "FAIL" for verdict in rejected):
         return "product"
-    if rejected and all(verdict.missing_evidence == "test" for verdict in rejected):
-        return "evidence"
-    if rejected or not verification.verdicts:
+    if rejected:
+        kinds = [set(verdict.missing_evidence or []) for verdict in rejected]
+        if any(not kind or "other" in kind for kind in kinds):
+            return None
+        return "evidence" if any("test" in kind for kind in kinds) else "ask"
+    if not verification.verdicts:
         return None
     named = verification.unresolved_finding_ids
     if len(_unresolved_findings(verification, findings or [])) != len(named):
@@ -314,7 +319,7 @@ def verification_repair_scope(
     findings: list[Finding] | None = None,
 ) -> dict:
     mode = verification_route(verification, findings)
-    if mode is None:
+    if mode in (None, "ask"):
         raise NoSafeRepairScope(
             "final verification rejected the change without a criterion a worker can repair"
         )

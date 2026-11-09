@@ -42,6 +42,7 @@ class Category(StrEnum):
     DEPENDENCY_REPORT = "dependency_report"
     ACCEPTANCE_CONTRACT = "acceptance_contract"
     REPAIR_SCOPE = "repair_scope"
+    RUN_FACTS = "run_facts"
 
 
 STAGE_CONTRACTS: dict[str, frozenset[Category]] = {
@@ -143,6 +144,7 @@ STAGE_CONTRACTS: dict[str, frozenset[Category]] = {
             Category.UNRESOLVED_FINDINGS,
             Category.CONTEXT_NOTES,
             Category.DEPENDENCY_REPORT,
+            Category.RUN_FACTS,
         }
     ),
 }

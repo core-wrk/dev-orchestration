@@ -24,6 +24,7 @@ from dev_orchestration.domain.run import (
     GitBlock,
     PauseRecord,
     validation_repair_limit,
+    verification_ask_available,
 )
 from dev_orchestration.git.repo import GitCommandError, GitRepo
 from dev_orchestration.scope import ScopeFence
@@ -71,6 +72,7 @@ from dev_orchestration.workflow.runner import (
     RunOutcome,
     _approval_required,
     _approval_summary,
+    _criteria_command_evidence,
     _deliverable_patch,
     _dependency_review_identity,
     _effective_tier,
@@ -1349,18 +1351,38 @@ def resume_run(
                         if review_paths
                         else None
                     )
+                    findings = reviewed.findings if reviewed else []
+                    # A resumed extra ask shows the verifier the answer that prompted it.
+                    saved_path = store.root / "verification/final-verification.json"
+                    saved = (
+                        Verification.model_validate_json(saved_path.read_text(encoding="utf-8"))
+                        if saved_path.is_file()
+                        else None
+                    )
+                    current = store.read_manifest()
+                    previous = (
+                        saved
+                        if saved is not None
+                        and verification_route(saved, findings) == "ask"
+                        and current.verification_repairs_reserved in current.verification_ask_rounds
+                        else None
+                    )
                     before = capture_snapshot(worktree_repo, base)
+                    command_evidence = _criteria_command_evidence(
+                        repo, worktree_repo, base, project_config, criteria
+                    )
                     verification = verify(
                         registry,
                         request_text,
                         _approved(store),
                         criteria,
                         worktree_repo.change_diff(base),
-                        _evidence(outcomes),
-                        reviewed.findings if reviewed else [],
+                        _evidence(outcomes) + command_evidence,
+                        findings,
                         store,
                         worktree,
                         dependency_report,
+                        previous,
                     )
                     cleanup_ephemeral_paths(worktree)
                     require_snapshot(worktree_repo, before)
@@ -1484,7 +1506,19 @@ def resume_run(
                                 stop_code="verification_rejected",
                             )
                             return _outcome(engine, verification, repo=repo, worktree=worktree)
-                        if route is None:
+                        current = store.read_manifest()
+                        if route == "ask" and verification_ask_available(current):
+                            # The verifier wants only evidence the orchestrator supplies.
+                            store.update_manifest(
+                                verification_ask_rounds=[
+                                    *current.verification_ask_rounds,
+                                    current.verification_repairs_reserved,
+                                ]
+                            )
+                            stage = "verifier"
+                            checkpoint(stage, ["verification/final-verification.json"])
+                            continue
+                        if route in (None, "ask"):
                             _terminal(
                                 engine,
                                 RunState.ESCALATED,

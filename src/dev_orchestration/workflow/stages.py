@@ -805,6 +805,77 @@ def repair_verification(
     return result
 
 
+_WORKER_REPORT_CHARS = 3000
+
+
+def _worker_report(store: RunStore) -> str:
+    """The most recent worker result's text: implementation, or the latest repair of any kind."""
+    candidates = [
+        store.root / "execution/worker-result.json",
+        *store.root.glob("execution/*-repair-v*.json"),
+        *store.root.glob("execution/remediation-v*.json"),
+    ]
+    present = [path for path in candidates if path.is_file()]
+    if not present:
+        return "(none recorded)"
+    latest = max(present, key=lambda path: path.stat().st_mtime_ns)
+    try:
+        output = json.loads(latest.read_text(encoding="utf-8")).get("output")
+    except (OSError, ValueError, AttributeError):
+        return "(unreadable)"
+    text = output if isinstance(output, str) else json.dumps(output)
+    return text[-_WORKER_REPORT_CHARS:] or "(empty)"
+
+
+def run_facts(store: RunStore, worktree: Path, previous: Verification | None = None) -> str:
+    """Facts from the run record the verifier would otherwise have to ask for."""
+    manifest = store.read_manifest()
+    reviews = sorted(
+        store.root.glob("review/implementation-review-v*.json"),
+        key=lambda path: int(path.stem.rsplit("-v", 1)[1]),
+    )
+    if reviews:
+        review = ReviewResult.model_validate_json(reviews[-1].read_text(encoding="utf-8"))
+        findings = ", ".join(f"{f.id} {f.severity.value}" for f in review.findings) or "none"
+        review_line = f"Implementation review: {review.outcome} (findings: {findings})"
+    else:
+        review_line = "Implementation review: not run for this tier"
+    patch_line = (
+        f"Saved patch applied: yes, sha256 {manifest.seed_patch_sha256}"
+        if manifest.seed_patch_artifact
+        else "Saved patch applied: no saved patch in this run"
+    )
+    lines = [
+        review_line,
+        f"Starting commit: {manifest.git.base_commit}",
+        patch_line,
+        *(
+            [f"Restart: {manifest.restart_mode} from {manifest.restart_from}"]
+            if manifest.restart_mode
+            else []
+        ),
+        f"Worktree (read-only): {worktree}",
+        (
+            f"Repair rounds used: validation {manifest.validation_repairs_reserved}, "
+            f"final verification {manifest.verification_repairs_reserved}"
+        ),
+        f"Worker's latest report:\n{_worker_report(store)}",
+    ]
+    if previous is not None:
+        lines.append(
+            "Your previous answer in this verification round marked these criteria UNKNOWN. "
+            "The evidence above includes everything the orchestrator can supply; read any file "
+            "you need from the worktree before answering again."
+        )
+        lines.extend(
+            f"- {verdict.criterion}: wanted {', '.join(verdict.missing_evidence or [])}: "
+            f"{verdict.evidence}"
+            for verdict in previous.verdicts
+            if verdict.verdict == "UNKNOWN"
+        )
+    return "\n".join(lines)
+
+
 def verify(
     registry: RoleRegistry,
     request_text: str,
@@ -816,6 +887,7 @@ def verify(
     store: RunStore,
     worktree: Path | None = None,
     dependency_report: str = "",
+    previous_answer: Verification | None = None,
 ) -> Verification:
     previous = [
         int(path.stem.rsplit("-v", 1)[1])
@@ -859,6 +931,11 @@ def verify(
                     [finding.model_dump(mode="json") for finding in findings],
                     indent=2,
                 ),
+            ),
+            ContextRef(
+                label=Category.RUN_FACTS,
+                path=None,
+                content=run_facts(store, worktree or store.repo_root, previous_answer),
             ),
             *(
                 [

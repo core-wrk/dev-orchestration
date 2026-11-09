@@ -29,6 +29,7 @@ from dev_orchestration.domain.run import (
     RoleBinding,
     StageActor,
     validation_repair_limit,
+    verification_ask_available,
 )
 from dev_orchestration.git.repo import EmptySnapshotError, GitCommandError, GitRepo
 from dev_orchestration.git.worktree import remove_worktree
@@ -57,6 +58,7 @@ from dev_orchestration.workflow.contract import (
     verification_repair_scope,
     verification_route,
 )
+from dev_orchestration.workflow.criteria_commands import criteria_command_evidence
 from dev_orchestration.workflow.dependencies import dependency_sources
 from dev_orchestration.workflow.engine import Engine, IllegalTransitionError
 from dev_orchestration.workflow.invoke import AgentInvocationError, SchemaEscalation
@@ -160,6 +162,33 @@ def _evidence(outcomes: list[ValidationOutcome]) -> str:
         f"stderr: {outcome.stderr_tail}"
         for outcome in outcomes
     )
+
+
+def _criteria_command_evidence(
+    repo: GitRepo,
+    worktree_repo: GitRepo,
+    base_commit: str,
+    project_config: ProjectConfig,
+    criteria: list[str],
+) -> str:
+    """Run commands quoted in the criteria, refusing any that change the worktree."""
+    cleanup_ephemeral_paths(worktree_repo.root)
+    before = capture_snapshot(worktree_repo, base_commit)
+    with validation_environment(
+        repo.root,
+        worktree_repo.root,
+        tuple(project_config.validation_links),
+        tuple(project_config.required_validation_links),
+    ):
+        evidence = criteria_command_evidence(
+            criteria, project_config.validation, worktree_repo.root
+        )
+    cleanup_ephemeral_paths(worktree_repo.root)
+    if capture_snapshot(worktree_repo, base_commit) != before:
+        raise ContextContractError(
+            "a command named in the acceptance criteria changed the worktree"
+        )
+    return f"\n\n{evidence}" if evidence else ""
 
 
 def _validation_json(outcomes: list[ValidationOutcome]) -> list[dict]:
@@ -1892,35 +1921,49 @@ def execute_run(
                 return _outcome(engine, repo=repo, worktree=worktree)
 
             engine.transition(RunState.FINAL_VERIFICATION)
-            with validation_environment(
-                repo.root,
-                worktree,
-                tuple(project_config.validation_links),
-                tuple(project_config.required_validation_links),
-            ):
-                pass
-            verification = verify(
-                registry,
-                request_text,
-                approved,
-                acceptance_criteria,
-                diff,
-                _evidence(outcomes),
-                implementation_review.findings if implementation_review is not None else [],
-                store,
-                worktree,
-                dependency_report,
-            )
-            receipt("commit", ["verification/final-verification.json"], cycle - 1)
-            cleanup_ephemeral_paths(worktree_repo.root)
-            if worktree_repo.change_inventory(base_commit) != review_inventory:
-                raise ContextContractError("read-only verification changed the worktree")
             review_findings = (
                 implementation_review.findings if implementation_review is not None else []
             )
-            if verification_allows_completion(verification, acceptance_criteria, review_findings):
+            previous = None
+            while True:
+                command_evidence = _criteria_command_evidence(
+                    repo, worktree_repo, base_commit, project_config, acceptance_criteria
+                )
+                verification = verify(
+                    registry,
+                    request_text,
+                    approved,
+                    acceptance_criteria,
+                    diff,
+                    _evidence(outcomes) + command_evidence,
+                    review_findings,
+                    store,
+                    worktree,
+                    dependency_report,
+                    previous,
+                )
+                receipt("commit", ["verification/final-verification.json"], cycle - 1)
+                cleanup_ephemeral_paths(worktree_repo.root)
+                if worktree_repo.change_inventory(base_commit) != review_inventory:
+                    raise ContextContractError("read-only verification changed the worktree")
+                accepted = verification_allows_completion(
+                    verification, acceptance_criteria, review_findings
+                )
+                route = verification_route(verification, review_findings)
+                current = store.read_manifest()
+                if accepted or route != "ask" or not verification_ask_available(current):
+                    break
+                # The verifier wants only evidence the orchestrator supplies: ask once more.
+                store.update_manifest(
+                    verification_ask_rounds=[
+                        *current.verification_ask_rounds,
+                        current.verification_repairs_reserved,
+                    ]
+                )
+                receipt("verifier", ["verification/final-verification.json"], cycle - 1)
+                previous = verification
+            if accepted:
                 break
-            route = verification_route(verification, review_findings)
             evidence_only = (
                 all(outcome.passed for outcome in outcomes)
                 and verification.criteria == acceptance_criteria
@@ -1953,7 +1996,7 @@ def execute_run(
                     stop_code="verification_rejected",
                 )
                 return _outcome(engine, verification, repo=repo, worktree=worktree)
-            if route is None:
+            if route in (None, "ask"):
                 _terminal(
                     engine,
                     RunState.ESCALATED,

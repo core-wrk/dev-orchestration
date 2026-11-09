@@ -144,6 +144,8 @@ class RunManifest(BaseModel):
     stage_attempts: dict[str, int] = Field(default_factory=dict)
     validation_repairs_reserved: int = 0
     verification_repairs_reserved: int = 0
+    # Verification rounds (repairs reserved at the time) that used their one extra ask.
+    verification_ask_rounds: list[int] = Field(default_factory=list)
     acceptance_contract_artifact: str | None = None
     stage_actor: StageActor | None = None
     stage_error: Literal["provider_context_limit"] | None = None
@@ -167,3 +169,8 @@ def validation_repair_limit(manifest: RunManifest, review_rounds: int) -> int:
         return 1
     changes = 1 + review_rounds + manifest.verification_repairs_reserved
     return MAX_VALIDATION_REPAIRS * changes
+
+
+def verification_ask_available(manifest: RunManifest) -> bool:
+    """Each verification round may ask the verifier once more, with no worker call."""
+    return manifest.verification_repairs_reserved not in manifest.verification_ask_rounds

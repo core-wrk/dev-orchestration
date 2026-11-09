@@ -4,7 +4,7 @@ import re
 from enum import StrEnum
 from typing import Literal, Self
 
-from pydantic import BaseModel, Field, ValidationInfo, model_validator
+from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
 
 from dev_orchestration.domain.enums import Outcome, Tier
 
@@ -102,15 +102,25 @@ class DependencyReport(BaseModel):
     budget_exhausted: bool = False
 
 
+MissingKind = Literal["test", "command", "file", "run_fact", "other"]
+
+
+def _as_kind_list(value: object) -> object:
+    return [value] if isinstance(value, str) else value
+
+
 class AcceptanceVerdict(BaseModel):
     model_config = {"frozen": True, "extra": "forbid"}
 
     criterion: str
     verdict: Literal["PASS", "FAIL", "UNKNOWN"]
     evidence: str
-    # What would settle an UNKNOWN verdict. Answers saved before this field existed have none,
-    # and the orchestrator treats that like "other": not something a worker repair can supply.
-    missing_evidence: Literal["test", "command", "file", "run_fact", "other"] | None = None
+    # Every kind of evidence that would settle an UNKNOWN verdict. Answers saved before this
+    # field existed have none, and the orchestrator treats that like "other": not something it
+    # or a worker repair can supply. Answers saved with a single kind load as a one-item list.
+    missing_evidence: list[MissingKind] | None = None
+
+    _one_kind_is_a_list = field_validator("missing_evidence", mode="before")(_as_kind_list)
 
 
 class OutcomeExplanation(BaseModel):
@@ -156,7 +166,9 @@ class CriterionVerdict(BaseModel):
     criterion_id: str
     verdict: Literal["PASS", "FAIL", "UNKNOWN"]
     evidence: str
-    missing_evidence: Literal["test", "command", "file", "run_fact", "other"] | None = None
+    missing_evidence: list[MissingKind] | None = None
+
+    _one_kind_is_a_list = field_validator("missing_evidence", mode="before")(_as_kind_list)
 
 
 class VerifierAnswer(BaseModel):
