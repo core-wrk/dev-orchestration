@@ -38,8 +38,7 @@ BLOCKING = {
 }
 VERIFY = {
     "outcome": "PASS",
-    "criteria": CRITERIA,
-    "verdicts": [{"criterion": CRITERIA[0], "verdict": "PASS", "evidence": "seen"}],
+    "verdicts": [{"criterion_id": "AC1", "verdict": "PASS", "evidence": "seen"}],
     "unresolved_finding_ids": [],
 }
 
@@ -979,7 +978,7 @@ def test_fail_or_unknown_verification_cannot_complete_local(tmp_path, verdict):
     failed = dict(
         VERIFY,
         outcome="CHANGES_REQUIRED",
-        verdicts=[{"criterion": CRITERIA[0], "verdict": verdict, "evidence": "no"}],
+        verdicts=[{"criterion_id": "AC1", "verdict": verdict, "evidence": "no"}],
     )
     outcome = execute_run(
         git, CONFIG, registry(Scripted(script(verifier=failed))), "bad", tmp_path / "wt", CRITERIA
@@ -1782,7 +1781,7 @@ def test_binary_deletion_mode_and_empty_untracked_changes_are_deliverable(tmp_pa
 
 def test_verifier_that_judges_no_criteria_cannot_complete_local(tmp_path):
     git = repo(tmp_path)
-    empty = {"outcome": "PASS", "criteria": [], "verdicts": [], "unresolved_finding_ids": []}
+    empty = {"outcome": "PASS", "verdicts": [], "unresolved_finding_ids": []}
     outcome = execute_run(
         git,
         CONFIG,
@@ -1791,16 +1790,16 @@ def test_verifier_that_judges_no_criteria_cannot_complete_local(tmp_path):
         tmp_path / "wt",
         CRITERIA,
     )
-    assert outcome.final_state is RunState.FAILED
-    assert "criteria" in outcome.reason
+    # The answer is retried once, then the run escalates: it never judged AC1.
+    assert outcome.final_state is RunState.ESCALATED
+    assert "missing=['AC1']" in outcome.reason
 
 
-def test_verifier_that_swaps_in_its_own_criteria_cannot_complete_local(tmp_path):
+def test_verifier_that_names_a_criterion_it_was_not_given_cannot_complete_local(tmp_path):
     git = repo(tmp_path)
     swapped = {
         "outcome": "PASS",
-        "criteria": ["something easier"],
-        "verdicts": [{"criterion": "something easier", "verdict": "PASS", "evidence": "sure"}],
+        "verdicts": [{"criterion_id": "AC2", "verdict": "PASS", "evidence": "sure"}],
         "unresolved_finding_ids": [],
     }
     outcome = execute_run(
@@ -1811,7 +1810,8 @@ def test_verifier_that_swaps_in_its_own_criteria_cannot_complete_local(tmp_path)
         tmp_path / "wt",
         CRITERIA,
     )
-    assert outcome.final_state is RunState.FAILED
+    assert outcome.final_state is RunState.ESCALATED
+    assert "unknown=['AC2']" in outcome.reason
 
 
 def test_a_run_without_acceptance_criteria_is_refused(tmp_path):

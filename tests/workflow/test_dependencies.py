@@ -409,10 +409,9 @@ def test_600_source_report_fits_real_downstream_requests_and_keeps_full_inventor
     review_payload = {"outcome": "PASS", "findings": []}
     verification_payload = {
         "outcome": "PASS",
-        "criteria": ["Existing callers remain compatible."],
         "verdicts": [
             {
-                "criterion": "Existing callers remain compatible.",
+                "criterion_id": "AC1",
                 "verdict": "PASS",
                 "evidence": "The diff preserves the shared interface.",
             }

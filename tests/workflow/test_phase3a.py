@@ -5,9 +5,9 @@ from datetime import UTC, datetime
 
 from dev_orchestration.adapters.base import AgentResult
 from dev_orchestration.domain.enums import RunState
-from dev_orchestration.domain.findings import Verification
+from dev_orchestration.domain.findings import Verification, VerifierAnswer
 from dev_orchestration.roles.loader import load_role_prompt
-from dev_orchestration.schemas import schema_for
+from dev_orchestration.schemas import SCHEMA_MODELS, schema_for
 from dev_orchestration.workflow.recovery import resume_run
 from tests.workflow import test_resume
 from tests.workflow.run_helpers import execute_run
@@ -24,7 +24,7 @@ from tests.workflow.test_runner import CONFIG, CRITERIA, registry, repo, script
 
 
 def _unknown(missing, outcome="BLOCKED", criteria=CRITERIA):
-    verdict = {"criterion": criteria[0], "verdict": "UNKNOWN", "evidence": "not shown"}
+    verdict = {"criterion_id": "AC1", "verdict": "UNKNOWN", "evidence": "not shown"}
     if missing is not None:
         verdict["missing_evidence"] = missing
     return dict(_verdict("UNKNOWN", criteria), outcome=outcome, verdicts=[verdict])
@@ -50,13 +50,17 @@ def _repairs(adapter):
 
 
 def test_verdict_names_what_is_missing_and_older_answers_still_load():
-    old = Verification.model_validate(_verdict("UNKNOWN"))
-    assert old.verdicts[0].missing_evidence is None
+    saved = {
+        "outcome": "CHANGES_REQUIRED",
+        "criteria": CRITERIA,
+        "verdicts": [{"criterion": CRITERIA[0], "verdict": "UNKNOWN", "evidence": "x"}],
+    }
+    assert Verification.model_validate(saved).verdicts[0].missing_evidence is None
 
-    new = Verification.model_validate(_unknown("test"))
+    new = VerifierAnswer.model_validate(_unknown("test")).to_verification(CRITERIA)
     assert new.verdicts[0].missing_evidence == "test"
 
-    schema = schema_for(Verification)["$defs"]["AcceptanceVerdict"]
+    schema = schema_for(SCHEMA_MODELS["verification"])["$defs"]["CriterionVerdict"]
     assert "missing_evidence" in schema["required"]
 
 

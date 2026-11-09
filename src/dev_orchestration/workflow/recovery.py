@@ -1376,11 +1376,25 @@ def resume_run(
                         )
                     )
                     outcomes = _validation(store, cycle)
+                    reviewed = (
+                        ReviewResult.model_validate_json(
+                            _latest(store, "review", "implementation-review").read_text(
+                                encoding="utf-8"
+                            )
+                        )
+                        if list((store.root / "review").glob("implementation-review-v*.json"))
+                        else None
+                    )
                     scope = repair_description(
                         "final_verification",
                         round_number,
-                        lambda verification=verification, round_number=round_number: (
-                            verification_repair_scope(verification, round_number, fence)
+                        lambda verification=verification, round_number=round_number, reviewed=reviewed: (
+                            verification_repair_scope(
+                                verification,
+                                round_number,
+                                fence,
+                                reviewed.findings if reviewed else [],
+                            )
                         ),
                     )
                     save_repair_scope(store, scope)
@@ -1447,15 +1461,16 @@ def resume_run(
                         if reviewed_paths
                         else None
                     )
-                    if not verification_allows_completion(
-                        verification,
-                        criteria,
-                        reviewed.findings if reviewed else [],
-                    ):
+                    review_findings = reviewed.findings if reviewed else []
+                    if not verification_allows_completion(verification, criteria, review_findings):
+                        route = verification_route(verification, review_findings)
                         judged_criteria = (
                             verification.criteria == criteria
                             and [v.criterion for v in verification.verdicts] == criteria
-                            and any(v.verdict != "PASS" for v in verification.verdicts)
+                            and (
+                                any(v.verdict != "PASS" for v in verification.verdicts)
+                                or route is not None
+                            )
                         )
                         if current.restart_mode is not None or not judged_criteria:
                             _terminal(
@@ -1468,7 +1483,7 @@ def resume_run(
                                 stop_code="verification_rejected",
                             )
                             return _outcome(engine, verification, repo=repo, worktree=worktree)
-                        if verification_route(verification) is None:
+                        if route is None:
                             _terminal(
                                 engine,
                                 RunState.ESCALATED,
@@ -1486,7 +1501,9 @@ def resume_run(
                             )
                             return _outcome(engine, verification, repo=repo, worktree=worktree)
                         round_number = current.verification_repairs_reserved + 1
-                        scope = verification_repair_scope(verification, round_number, fence)
+                        scope = verification_repair_scope(
+                            verification, round_number, fence, review_findings
+                        )
                         scope_artifact = save_repair_scope(store, scope)
                         store.update_manifest(verification_repairs_reserved=round_number)
                         stage = "verification_repair"

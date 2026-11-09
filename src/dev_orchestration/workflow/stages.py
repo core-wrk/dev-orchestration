@@ -24,6 +24,8 @@ from dev_orchestration.domain.findings import (
     Finding,
     ReviewResult,
     Verification,
+    VerifierAnswer,
+    criterion_ids,
     next_finding_id,
 )
 from dev_orchestration.domain.run import MAX_REMEDIATION_CYCLES
@@ -729,13 +731,34 @@ def repair_verification(
 ) -> AgentResult:
     """Give the worker the rejected acceptance checks for one verification repair round."""
     rejected = [verdict for verdict in verification.verdicts if verdict.verdict != "PASS"]
-    evidence_note = (
-        "Evidence repair: final verification could not see these criteria demonstrated. "
-        "Add or extend tests that directly demonstrate each one; change product code only "
-        "where such a test exposes a defect, inside the approved scope.\n"
-        if repair is not None and repair.get("mode") == "evidence"
-        else ""
-    )
+    mode = repair.get("mode") if repair is not None else None
+    if mode == "findings":
+        blocking = "\n".join(
+            [
+                (
+                    "Unresolved review findings: final verification passed every acceptance "
+                    "criterion but will not accept the change while these review findings "
+                    "stand. Resolve each one, changing only the files the repair scope lists."
+                ),
+                f"{repair['check']}: {repair['expected']}",
+                *(f"{item.finding_id}: {item.note}" for item in verification.outcome_explanation),
+            ]
+        )
+    else:
+        evidence_note = (
+            "Evidence repair: final verification could not see these criteria demonstrated. "
+            "Add or extend tests that directly demonstrate each one; change product code only "
+            "where such a test exposes a defect, inside the approved scope.\n"
+            if mode == "evidence"
+            else ""
+        )
+        blocking = evidence_note + (
+            "\n".join(
+                f"{verdict.criterion}: {verdict.verdict}: {verdict.evidence}"
+                for verdict in rejected
+            )
+            or f"final verification returned {verification.outcome}"
+        )
     packet = assemble(
         "remediation",
         [
@@ -744,14 +767,7 @@ def repair_verification(
             ContextRef(
                 label=Category.BLOCKING_FINDINGS,
                 path=None,
-                content=evidence_note
-                + (
-                    "\n".join(
-                        f"{verdict.criterion}: {verdict.verdict}: {verdict.evidence}"
-                        for verdict in rejected
-                    )
-                    or f"final verification returned {verification.outcome}"
-                ),
+                content=blocking,
             ),
             ContextRef(label=Category.DIFF, path=None, content=diff),
             ContextRef(label=Category.VALIDATION_EVIDENCE, path=None, content=validation_evidence),
@@ -818,7 +834,10 @@ def verify(
             ContextRef(
                 label=Category.ACCEPTANCE_CRITERIA,
                 path=None,
-                content="\n".join(criteria),
+                content="\n".join(
+                    f"{cid}: {criterion}"
+                    for cid, criterion in zip(criterion_ids(criteria), criteria, strict=True)
+                ),
             ),
             ContextRef(
                 label=Category.CURRENT_STATE,
@@ -855,12 +874,15 @@ def verify(
         ],
     )
     request = _request(registry, "verifier", store, packet, worktree or store.repo_root)
-    result = invoke_structured(
+    answer = invoke_structured(
         registry.adapter_for("verifier"),
         request,
-        Verification,
+        VerifierAnswer,
         store.root / "schemas",
+        context={"criterion_ids": criterion_ids(criteria)},
     )
+    # Saved with the supplied criteria text, so later gates compare text the verifier never wrote.
+    result = answer.to_verification(criteria)
     _record_result(store, "verification/final-verification.json", result.model_dump(mode="json"))
     store.append_event(
         {

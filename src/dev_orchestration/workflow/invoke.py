@@ -25,10 +25,10 @@ class AgentInvocationError(RuntimeError):
     """A provider did not complete a request successfully."""
 
 
-def _validate(model: type[BaseModel], output: dict | str) -> BaseModel:
+def _validate(model: type[BaseModel], output: dict | str, context: dict | None) -> BaseModel:
     if isinstance(output, str):
-        return model.model_validate_json(output)
-    return model.model_validate(output)
+        return model.model_validate_json(output, context=context)
+    return model.model_validate(output, context=context)
 
 
 def invoke_structured(
@@ -36,8 +36,12 @@ def invoke_structured(
     request: AgentRequest,
     model: type[BaseModel],
     schema_dir: Path,
+    context: dict | None = None,
 ) -> BaseModel:
-    """Attach a durable generated schema to both attempts."""
+    """Attach a durable generated schema to both attempts.
+
+    ``context`` is passed to validation, for checks that depend on what was supplied.
+    """
     schema_path = request.expected_schema or write_schema(model, schema_dir)
     request = replace(request, expected_schema=schema_path)
     result = adapter.run(request)
@@ -47,7 +51,7 @@ def invoke_structured(
             f"{model.__name__} {provider_failure_reason(request.role, result, attempt=1)}"
         )
     try:
-        return _validate(model, result.output)
+        return _validate(model, result.output, context)
     except (ValidationError, ValueError) as first_error:
         correction = (
             f"{request.prompt}\n\nYour previous response did not satisfy the required "
@@ -61,7 +65,7 @@ def invoke_structured(
                 f"{model.__name__} {provider_failure_reason(request.role, retry_result, attempt=2)}"
             )
         try:
-            return _validate(model, retry_result.output)
+            return _validate(model, retry_result.output, context)
         except (ValidationError, ValueError) as second_error:
             raise SchemaEscalation(
                 f"{model.__name__} schema not satisfied after one retry: {second_error}"

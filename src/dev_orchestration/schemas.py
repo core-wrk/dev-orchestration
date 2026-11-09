@@ -9,13 +9,13 @@ from dev_orchestration.domain.findings import (
     Classification,
     DependencyReport,
     ReviewResult,
-    Verification,
+    VerifierAnswer,
 )
 
 SCHEMA_MODELS: dict[str, type[BaseModel]] = {
     "classification": Classification,
     "review_result": ReviewResult,
-    "verification": Verification,
+    "verification": VerifierAnswer,
     "dependency_report": DependencyReport,
 }
 

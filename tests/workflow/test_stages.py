@@ -404,8 +404,7 @@ def test_verification_passes_every_criterion_to_the_model(store):
         [
             {
                 "outcome": "PASS",
-                "criteria": ["a"],
-                "verdicts": [{"criterion": "a", "verdict": "PASS", "evidence": "e"}],
+                "verdicts": [{"criterion_id": "AC1", "verdict": "PASS", "evidence": "e"}],
                 "unresolved_finding_ids": [],
             }
         ]
@@ -421,8 +420,7 @@ def test_verification_saves_a_full_immutable_diff_for_each_invocation(store, tmp
     criteria = ["the last marker is retained"]
     result_payload = {
         "outcome": "PASS",
-        "criteria": criteria,
-        "verdicts": [{"criterion": criteria[0], "verdict": "PASS", "evidence": "complete diff"}],
+        "verdicts": [{"criterion_id": "AC1", "verdict": "PASS", "evidence": "complete diff"}],
         "unresolved_finding_ids": [],
     }
     adapter = Scripted([result_payload, result_payload])
@@ -447,8 +445,7 @@ def test_verification_keeps_supplied_criteria_authoritative_when_diff_edits_a_do
     criteria = ["The approved evaluation accepts only export-only production changes."]
     payload = {
         "outcome": "PASS",
-        "criteria": criteria,
-        "verdicts": [{"criterion": criteria[0], "verdict": "PASS", "evidence": "reviewed"}],
+        "verdicts": [{"criterion_id": "AC1", "verdict": "PASS", "evidence": "reviewed"}],
         "unresolved_finding_ids": [],
     }
     adapter = Scripted([payload])
@@ -475,7 +472,7 @@ def test_verification_keeps_supplied_criteria_authoritative_when_diff_edits_a_do
         item for item in request.context.items if item.label == Category.ACCEPTANCE_CRITERIA
     )
     state_ref = next(item for item in request.context.items if item.label == Category.CURRENT_STATE)
-    assert criteria_ref.content == criteria[0]
+    assert criteria_ref.content == f"AC1: {criteria[0]}"
     assert "Production call sites may now be refactored." in state_ref.content
     assert "Treat the supplied acceptance criteria as authoritative" in request.prompt
     normalized_prompt = " ".join(request.prompt.split())
@@ -505,8 +502,7 @@ def test_verification_runs_in_the_supplied_worktree(store, tmp_path):
         [
             {
                 "outcome": "PASS",
-                "criteria": ["a"],
-                "verdicts": [{"criterion": "a", "verdict": "PASS", "evidence": "e"}],
+                "verdicts": [{"criterion_id": "AC1", "verdict": "PASS", "evidence": "e"}],
                 "unresolved_finding_ids": [],
             }
         ]

@@ -4,7 +4,7 @@ import re
 from enum import StrEnum
 from typing import Literal, Self
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, ValidationInfo, model_validator
 
 from dev_orchestration.domain.enums import Outcome, Tier
 
@@ -142,6 +142,70 @@ class Verification(BaseModel):
                 f"missing={missing}, extras={extras}, duplicates={duplicates}"
             )
         return self
+
+
+def criterion_ids(criteria: list[str]) -> list[str]:
+    return [f"AC{index}" for index in range(1, len(criteria) + 1)]
+
+
+class CriterionVerdict(BaseModel):
+    """One verdict as the verifier returns it: the criterion is named by its supplied ID."""
+
+    model_config = {"frozen": True, "extra": "forbid"}
+
+    criterion_id: str
+    verdict: Literal["PASS", "FAIL", "UNKNOWN"]
+    evidence: str
+    missing_evidence: Literal["test", "command", "file", "run_fact", "other"] | None = None
+
+
+class VerifierAnswer(BaseModel):
+    """What the verifier returns. The orchestrator, not the verifier, supplies criteria text.
+
+    Validated with ``context={"criterion_ids": [...]}`` so an answer that misses, repeats, or
+    invents an ID fails validation and gets the one corrective retry.
+    """
+
+    model_config = {"frozen": True, "extra": "forbid"}
+
+    outcome: Outcome
+    verdicts: list[CriterionVerdict] = Field(default_factory=list)
+    unresolved_finding_ids: list[str] = Field(default_factory=list)
+    outcome_explanation: list[OutcomeExplanation] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def every_supplied_id_has_one_verdict(self, info: ValidationInfo) -> Self:
+        expected = (info.context or {}).get("criterion_ids")
+        if expected is None:
+            return self
+        judged = [verdict.criterion_id for verdict in self.verdicts]
+        missing = [cid for cid in expected if cid not in judged]
+        unknown = [cid for cid in judged if cid not in expected]
+        duplicates = sorted({cid for cid in judged if judged.count(cid) > 1})
+        if missing or unknown or duplicates:
+            raise ValueError(
+                f"verdicts must give exactly one verdict for each supplied criterion ID "
+                f"{expected}: missing={missing}, unknown={unknown}, duplicates={duplicates}"
+            )
+        return self
+
+    def to_verification(self, criteria: list[str]) -> Verification:
+        by_id = {verdict.criterion_id: verdict for verdict in self.verdicts}
+        return Verification(
+            outcome=self.outcome,
+            criteria=list(criteria),
+            verdicts=[
+                AcceptanceVerdict(
+                    criterion=criterion,
+                    verdict=by_id[cid].verdict,
+                    evidence=by_id[cid].evidence,
+                    missing_evidence=by_id[cid].missing_evidence,
+                )
+                for cid, criterion in zip(criterion_ids(criteria), criteria, strict=True)
+            ],
+            unresolved_finding_ids=list(self.unresolved_finding_ids),
+            outcome_explanation=list(self.outcome_explanation),
+        )
 
 
 def verification_allows_completion(

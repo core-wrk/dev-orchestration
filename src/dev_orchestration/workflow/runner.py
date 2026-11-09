@@ -1914,12 +1914,12 @@ def execute_run(
             cleanup_ephemeral_paths(worktree_repo.root)
             if worktree_repo.change_inventory(base_commit) != review_inventory:
                 raise ContextContractError("read-only verification changed the worktree")
-            if verification_allows_completion(
-                verification,
-                acceptance_criteria,
-                implementation_review.findings if implementation_review is not None else [],
-            ):
+            review_findings = (
+                implementation_review.findings if implementation_review is not None else []
+            )
+            if verification_allows_completion(verification, acceptance_criteria, review_findings):
                 break
+            route = verification_route(verification, review_findings)
             evidence_only = (
                 all(outcome.passed for outcome in outcomes)
                 and verification.criteria == acceptance_criteria
@@ -1935,10 +1935,13 @@ def execute_run(
             if (
                 verification.criteria != acceptance_criteria
                 or [verdict.criterion for verdict in verification.verdicts] != acceptance_criteria
-                or all(verdict.verdict == "PASS" for verdict in verification.verdicts)
+                or (
+                    all(verdict.verdict == "PASS" for verdict in verification.verdicts)
+                    and route is None
+                )
             ):
                 # Either the verifier did not judge the supplied criteria, or it failed none of
-                # them: there is no criterion for a worker repair to address.
+                # them and named no review finding a scoped repair could address.
                 _terminal(
                     engine,
                     RunState.FAILED,
@@ -1949,7 +1952,7 @@ def execute_run(
                     stop_code="verification_rejected",
                 )
                 return _outcome(engine, verification, repo=repo, worktree=worktree)
-            if verification_route(verification) is None:
+            if route is None:
                 _terminal(
                     engine,
                     RunState.ESCALATED,
@@ -1972,7 +1975,7 @@ def execute_run(
                 return _outcome(engine, verification, repo=repo, worktree=worktree)
             round_number = reserved + 1
             repair_info, repair_artifact = saved(
-                verification_repair_scope(verification, round_number, fence)
+                verification_repair_scope(verification, round_number, fence, review_findings)
             )
             store.update_manifest(verification_repairs_reserved=round_number)
             receipt(

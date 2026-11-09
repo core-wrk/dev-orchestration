@@ -181,8 +181,7 @@ def _verdict(verdict, criteria=CRITERIA):
     return dict(
         VERIFY,
         outcome="CHANGES_REQUIRED" if verdict != "PASS" else "PASS",
-        criteria=criteria,
-        verdicts=[{"criterion": criteria[0], "verdict": verdict, "evidence": "observed"}],
+        verdicts=[{"criterion_id": "AC1", "verdict": verdict, "evidence": "observed"}],
     )
 
 

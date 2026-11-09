@@ -85,10 +85,9 @@ class ScriptedAdapter:
             criteria = _criteria_from(request)
             payload = {
                 "outcome": "CHANGES_REQUIRED" if self.fail_verification else "PASS",
-                "criteria": criteria,
                 "verdicts": [
                     {
-                        "criterion": item,
+                        "criterion_id": item.split(":", 1)[0],
                         "verdict": "FAIL" if self.fail_verification else "PASS",
                         "evidence": "seen",
                     }
@@ -114,7 +113,7 @@ class ScriptedAdapter:
 
 
 def _criteria_from(request):
-    """Read the acceptance criteria out of the verifier packet."""
+    """Read the numbered acceptance criteria (``AC1: text``) out of the verifier packet."""
     for item in request.context.items:
         if item.label == "acceptance_criteria":
             return [line for line in item.content.splitlines() if line]

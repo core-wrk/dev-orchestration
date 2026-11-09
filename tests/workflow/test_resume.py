@@ -42,8 +42,7 @@ CRITERIA = ["the change exists"]
 PASS = {"outcome": "PASS", "findings": []}
 VERIFY = {
     "outcome": "PASS",
-    "criteria": CRITERIA,
-    "verdicts": [{"criterion": CRITERIA[0], "verdict": "PASS", "evidence": "diff"}],
+    "verdicts": [{"criterion_id": "AC1", "verdict": "PASS", "evidence": "diff"}],
     "unresolved_finding_ids": [],
 }
 ROLES = (
@@ -603,7 +602,7 @@ def test_resumed_fail_or_unknown_verification_cannot_complete(tmp_path, verdict)
                         **VERIFY,
                         "outcome": "CHANGES_REQUIRED",
                         "verdicts": [
-                            {"criterion": CRITERIA[0], "verdict": verdict, "evidence": "checked"}
+                            {"criterion_id": "AC1", "verdict": verdict, "evidence": "checked"}
                         ],
                     },
                     now,

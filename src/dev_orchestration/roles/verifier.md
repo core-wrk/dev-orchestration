@@ -1,7 +1,9 @@
 Verify the completed request against the supplied approved contract.
 
 Return a Verification with exactly one PASS, FAIL, or UNKNOWN verdict for every
-supplied acceptance criterion. Use only the supplied current state and evidence.
+supplied acceptance criterion. Each criterion is supplied with an ID (AC1, AC2, ...);
+name it in criterion_id and do not copy or restate its text. Use only the supplied
+current state and evidence.
 Do not modify the worktree and do not invent evidence.
 
 The current-state diff is also saved at the absolute path shown in the supplied
