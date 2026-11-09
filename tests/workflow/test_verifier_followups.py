@@ -9,7 +9,15 @@ from dev_orchestration.schemas import SCHEMA_MODELS, schema_for
 from dev_orchestration.workflow.recovery import resume_run
 from tests.workflow import test_resume
 from tests.workflow.run_helpers import execute_run
-from tests.workflow.test_phase2 import Seq, Varying, _first_run, _labels, _manifest, _store
+from tests.workflow.test_phase2 import (
+    Seq,
+    Varying,
+    _config,
+    _first_run,
+    _labels,
+    _manifest,
+    _store,
+)
 from tests.workflow.test_runner import CONFIG, Scripted, registry, repo, script
 
 CRITERIA = ["the `flag` exists", "existing callers still work"]
@@ -182,3 +190,103 @@ def test_resumed_finding_only_rejection_gets_a_findings_repair(tmp_path):
     workers = [r for r in adapter.requests if r.role == "implementation_worker"]
     assert json.loads(_labels(workers[1], "repair_scope")[0])["mode"] == "findings"
     assert _store(git, first).read_manifest().verification_repairs_reserved == 1
+
+
+# --- minor findings never block or force a repair ---------------------------------------
+
+MINOR = FINDING | {"id": "F002", "severity": "minor", "summary": "status message is vague"}
+# Review findings are numbered by the orchestrator, so a lone minor finding is F001.
+PASS_WITH_NOTES = _answer(("AC1", "PASS"), ("AC2", "PASS"), unresolved=["F001"], notes=["F001"])
+
+
+def test_pass_with_notes_on_minor_findings_completes_without_a_repair(tmp_path):
+    outcome, adapter = _finding_run(tmp_path, finding=MINOR, verifier=(PASS_WITH_NOTES,))
+
+    assert outcome.final_state is RunState.COMPLETE_LOCAL
+    assert adapter.worker_calls == 1
+
+
+def test_pass_with_notes_on_an_important_finding_is_repaired(tmp_path):
+    important = _answer(("AC1", "PASS"), ("AC2", "PASS"), unresolved=["F001"], notes=["F001"])
+    outcome, adapter = _finding_run(tmp_path, verifier=(important, ALL_PASS))
+
+    assert outcome.final_state is RunState.COMPLETE_LOCAL
+    assert adapter.worker_calls == 2
+
+
+def test_findings_repair_covers_only_the_findings_that_are_not_minor(tmp_path):
+    review = {"outcome": "PASS", "findings": [FINDING, MINOR | {"file": "src/other.py"}]}
+    both = _answer(
+        ("AC1", "PASS"),
+        ("AC2", "PASS"),
+        outcome="CHANGES_REQUIRED",
+        unresolved=["F001", "F002"],
+        notes=["F001", "F002"],
+    )
+    adapter = Varying(script(review=review) | {"verifier": [both, ALL_PASS]})
+    outcome = execute_run(
+        repo(tmp_path), CONFIG, registry(adapter), "go", tmp_path / "wt", CRITERIA
+    )
+
+    assert outcome.final_state is RunState.COMPLETE_LOCAL
+    repair = [r for r in adapter.requests if r.role == "implementation_worker"][1]
+    scope = json.loads(_labels(repair, "repair_scope")[0])
+    assert (scope["check"], scope["files"]) == ("F001", ["src/app.py"])
+
+
+# --- each worker change gets its own validation repairs ----------------------------------
+
+
+def test_a_verification_repair_that_breaks_validation_gets_its_own_validation_repairs(tmp_path):
+    # Worker calls write x = 2, 3, 4, ...; validation passes only at x = 4 and x = 6.
+    # Calls 1-3: implementation plus both of its validation repairs. Call 4: the verification
+    # repair, which breaks validation. Call 5: a validation repair the old per-run budget denied.
+    adapter = Varying(
+        script()
+        | {
+            "verifier": [
+                _answer(("AC1", "FAIL"), ("AC2", "PASS"), outcome="CHANGES_REQUIRED"),
+                ALL_PASS,
+            ]
+        }
+    )
+    outcome = execute_run(
+        repo(tmp_path),
+        _config("grep -qxE 'x = (4|6)' src/app.py"),
+        registry(adapter),
+        "go",
+        tmp_path / "wt",
+        CRITERIA,
+    )
+
+    assert outcome.final_state is RunState.COMPLETE_LOCAL
+    assert adapter.worker_calls == 5
+    manifest = _manifest(outcome)
+    assert manifest.validation_repairs_reserved == 3
+    assert manifest.verification_repairs_reserved == 1
+
+
+def test_validation_repairs_stay_bounded_after_a_verification_repair(tmp_path):
+    adapter = Varying(
+        script()
+        | {
+            "verifier": [
+                _answer(("AC1", "FAIL"), ("AC2", "PASS"), outcome="CHANGES_REQUIRED"),
+                ALL_PASS,
+            ]
+        }
+    )
+    outcome = execute_run(
+        repo(tmp_path),
+        _config("grep -qxE 'x = 4' src/app.py"),
+        registry(adapter),
+        "go",
+        tmp_path / "wt",
+        CRITERIA,
+    )
+
+    # The verification repair (call 4) breaks validation; its two repairs (calls 5, 6) never fix it.
+    assert outcome.final_state is RunState.FAILED
+    assert adapter.worker_calls == 6
+    manifest = _manifest(outcome)
+    assert manifest.terminal_cause == "validation_failed"

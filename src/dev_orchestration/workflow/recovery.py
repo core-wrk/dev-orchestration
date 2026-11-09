@@ -20,10 +20,10 @@ from dev_orchestration.domain.findings import (
     verification_allows_completion,
 )
 from dev_orchestration.domain.run import (
-    MAX_VALIDATION_REPAIRS,
     MAX_VERIFICATION_REPAIRS,
     GitBlock,
     PauseRecord,
+    validation_repair_limit,
 )
 from dev_orchestration.git.repo import GitCommandError, GitRepo
 from dev_orchestration.scope import ScopeFence
@@ -1134,8 +1134,9 @@ def resume_run(
                                 "restart_validation_failed",
                             )
                             return _outcome(engine, repo=repo, worktree=worktree)
-                        validation_limit = 1 if current.restart_mode else MAX_VALIDATION_REPAIRS
-                        if current.validation_repairs_reserved >= validation_limit:
+                        if current.validation_repairs_reserved >= validation_repair_limit(
+                            current, cycle
+                        ):
                             _terminal(
                                 engine,
                                 RunState.FAILED,
@@ -1162,7 +1163,7 @@ def resume_run(
                         raise ResumeRefused("validation repair checkpoint has no failed checks")
                     current = store.read_manifest()
                     round_number = current.validation_repairs_reserved
-                    if not 1 <= round_number <= MAX_VALIDATION_REPAIRS:
+                    if not 1 <= round_number <= validation_repair_limit(current, cycle):
                         raise ResumeRefused("validation repair was not reserved")
                     scope = repair_description(
                         "validation",

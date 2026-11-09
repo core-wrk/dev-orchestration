@@ -151,3 +151,19 @@ class RunManifest(BaseModel):
     stop: StopRecord | None = None
     validation_artifact: str | None = None
     validation_input_hashes: dict[str, str] = Field(default_factory=dict)
+
+
+def validation_repair_limit(manifest: RunManifest, review_rounds: int) -> int:
+    """Validation repairs a run may have reserved so far.
+
+    Two for each worker change, pooled across the run: the first implementation, and each later
+    repair round for implementation review (``review_rounds``) or final verification. So a repair
+    round that breaks validation is never left without a validation repair. A restart keeps its
+    single repair; a check-only restart has none.
+    """
+    if manifest.restart_mode == "check_only":
+        return 0
+    if manifest.restart_mode:
+        return 1
+    changes = 1 + review_rounds + manifest.verification_repairs_reserved
+    return MAX_VALIDATION_REPAIRS * changes

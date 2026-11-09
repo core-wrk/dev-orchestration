@@ -794,7 +794,7 @@ def test_failed_validation_gets_one_repair_then_uses_normal_review_path(tmp_path
     assert manifest["validation_artifact"] == "execution/validation-v2.json"
 
 
-def test_review_remediation_cannot_reserve_a_third_validation_repair(tmp_path):
+def test_validation_repairs_are_two_per_worker_change_pooled_across_the_run(tmp_path):
     class ReviewThenBreak(Scripted):
         def __init__(self, scripts):
             super().__init__(scripts)
@@ -845,12 +845,14 @@ def test_review_remediation_cannot_reserve_a_third_validation_repair(tmp_path):
     outcome = execute_run(
         git, config, registry(adapter), "repair then remediate", tmp_path / "wt", CRITERIA
     )
+    # The allowance is two per worker change, pooled: the first change used one of its two, so
+    # the remediation change that breaks validation may use the remaining three (v2-v4). None
+    # fixes it, and no fifth is reserved.
     assert outcome.final_state is RunState.FAILED
-    assert adapter.worker_calls == 4
+    assert adapter.worker_calls == 6
     assert adapter.seen.count("implementation_reviewer") == 1
-    assert (outcome.store_root / "execution/validation-repair-v1.json").is_file()
-    assert (outcome.store_root / "execution/validation-repair-v2.json").is_file()
-    assert not (outcome.store_root / "execution/validation-repair-v3.json").exists()
+    assert (outcome.store_root / "execution/validation-repair-v4.json").is_file()
+    assert not (outcome.store_root / "execution/validation-repair-v5.json").exists()
     assert "verifier" not in adapter.seen
 
 

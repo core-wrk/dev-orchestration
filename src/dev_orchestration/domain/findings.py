@@ -213,7 +213,7 @@ def verification_allows_completion(
     criteria: list[str],
     findings: list[Finding],
 ) -> bool:
-    """Accept a PASS or a criteria-PASS with notes about known minor findings."""
+    """Accept a PASS, or all-PASS criteria with notes about known minor findings."""
     verdict_criteria = [verdict.criterion for verdict in verification.verdicts]
     if (
         verification.criteria != criteria
@@ -237,11 +237,13 @@ def verification_allows_completion(
     if any(finding.severity is Severity.BLOCKING for finding in findings):
         return False
 
-    if verification.outcome is Outcome.PASS:
-        return not verification.outcome_explanation and not any(
+    if verification.outcome is Outcome.PASS and not verification.outcome_explanation:
+        return not any(
             finding_by_id[identifier].severity is Severity.BLOCKING for identifier in unresolved
         )
-    if verification.outcome is not Outcome.CHANGES_REQUIRED or not explained:
+    # Notes on known minor findings are accepted whether the verifier labelled its answer PASS or
+    # CHANGES_REQUIRED; the label does not change what was found.
+    if verification.outcome not in {Outcome.PASS, Outcome.CHANGES_REQUIRED} or not explained:
         return False
     return (
         set(explained) == set(unresolved)

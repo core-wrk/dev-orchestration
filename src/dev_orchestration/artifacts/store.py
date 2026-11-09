@@ -22,12 +22,12 @@ from dev_orchestration.artifacts.events import append_event
 from dev_orchestration.domain.enums import RunState, Tier
 from dev_orchestration.domain.run import (
     MAX_REMEDIATION_CYCLES,
-    MAX_VALIDATION_REPAIRS,
     MAX_VERIFICATION_REPAIRS,
     RepairBudget,
     RunManifest,
     StageActor,
     StopRecord,
+    validation_repair_limit,
 )
 from dev_orchestration.git.repo import GitCommandError, GitRepo
 
@@ -128,7 +128,9 @@ def _stop_record(manifest: RunManifest, stage: RunState, code: str) -> StopRecor
         "plan_review": 0
         if manifest.restart_mode or manifest.tier is Tier.TRIVIAL
         else MAX_REMEDIATION_CYCLES,
-        "validation": 0 if check_only else (1 if manifest.restart_mode else MAX_VALIDATION_REPAIRS),
+        "validation": validation_repair_limit(
+            manifest, manifest.repair_rounds.get("implementation_review", 0)
+        ),
         "implementation_review": 0 if check_only else MAX_REMEDIATION_CYCLES,
         "final_verification": 0 if manifest.restart_mode else MAX_VERIFICATION_REPAIRS,
     }

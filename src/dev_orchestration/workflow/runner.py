@@ -23,12 +23,12 @@ from dev_orchestration.context.packet import ContextRef
 from dev_orchestration.domain.enums import Outcome, RunState, Tier
 from dev_orchestration.domain.findings import Verification, verification_allows_completion
 from dev_orchestration.domain.run import (
-    MAX_VALIDATION_REPAIRS,
     MAX_VERIFICATION_REPAIRS,
     GitBlock,
     PauseRecord,
     RoleBinding,
     StageActor,
+    validation_repair_limit,
 )
 from dev_orchestration.git.repo import EmptySnapshotError, GitCommandError, GitRepo
 from dev_orchestration.git.worktree import remove_worktree
@@ -1102,8 +1102,9 @@ def execute_run(
                         raise CheckpointError("passed validation has no saved artifact pointer")
                     receipt(next_stage, [artifact], cycle)
                     return outcomes, False
-                reserved = store.read_manifest().validation_repairs_reserved
-                if reserved >= MAX_VALIDATION_REPAIRS:
+                current = store.read_manifest()
+                reserved = current.validation_repairs_reserved
+                if reserved >= validation_repair_limit(current, cycle):
                     if repaired_here:
                         artifact = store.read_manifest().validation_artifact
                         receipt(next_stage, [artifact], cycle)

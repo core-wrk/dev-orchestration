@@ -15,7 +15,7 @@ from dev_orchestration.config.models import ProjectConfig
 from dev_orchestration.context.assembler import Category, ContextContractError
 from dev_orchestration.context.packet import ContextRef
 from dev_orchestration.domain.enums import Outcome, Tier
-from dev_orchestration.domain.findings import Finding, ReviewResult, Verification
+from dev_orchestration.domain.findings import Finding, ReviewResult, Severity, Verification
 from dev_orchestration.domain.run import MAX_REMEDIATION_CYCLES
 from dev_orchestration.scope import ScopeFence
 from dev_orchestration.workflow.validation import ValidationOutcome
@@ -263,6 +263,15 @@ def _unresolved_findings(verification: Verification, findings: list[Finding]) ->
     return [by_id[fid] for fid in verification.unresolved_finding_ids if fid in by_id]
 
 
+def _findings_to_repair(verification: Verification, findings: list[Finding]) -> list[Finding]:
+    """Unresolved findings worth a repair round: minor ones never force one."""
+    return [
+        finding
+        for finding in _unresolved_findings(verification, findings)
+        if finding.severity is not Severity.MINOR
+    ]
+
+
 def verification_route(
     verification: Verification, findings: list[Finding] | None = None
 ) -> str | None:
@@ -270,8 +279,8 @@ def verification_route(
 
     ``product`` when any criterion failed; ``evidence`` when the only non-passing verdicts
     are UNKNOWN for want of a test; ``findings`` when every criterion passed and the rejection
-    rests only on supplied review findings that each name a file; None when no worker repair
-    can help. The verifier's own BLOCKED or CHANGES_REQUIRED label does not decide it; ESCALATE
+    rests only on supplied review findings, at least one is not minor, and each one that is not
+    minor names a file; None when no worker repair can help. The verifier's own BLOCKED or CHANGES_REQUIRED label does not decide it; ESCALATE
     does.
     """
     if verification.outcome is Outcome.ESCALATE:
@@ -284,8 +293,10 @@ def verification_route(
     if rejected or not verification.verdicts:
         return None
     named = verification.unresolved_finding_ids
-    unresolved = _unresolved_findings(verification, findings or [])
-    if named and len(unresolved) == len(named) and all(f.file for f in unresolved):
+    if len(_unresolved_findings(verification, findings or [])) != len(named):
+        return None
+    serious = _findings_to_repair(verification, findings or [])
+    if serious and all(finding.file for finding in serious):
         return "findings"
     return None
 
@@ -308,7 +319,7 @@ def verification_repair_scope(
             "final verification rejected the change without a criterion a worker can repair"
         )
     if mode == "findings":
-        unresolved = _unresolved_findings(verification, findings or [])
+        unresolved = _findings_to_repair(verification, findings or [])
         scope = repair_scope(
             "final_verification",
             round_number,
