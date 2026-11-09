@@ -67,3 +67,36 @@ in h05's real run worktree, under the replay's exact Codex sandbox settings (`co
 
 The link was gone after the stage in both cases. pytest imports the worktree's own code
 (`pythonpath = ["src"]`), not the base checkout's.
+
+## d02 and d07 replays with the worker environment fixed (i02, i07)
+
+Measured 2026-11-09 at commit `99dc8f6` with launcher `replay_3e.py`, run in series. Setups match
+the earlier attempts: i02 = d02 (start `726605b`, no proposal), i07 = d07d (start `17635ba`,
+proposal supplied). Total 22 hosted calls and $2.81 (running total 153 of 170 calls, $12.36).
+
+| Run | Result | Validation repairs | Verification rounds | Extra asks | Calls |
+|---|---|---|---|---|---|
+| i02 | COMPLETE_LOCAL (`c209f9f`) | 1 | 1 (findings) | 1 | 10 |
+| i07 | COMPLETE_LOCAL (`770afe4`) | 0 | 3 of 3 (product) | 0 | 12 |
+
+With d05 (h05), all three expansion epics have now completed on the current code.
+
+**i02.** Validation passed first time. An important finding (pydantic version floor) went to a
+findings repair limited to `config/models.py`. After one validation repair (a failing test), the
+verifier marked the "all commands exit 0" criterion UNKNOWN; the extra ask, with no worker call,
+returned PASS. The worker's own sandbox has no network, so its report said "605 passed, 1 failed"
+(a release test that downloads a build tool); that report reaches the verifier as a run fact and is
+the likely cause of the UNKNOWN.
+
+**i07.** Every validation passed first time. Criterion 2 ("behavior matches the proposal") failed in
+three rounds, each time over the open review findings: F001-F003, then F004, then only the minor
+F005 and F006. The third repair fixed F005 alone. Each review found new issues in the code just
+changed (3, 1, 2, then 0 findings), and the run completed on its last allowed round.
+
+What these show:
+- The worker environment fix holds: 1 validation repair across both runs, against 2-3 per run before.
+- The verifier can turn minor findings into a criterion FAIL, which spends a product repair round
+  that the minor-findings rule meant to avoid.
+- Review CHANGES_REQUIRED with important (not blocking) findings does not trigger review repair;
+  those findings reach verification, where each costs a verifier call and a verification round.
+- Each verification overwrites the previous answer, so the reasons behind earlier rounds are lost.
