@@ -42,3 +42,28 @@ the worker returns.
 - F004: a patch conflict is refused only after a child run has been created.
 - F005: `restart_status` reports a changed-base restart as unavailable even when a validation
   restart would be allowed.
+
+## Fix: the worker's validation environment (2026-11-09)
+
+Two causes, both confirmed without any hosted call by running the worker's self-check commands
+in h05's real run worktree, under the replay's exact Codex sandbox settings (`codex sandbox`):
+
+1. **Product (commit after `7e78824`).** The `.venv` link existed in the worktree only while the
+   orchestrator ran validation. Every worker call now runs with the project's
+   `validation_links` linked, and the link is removed before the fence checks.
+2. **Replay harness only.** The replay sandbox gave the worker `:minimal` read access, so the
+   venv's Homebrew Python and Apple's git could not start; a normal run has full disk read.
+   The new launcher `replay_3e.py` adds read-only access to `/opt/homebrew`, the Xcode
+   command-line tools and their selection settings, and the epic's own `.venv` and `.git`,
+   and sets `GIT_CONFIG_GLOBAL=/dev/null` for the worker.
+
+| Self-check command in the worker sandbox | Before | After |
+|---|---|---|
+| `.venv/bin/ruff check` (changed files) | not found | passed |
+| `.venv/bin/ruff format --check` | not found | passed |
+| `.venv/bin/python` | not found | 3.14.6 |
+| `.venv/bin/python -m pytest tests/domain` | not found | 23 passed |
+| `git status`, `git diff` | failed (developer tools unreadable) | exit 0 |
+
+The link was gone after the stage in both cases. pytest imports the worktree's own code
+(`pythonpath = ["src"]`), not the base checkout's.
