@@ -443,7 +443,8 @@ def test_review_stops_attribute_the_rejecting_role(tmp_path, role, status):
         script[role] = [dict(test_runner.PASS, outcome="BLOCKED")]
     else:
         script[role] = [
-            dict(test_runner.VERIFY, outcome="CHANGES_REQUIRED", unresolved_finding_ids=["F1"])
+            # Asks for changes but names nothing open: not accepted.
+            dict(test_runner.VERIFY, outcome="CHANGES_REQUIRED")
         ]
     outcome = test_runner.execute_run(
         git,

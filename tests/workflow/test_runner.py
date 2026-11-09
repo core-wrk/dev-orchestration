@@ -39,7 +39,6 @@ BLOCKING = {
 VERIFY = {
     "outcome": "PASS",
     "verdicts": [{"criterion_id": "AC1", "verdict": "PASS", "evidence": "seen"}],
-    "unresolved_finding_ids": [],
 }
 
 
@@ -1039,8 +1038,9 @@ def test_minor_only_verification_can_complete_and_retains_its_note(tmp_path):
     verifier = dict(
         VERIFY,
         outcome="CHANGES_REQUIRED",
-        unresolved_finding_ids=["F001"],
-        outcome_explanation=[{"finding_id": "F001", "note": "cleanup is non-blocking"}],
+        finding_dispositions=[
+            {"finding_id": "F001", "status": "unresolved", "evidence": "cleanup is non-blocking"}
+        ],
     )
     outcome = execute_run(
         git,
@@ -1617,7 +1617,11 @@ def test_reused_plan_review_seeds_finding_ids_for_new_reviews(tmp_path):
             }
         ],
     }
-    adapter = Scripted(script(review=implementation_finding))
+    noted = dict(
+        VERIFY,
+        finding_dispositions=[{"finding_id": "F002", "status": "unresolved", "evidence": "note"}],
+    )
+    adapter = Scripted(script(review=implementation_finding, verifier=noted))
     second = execute_run(
         git,
         CONFIG,
@@ -1783,7 +1787,7 @@ def test_binary_deletion_mode_and_empty_untracked_changes_are_deliverable(tmp_pa
 
 def test_verifier_that_judges_no_criteria_cannot_complete_local(tmp_path):
     git = repo(tmp_path)
-    empty = {"outcome": "PASS", "verdicts": [], "unresolved_finding_ids": []}
+    empty = {"outcome": "PASS", "verdicts": []}
     outcome = execute_run(
         git,
         CONFIG,
@@ -1802,7 +1806,6 @@ def test_verifier_that_names_a_criterion_it_was_not_given_cannot_complete_local(
     swapped = {
         "outcome": "PASS",
         "verdicts": [{"criterion_id": "AC2", "verdict": "PASS", "evidence": "sure"}],
-        "unresolved_finding_ids": [],
     }
     outcome = execute_run(
         git,

@@ -93,7 +93,6 @@ class ScriptedAdapter:
                     }
                     for item in criteria
                 ],
-                "unresolved_finding_ids": [],
             }
         else:
             payload = {

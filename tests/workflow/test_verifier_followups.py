@@ -31,26 +31,26 @@ FINDING = {
 }
 
 
-def _answer(*verdicts, outcome="PASS", unresolved=(), notes=()):
+def _answer(*verdicts, outcome="PASS", unresolved=(), resolved=()):
     return {
         "outcome": outcome,
         "verdicts": [
             {"criterion_id": cid, "verdict": verdict, "evidence": "seen", "missing_evidence": None}
             for cid, verdict in verdicts
         ],
-        "unresolved_finding_ids": list(unresolved),
-        "outcome_explanation": [{"finding_id": fid, "note": "still open"} for fid in notes],
+        "finding_dispositions": [
+            {"finding_id": fid, "status": "unresolved", "evidence": "still open"}
+            for fid in unresolved
+        ]
+        + [{"finding_id": fid, "status": "resolved", "evidence": "fixed"} for fid in resolved],
     }
 
 
 ALL_PASS = _answer(("AC1", "PASS"), ("AC2", "PASS"))
 FINDING_ONLY = _answer(
-    ("AC1", "PASS"),
-    ("AC2", "PASS"),
-    outcome="CHANGES_REQUIRED",
-    unresolved=["F001"],
-    notes=["F001"],
+    ("AC1", "PASS"), ("AC2", "PASS"), outcome="CHANGES_REQUIRED", unresolved=["F001"]
 )
+CLEAN = {"outcome": "PASS", "findings": []}
 
 
 def _saved(outcome):
@@ -111,12 +111,19 @@ def test_an_answer_that_never_covers_every_id_escalates(tmp_path):
 
 
 # --- rejections that rest only on review findings ----------------------------------------
+# Since Phase 4 an important finding naming a file is first repaired at review (two rounds),
+# so these runs keep it open through both rounds to reach the verification findings repair:
+# worker calls are the implementation, two review repairs, then the findings repair.
 
 
-def _finding_run(tmp_path, finding=FINDING, verifier=(FINDING_ONLY, ALL_PASS), extra=None):
+def _finding_run(
+    tmp_path, finding=FINDING, verifier=(FINDING_ONLY, ALL_PASS), extra=None, reviews=None
+):
     review = {"outcome": "PASS", "findings": [finding]}
     adapter = Varying(
-        script(review=review) | {"verifier": list(verifier)},
+        script()
+        | {"implementation_reviewer": reviews or [review, review, review, CLEAN]}
+        | {"verifier": list(verifier)},
         extra=extra,
     )
     outcome = execute_run(
@@ -129,8 +136,8 @@ def test_all_pass_rejection_over_an_unresolved_finding_gets_a_findings_repair(tm
     outcome, adapter = _finding_run(tmp_path)
 
     assert outcome.final_state is RunState.COMPLETE_LOCAL
-    assert adapter.worker_calls == 2
-    repair = [r for r in adapter.requests if r.role == "implementation_worker"][1]
+    assert adapter.worker_calls == 4
+    repair = [r for r in adapter.requests if r.role == "implementation_worker"][3]
     scope = json.loads(_labels(repair, "repair_scope")[0])
     assert (scope["gate"], scope["mode"]) == ("final_verification", "findings")
     assert (scope["files"], scope["restricted"]) == (["src/app.py"], True)
@@ -142,7 +149,7 @@ def test_all_pass_rejection_over_an_unresolved_finding_gets_a_findings_repair(tm
 
 def test_findings_repair_may_not_change_files_the_findings_do_not_name(tmp_path):
     def stray(request, call):
-        if call == 2:
+        if call == 4:
             (request.cwd / "src" / "other.py").write_text("y = 1\n")
 
     outcome, _ = _finding_run(tmp_path, extra=stray)
@@ -152,7 +159,8 @@ def test_findings_repair_may_not_change_files_the_findings_do_not_name(tmp_path)
 
 
 def test_finding_that_names_no_file_is_not_repaired(tmp_path):
-    outcome, adapter = _finding_run(tmp_path, finding=FINDING | {"file": None, "line": None})
+    no_file = {"outcome": "PASS", "findings": [FINDING | {"file": None, "line": None}]}
+    outcome, adapter = _finding_run(tmp_path, reviews=[no_file])
 
     assert outcome.final_state is RunState.FAILED
     assert adapter.worker_calls == 1
@@ -160,9 +168,7 @@ def test_finding_that_names_no_file_is_not_repaired(tmp_path):
 
 
 def test_resumed_finding_only_rejection_gets_a_findings_repair(tmp_path):
-    finding_only = _answer(
-        ("AC1", "PASS"), outcome="CHANGES_REQUIRED", unresolved=["F001"], notes=["F001"]
-    )
+    finding_only = _answer(("AC1", "PASS"), outcome="CHANGES_REQUIRED", unresolved=["F001"])
     review = {"outcome": "PASS", "findings": [FINDING]}
     git = test_resume.repo(tmp_path)
     first = _first_run(git, tmp_path, Seq(timeout_on_call=1, review=review))
@@ -182,13 +188,14 @@ def test_resumed_finding_only_rejection_gets_a_findings_repair(tmp_path):
                 return AgentResult(self.name, None, 0, answer, now, now)
             return super().run(request)
 
-    adapter = Answers([finding_only, _answer(("AC1", "PASS"))], review=review)
+    adapter = Answers([finding_only, _answer(("AC1", "PASS"), resolved=["F001"])], review=review)
     resumed = resume_run(git, test_resume.CONFIG, test_resume.registry(adapter), first.run_id)
 
+    # Implementation, two review repairs that leave F001 open, then the findings repair.
     assert resumed.final_state is RunState.COMPLETE_LOCAL
-    assert adapter.worker_calls == 2
+    assert adapter.worker_calls == 4
     workers = [r for r in adapter.requests if r.role == "implementation_worker"]
-    assert json.loads(_labels(workers[1], "repair_scope")[0])["mode"] == "findings"
+    assert json.loads(_labels(workers[3], "repair_scope")[0])["mode"] == "findings"
     assert _store(git, first).read_manifest().verification_repairs_reserved == 1
 
 
@@ -196,34 +203,36 @@ def test_resumed_finding_only_rejection_gets_a_findings_repair(tmp_path):
 
 MINOR = FINDING | {"id": "F002", "severity": "minor", "summary": "status message is vague"}
 # Review findings are numbered by the orchestrator, so a lone minor finding is F001.
-PASS_WITH_NOTES = _answer(("AC1", "PASS"), ("AC2", "PASS"), unresolved=["F001"], notes=["F001"])
+PASS_WITH_NOTES = _answer(("AC1", "PASS"), ("AC2", "PASS"), unresolved=["F001"])
 
 
 def test_pass_with_notes_on_minor_findings_completes_without_a_repair(tmp_path):
-    outcome, adapter = _finding_run(tmp_path, finding=MINOR, verifier=(PASS_WITH_NOTES,))
+    minor = {"outcome": "PASS", "findings": [MINOR]}
+    outcome, adapter = _finding_run(tmp_path, verifier=(PASS_WITH_NOTES,), reviews=[minor])
 
     assert outcome.final_state is RunState.COMPLETE_LOCAL
     assert adapter.worker_calls == 1
 
 
 def test_pass_with_notes_on_an_important_finding_is_repaired(tmp_path):
-    important = _answer(("AC1", "PASS"), ("AC2", "PASS"), unresolved=["F001"], notes=["F001"])
+    important = _answer(("AC1", "PASS"), ("AC2", "PASS"), unresolved=["F001"])
     outcome, adapter = _finding_run(tmp_path, verifier=(important, ALL_PASS))
 
     assert outcome.final_state is RunState.COMPLETE_LOCAL
-    assert adapter.worker_calls == 2
+    assert adapter.worker_calls == 4
 
 
 def test_findings_repair_covers_only_the_findings_that_are_not_minor(tmp_path):
+    # Both the review repair and, later, the findings repair take only the important finding.
     review = {"outcome": "PASS", "findings": [FINDING, MINOR | {"file": "src/other.py"}]}
     both = _answer(
-        ("AC1", "PASS"),
-        ("AC2", "PASS"),
-        outcome="CHANGES_REQUIRED",
-        unresolved=["F001", "F002"],
-        notes=["F001", "F002"],
+        ("AC1", "PASS"), ("AC2", "PASS"), outcome="CHANGES_REQUIRED", unresolved=["F001", "F002"]
     )
-    adapter = Varying(script(review=review) | {"verifier": [both, ALL_PASS]})
+    adapter = Varying(
+        script()
+        | {"implementation_reviewer": [review, review, review, CLEAN]}
+        | {"verifier": [both, ALL_PASS]}
+    )
     outcome = execute_run(
         repo(tmp_path), CONFIG, registry(adapter), "go", tmp_path / "wt", CRITERIA
     )

@@ -36,15 +36,18 @@ command the criterion names was not run, `file` when you could not see code you 
 not pick one. Set missing_evidence to null for PASS and FAIL verdicts. When a PASS relies on
 a test, name the test in its evidence.
 
-Use outcome_explanation only for notes about supplied reviewer findings. Each
-explanation must name a supplied finding ID and give a concise note. When a
-criterion is FAIL or UNKNOWN for a reason that is not a supplied finding, explain
-that result in the criterion's evidence; do not invent a finding ID or add an
-outcome_explanation entry for it. The top-level outcome must be one of PASS,
-CHANGES_REQUIRED, BLOCKED, or ESCALATE; FAIL and UNKNOWN are criterion verdicts
-only and never top-level outcomes. A top-level PASS requires every criterion
-verdict to be PASS. When any criterion is FAIL or UNKNOWN, explain that result in
-its evidence and choose an allowed non-PASS outcome. A non-PASS outcome may
-describe supplied minor findings only when every acceptance criterion passes.
-Keep unresolved_finding_ids aligned with the supplied finding IDs in
-outcome_explanation.
+Give every supplied review finding exactly one entry in finding_dispositions: `resolved`
+when the current state fixes it, with the evidence that shows so, or `unresolved` with a
+concise note; do not invent a finding ID. An unresolved finding that is not minor stops
+completion and goes back to the worker; an unresolved minor finding is only noted.
+
+A minor finding never makes a criterion FAIL; record it as unresolved in its disposition
+instead. When a FAIL or UNKNOWN verdict rests on supplied findings, list their IDs in that
+verdict's finding_ids; leave finding_ids null otherwise, and explain any other reason in the
+criterion's evidence.
+
+The top-level outcome must be one of PASS, CHANGES_REQUIRED, BLOCKED, or ESCALATE; FAIL and
+UNKNOWN are criterion verdicts only and never top-level outcomes. A top-level PASS requires every
+criterion verdict to be PASS and every finding that is not minor to be resolved. When any
+criterion is FAIL or UNKNOWN, explain that result in its evidence and choose an allowed non-PASS
+outcome.

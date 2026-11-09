@@ -859,7 +859,8 @@ def run_facts(store: RunStore, worktree: Path, previous: Verification | None = N
             f"Repair rounds used: validation {manifest.validation_repairs_reserved}, "
             f"final verification {manifest.verification_repairs_reserved}"
         ),
-        f"Worker's latest report:\n{_worker_report(store)}",
+        "Worker's latest report (the worker's own account, from a sandbox without network "
+        "access; it is not validation evidence):\n" + _worker_report(store),
     ]
     if previous is not None:
         lines.append(
@@ -956,17 +957,33 @@ def verify(
         request,
         VerifierAnswer,
         store.root / "schemas",
-        context={"criterion_ids": criterion_ids(criteria)},
+        context={
+            "criterion_ids": criterion_ids(criteria),
+            "finding_ids": [finding.id for finding in findings],
+        },
     )
     # Saved with the supplied criteria text, so later gates compare text the verifier never wrote.
-    result = answer.to_verification(criteria)
-    _record_result(store, "verification/final-verification.json", result.model_dump(mode="json"))
+    result = answer.to_verification(criteria, findings)
+    saved = result.model_dump(mode="json")
+    # Every answer is kept; final-verification.json is always the latest, for resume and gates.
+    store.write_json_artifact(
+        f"verification/final-verification-v{version}.json", saved, immutable=True
+    )
+    _record_result(store, "verification/final-verification.json", saved)
     store.append_event(
         {
             "event": "verified",
             "outcome": str(result.outcome),
             "verdicts": [
-                {"criterion": verdict.criterion, "verdict": verdict.verdict}
+                {
+                    "criterion": verdict.criterion,
+                    "verdict": verdict.verdict,
+                    **(
+                        {"original_verdict": verdict.original_verdict}
+                        if verdict.original_verdict
+                        else {}
+                    ),
+                }
                 for verdict in result.verdicts
             ],
             "unresolved_finding_ids": result.unresolved_finding_ids,

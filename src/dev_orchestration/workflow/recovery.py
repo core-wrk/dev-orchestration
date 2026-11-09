@@ -16,6 +16,7 @@ from dev_orchestration.context.packet import ContextRef
 from dev_orchestration.domain.enums import Outcome, RunState, Tier
 from dev_orchestration.domain.findings import (
     ReviewResult,
+    Severity,
     Verification,
     verification_allows_completion,
 )
@@ -49,6 +50,7 @@ from dev_orchestration.workflow.contract import (
     load_contract,
     load_repair_scope,
     repair_edit_violations,
+    review_repair_findings,
     review_repair_scope,
     save_contract,
     save_repair_scope,
@@ -1236,7 +1238,12 @@ def resume_run(
                             else None,
                         )
                         return _outcome(engine, repo=repo, worktree=worktree)
-                    stage = "remediation" if reviewed.blocking_ids() else "verifier"
+                    to_repair = review_repair_findings(reviewed, cycle + 1)
+                    if current.restart_mode == "check_only":
+                        # A check-only restart repairs nothing; important findings go on to
+                        # final verification, and blocking ones stop it below.
+                        to_repair = [f for f in to_repair if f.severity is Severity.BLOCKING]
+                    stage = "remediation" if to_repair else "verifier"
                     review_scope = review_repair_scope(reviewed, cycle + 1, fence)
                     checkpoint(
                         stage,
@@ -1292,7 +1299,7 @@ def resume_run(
                         )
                         return _outcome(engine, repo=repo, worktree=worktree)
                     store.update_manifest(status=RunState.REMEDIATION)
-                    blocking = [f for f in reviewed.findings if f.id in reviewed.blocking_ids()]
+                    blocking = review_repair_findings(reviewed, cycle)
                     scope = repair_description(
                         "implementation_review",
                         cycle,
@@ -1498,7 +1505,15 @@ def resume_run(
                                 or route is not None
                             )
                         )
-                        if current.restart_mode is not None or not judged_criteria:
+                        restart_ask = (
+                            current.restart_mode is not None
+                            and judged_criteria
+                            and route == "ask"
+                            and verification_ask_available(current)
+                        )
+                        if (current.restart_mode is not None and not restart_ask) or (
+                            not judged_criteria
+                        ):
                             _terminal(
                                 engine,
                                 RunState.FAILED,

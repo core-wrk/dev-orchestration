@@ -119,8 +119,20 @@ class AcceptanceVerdict(BaseModel):
     # field existed have none, and the orchestrator treats that like "other": not something it
     # or a worker repair can supply. Answers saved with a single kind load as a one-item list.
     missing_evidence: list[MissingKind] | None = None
+    # Review findings a non-passing verdict rests on, and the verdict the verifier gave when
+    # the orchestrator counted it as a pass because it rested only on minor findings.
+    finding_ids: list[str] = Field(default_factory=list)
+    original_verdict: Literal["FAIL", "UNKNOWN"] | None = None
 
     _one_kind_is_a_list = field_validator("missing_evidence", mode="before")(_as_kind_list)
+
+
+class FindingDisposition(BaseModel):
+    model_config = {"frozen": True, "extra": "forbid"}
+
+    finding_id: str
+    status: Literal["resolved", "unresolved"]
+    evidence: str
 
 
 class OutcomeExplanation(BaseModel):
@@ -138,6 +150,9 @@ class Verification(BaseModel):
     verdicts: list[AcceptanceVerdict] = Field(default_factory=list)
     unresolved_finding_ids: list[str] = Field(default_factory=list)
     outcome_explanation: list[OutcomeExplanation] = Field(default_factory=list)
+    # One per supplied review finding. None marks an answer saved before dispositions existed,
+    # which keeps the older completion rule.
+    finding_dispositions: list[FindingDisposition] | None = None
 
     @model_validator(mode="after")
     def every_criterion_has_a_verdict(self) -> Self:
@@ -167,56 +182,103 @@ class CriterionVerdict(BaseModel):
     verdict: Literal["PASS", "FAIL", "UNKNOWN"]
     evidence: str
     missing_evidence: list[MissingKind] | None = None
+    finding_ids: list[str] | None = None
 
     _one_kind_is_a_list = field_validator("missing_evidence", mode="before")(_as_kind_list)
+
+
+def _exactly_once(kind: str, expected: list[str], given: list[str]) -> None:
+    missing = [item for item in expected if item not in given]
+    unknown = [item for item in given if item not in expected]
+    duplicates = sorted({item for item in given if given.count(item) > 1})
+    if missing or unknown or duplicates:
+        raise ValueError(
+            f"{kind} must cover each supplied ID exactly once {expected}: "
+            f"missing={missing}, unknown={unknown}, duplicates={duplicates}"
+        )
 
 
 class VerifierAnswer(BaseModel):
     """What the verifier returns. The orchestrator, not the verifier, supplies criteria text.
 
-    Validated with ``context={"criterion_ids": [...]}`` so an answer that misses, repeats, or
-    invents an ID fails validation and gets the one corrective retry.
+    Validated with ``context={"criterion_ids": [...], "finding_ids": [...]}`` so an answer that
+    misses, repeats, or invents a criterion or a finding disposition fails validation and gets
+    the one corrective retry.
     """
 
     model_config = {"frozen": True, "extra": "forbid"}
 
     outcome: Outcome
     verdicts: list[CriterionVerdict] = Field(default_factory=list)
-    unresolved_finding_ids: list[str] = Field(default_factory=list)
-    outcome_explanation: list[OutcomeExplanation] = Field(default_factory=list)
+    finding_dispositions: list[FindingDisposition] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def every_supplied_id_has_one_verdict(self, info: ValidationInfo) -> Self:
-        expected = (info.context or {}).get("criterion_ids")
-        if expected is None:
-            return self
-        judged = [verdict.criterion_id for verdict in self.verdicts]
-        missing = [cid for cid in expected if cid not in judged]
-        unknown = [cid for cid in judged if cid not in expected]
-        duplicates = sorted({cid for cid in judged if judged.count(cid) > 1})
-        if missing or unknown or duplicates:
-            raise ValueError(
-                f"verdicts must give exactly one verdict for each supplied criterion ID "
-                f"{expected}: missing={missing}, unknown={unknown}, duplicates={duplicates}"
-            )
+    def every_supplied_id_is_answered_once(self, info: ValidationInfo) -> Self:
+        context = info.context or {}
+        if "criterion_ids" in context:
+            judged = [verdict.criterion_id for verdict in self.verdicts]
+            _exactly_once("verdicts", context["criterion_ids"], judged)
+        if "finding_ids" in context:
+            disposed = [item.finding_id for item in self.finding_dispositions]
+            _exactly_once("finding_dispositions", context["finding_ids"], disposed)
+            cited = {fid for verdict in self.verdicts for fid in verdict.finding_ids or []}
+            unknown = sorted(cited - set(context["finding_ids"]))
+            if unknown:
+                raise ValueError(f"verdicts cite findings that were not supplied: {unknown}")
         return self
 
-    def to_verification(self, criteria: list[str]) -> Verification:
+    def to_verification(self, criteria: list[str], findings: list[Finding]) -> Verification:
+        """The saved form: supplied criteria text, and unresolved findings with their notes.
+
+        A non-passing verdict that rests only on minor findings counts as a pass; it keeps the
+        verifier's verdict in ``original_verdict`` and its findings stay unresolved, with notes.
+        """
+        severity = {finding.id: finding.severity for finding in findings}
         by_id = {verdict.criterion_id: verdict for verdict in self.verdicts}
+        verdicts = []
+        minor_only: list[str] = []
+        for cid, criterion in zip(criterion_ids(criteria), criteria, strict=True):
+            given = by_id[cid]
+            cited = list(given.finding_ids or [])
+            counted = (
+                given.verdict != "PASS"
+                and cited
+                and all(severity.get(fid) is Severity.MINOR for fid in cited)
+            )
+            if counted:
+                minor_only.extend(fid for fid in cited if fid not in minor_only)
+            verdicts.append(
+                AcceptanceVerdict(
+                    criterion=criterion,
+                    verdict="PASS" if counted else given.verdict,
+                    evidence=(
+                        f"Counted as PASS: rests only on minor findings {', '.join(cited)}. "
+                        f"The verifier said {given.verdict}: {given.evidence}"
+                        if counted
+                        else given.evidence
+                    ),
+                    missing_evidence=None if counted else given.missing_evidence,
+                    finding_ids=cited,
+                    original_verdict=given.verdict if counted else None,
+                )
+            )
+        notes = {
+            item.finding_id: item.evidence
+            for item in self.finding_dispositions
+            if item.status == "unresolved"
+        }
+        for fid in minor_only:
+            notes.setdefault(fid, "a criterion verdict rests on this minor finding")
         return Verification(
             outcome=self.outcome,
             criteria=list(criteria),
-            verdicts=[
-                AcceptanceVerdict(
-                    criterion=criterion,
-                    verdict=by_id[cid].verdict,
-                    evidence=by_id[cid].evidence,
-                    missing_evidence=by_id[cid].missing_evidence,
-                )
-                for cid, criterion in zip(criterion_ids(criteria), criteria, strict=True)
+            verdicts=verdicts,
+            unresolved_finding_ids=list(notes),
+            outcome_explanation=[
+                OutcomeExplanation(finding_id=fid, note=note or "unresolved")
+                for fid, note in notes.items()
             ],
-            unresolved_finding_ids=list(self.unresolved_finding_ids),
-            outcome_explanation=list(self.outcome_explanation),
+            finding_dispositions=list(self.finding_dispositions),
         )
 
 
@@ -225,7 +287,11 @@ def verification_allows_completion(
     criteria: list[str],
     findings: list[Finding],
 ) -> bool:
-    """Accept a PASS, or all-PASS criteria with notes about known minor findings."""
+    """Accept all-PASS criteria whose only open findings are minor.
+
+    Answers with finding dispositions are judged on what is still unresolved, whatever the
+    verifier's PASS or CHANGES_REQUIRED label. Older saved answers keep the earlier rule.
+    """
     verdict_criteria = [verdict.criterion for verdict in verification.verdicts]
     if (
         verification.criteria != criteria
@@ -248,6 +314,16 @@ def verification_allows_completion(
         return False
     if any(finding.severity is Severity.BLOCKING for finding in findings):
         return False
+
+    if verification.finding_dispositions is not None:
+        if verification.outcome not in {Outcome.PASS, Outcome.CHANGES_REQUIRED}:
+            return False
+        if set(explained) != set(unresolved):
+            return False
+        if not unresolved:
+            # Asking for changes while naming nothing open contradicts itself; it is not accepted.
+            return verification.outcome is Outcome.PASS
+        return all(finding_by_id[fid].severity is Severity.MINOR for fid in unresolved)
 
     if verification.outcome is Outcome.PASS and not verification.outcome_explanation:
         return not any(

@@ -43,7 +43,6 @@ PASS = {"outcome": "PASS", "findings": []}
 VERIFY = {
     "outcome": "PASS",
     "verdicts": [{"criterion_id": "AC1", "verdict": "PASS", "evidence": "diff"}],
-    "unresolved_finding_ids": [],
 }
 ROLES = (
     "classifier",
@@ -559,9 +558,12 @@ def test_resumed_verification_can_complete_with_minor_finding_note(tmp_path):
                     {
                         **VERIFY,
                         "outcome": "CHANGES_REQUIRED",
-                        "unresolved_finding_ids": ["F001"],
-                        "outcome_explanation": [
-                            {"finding_id": "F001", "note": "cleanup is non-blocking"}
+                        "finding_dispositions": [
+                            {
+                                "finding_id": "F001",
+                                "status": "unresolved",
+                                "evidence": "cleanup is non-blocking",
+                            }
                         ],
                     },
                     now,

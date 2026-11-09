@@ -405,7 +405,6 @@ def test_verification_passes_every_criterion_to_the_model(store):
             {
                 "outcome": "PASS",
                 "verdicts": [{"criterion_id": "AC1", "verdict": "PASS", "evidence": "e"}],
-                "unresolved_finding_ids": [],
             }
         ]
     )
@@ -421,7 +420,6 @@ def test_verification_saves_a_full_immutable_diff_for_each_invocation(store, tmp
     result_payload = {
         "outcome": "PASS",
         "verdicts": [{"criterion_id": "AC1", "verdict": "PASS", "evidence": "complete diff"}],
-        "unresolved_finding_ids": [],
     }
     adapter = Scripted([result_payload, result_payload])
     state = "ordinary change\n" * 20_000 + "DECISIVE_CHANGE_AT_END\n"
@@ -446,7 +444,6 @@ def test_verification_keeps_supplied_criteria_authoritative_when_diff_edits_a_do
     payload = {
         "outcome": "PASS",
         "verdicts": [{"criterion_id": "AC1", "verdict": "PASS", "evidence": "reviewed"}],
-        "unresolved_finding_ids": [],
     }
     adapter = Scripted([payload])
     current_state = (
@@ -492,7 +489,8 @@ def test_verification_keeps_supplied_criteria_authoritative_when_diff_edits_a_do
     assert "mark the affected criterion FAIL" in request.prompt
     assert "mark it UNKNOWN" in request.prompt
     assert (
-        "Use outcome_explanation only for notes about supplied reviewer findings" in request.prompt
+        "Give every supplied review finding exactly one entry in finding_dispositions"
+        in " ".join(request.prompt.split())
     )
     assert "do not invent a finding ID" in request.prompt
 
@@ -503,7 +501,6 @@ def test_verification_runs_in_the_supplied_worktree(store, tmp_path):
             {
                 "outcome": "PASS",
                 "verdicts": [{"criterion_id": "AC1", "verdict": "PASS", "evidence": "e"}],
-                "unresolved_finding_ids": [],
             }
         ]
     )

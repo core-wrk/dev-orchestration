@@ -51,6 +51,7 @@ from dev_orchestration.workflow.contract import (
     load_contract,
     precheck,
     repair_edit_violations,
+    review_repair_findings,
     review_repair_scope,
     save_contract,
     save_repair_scope,
@@ -1786,7 +1787,9 @@ def execute_run(
                 )
                 review_scope, review_scope_artifacts = review_repair(implementation_review, cycle)
                 receipt(
-                    "remediation" if implementation_review.blocking_ids() else "verifier",
+                    "remediation"
+                    if review_repair_findings(implementation_review, cycle)
+                    else "verifier",
                     [
                         f"review/{max((store.root / 'review').glob('implementation-review-v*.json')).name}",
                         "review/finding-index.json",
@@ -1807,7 +1810,9 @@ def execute_run(
                         "reason": "tier stage path omits implementation review",
                     }
                 )
-            while implementation_review is not None and implementation_review.blocking_ids():
+            while implementation_review is not None and review_repair_findings(
+                implementation_review, cycle
+            ):
                 if implementation_review.outcome in {Outcome.BLOCKED, Outcome.ESCALATE}:
                     target = (
                         RunState.BLOCKED
@@ -1827,11 +1832,7 @@ def execute_run(
                     )
                     return _outcome(engine, repo=repo, worktree=worktree)
                 engine.transition(RunState.REMEDIATION)
-                blocking = [
-                    finding
-                    for finding in implementation_review.findings
-                    if finding.id in implementation_review.blocking_ids()
-                ]
+                blocking = review_repair_findings(implementation_review, cycle)
                 current_state = diff or "No committed or working-tree diff was observed."
                 before_remediation = _deliverable_patch(worktree_repo, base_commit)
                 guarded_repair(
@@ -1896,7 +1897,9 @@ def execute_run(
                     implementation_review, cycle + 1
                 )
                 receipt(
-                    "remediation" if implementation_review.blocking_ids() else "verifier",
+                    "remediation"
+                    if review_repair_findings(implementation_review, cycle + 1)
+                    else "verifier",
                     [
                         f"review/{max((store.root / 'review').glob('implementation-review-v*.json')).name}",
                         "review/finding-index.json",

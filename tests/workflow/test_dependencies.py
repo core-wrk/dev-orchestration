@@ -416,8 +416,6 @@ def test_600_source_report_fits_real_downstream_requests_and_keeps_full_inventor
                 "evidence": "The diff preserves the shared interface.",
             }
         ],
-        "unresolved_finding_ids": [],
-        "outcome_explanation": [],
     }
     adapters = [
         CapturingAdapter("# Plan\n"),

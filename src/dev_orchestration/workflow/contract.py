@@ -239,21 +239,39 @@ def validation_repair_scope(
     )
 
 
+def review_repair_findings(review: ReviewResult, round_number: int) -> list[Finding]:
+    """Findings review repair round ``round_number`` addresses.
+
+    Every blocking finding, plus important findings that name a file while review rounds remain,
+    whatever the review's own label. Important findings left after the last round go on to final
+    verification; blocking findings past the last round still exhaust the budget.
+    """
+    blocking = [f for f in review.findings if f.severity is Severity.BLOCKING]
+    if round_number > MAX_REMEDIATION_CYCLES:
+        return blocking
+    important = [f for f in review.findings if f.severity is Severity.IMPORTANT and f.file]
+    return blocking + important
+
+
 def review_repair_scope(review: ReviewResult, round_number: int, fence: ScopeFence) -> dict | None:
     """The next remediation round's description, or None when no round will follow."""
+    findings = review_repair_findings(review, round_number)
     if (
-        not review.blocking_ids()
+        not findings
         or review.outcome in {Outcome.BLOCKED, Outcome.ESCALATE}
         or round_number > MAX_REMEDIATION_CYCLES
     ):
         return None
-    blocking = [finding for finding in review.findings if finding.id in review.blocking_ids()]
+    blocking = [finding for finding in findings if finding.severity is Severity.BLOCKING]
+    # Important findings narrow the round to their files only when every blocking finding also
+    # names one; otherwise the round keeps the blocking findings' own scope, as before.
+    named = findings if all(finding.file for finding in blocking) else blocking
     return repair_scope(
         "implementation_review",
         round_number,
-        ", ".join(finding.id for finding in blocking),
-        "; ".join(finding.evidence_required or finding.summary for finding in blocking),
-        [finding.file for finding in blocking if finding.file],
+        ", ".join(finding.id for finding in findings),
+        "; ".join(finding.evidence_required or finding.summary for finding in findings),
+        [finding.file for finding in named if finding.file],
         fence,
     )
 

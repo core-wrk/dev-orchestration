@@ -27,8 +27,6 @@ def _answer(verdict="PASS", missing=None, outcome=None):
                 "missing_evidence": missing,
             }
         ],
-        "unresolved_finding_ids": [],
-        "outcome_explanation": [],
     }
 
 
@@ -123,7 +121,7 @@ def test_the_verifier_receives_a_summary_of_run_facts(tmp_path):
     assert "Implementation review: PASS" in facts
     assert f"Starting commit: {manifest.git.base_commit}" in facts
     assert f"Worktree (read-only): {tmp_path / 'wt'}" in facts
-    assert "Worker's latest report:\ndone" in facts
+    assert "Worker's latest report" in facts and facts.endswith("done")
 
 
 # --- several missing kinds and one more ask ----------------------------------------------
