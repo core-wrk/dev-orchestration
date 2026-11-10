@@ -46,3 +46,35 @@ Options for review repair of important findings:
 
 Whichever is chosen, the verification-side steps still need a run that reaches verification.
 Nine hosted calls remain, which is less than one full replay.
+
+## Second replay with first-round-only repair (k07)
+
+Measured 2026-11-10 at commit `9b5b991`, one attempt, same setup as i07 and j07. The call limit
+was raised from 170 to 200 first (user approval). It used 10 hosted calls and $1.81 recorded
+(running total 171 of 200 calls, $16.13).
+
+**COMPLETE_LOCAL** (`314d057` in the k07 copy; 8 files, +237/-14), in about 51 minutes.
+
+| Run | Code | Result | Calls | Repairs | Time |
+|---|---|---|---|---|---|
+| i07 | before Phase 4 | COMPLETE_LOCAL | 12 | 3 verification | 64 min |
+| j07 | Phase 4, important findings at every review round | ESCALATED at review | 8 | 2 review | 47 min |
+| k07 | Phase 4, important findings in round 1 only | COMPLETE_LOCAL | 10 | 1 review + 1 verification | 51 min |
+
+What ran, and how:
+1. **Review round 1** took F001 (blocking) and F002 (important), limited to `goals.py` and
+   `runner.py`. The second review found F003 and F004 (important) and F005 (minor); with the new rule
+   none was repaired at review, and the run moved on to final verification with no escalation.
+2. **Dispositions.** The first verifier answer gave F003, F004 and F005 each a disposition (all
+   unresolved) and failed criterion 2, citing F003 and F004. Because they are important, not minor,
+   the failure went to a product repair; it fixed both. No retry was needed (10 calls = the 10
+   expected).
+3. **The second answer** was PASS with only F006, a minor finding, noted as unresolved. The new
+   completion rule accepted it.
+4. **Both answers were kept** (`final-verification-v1.json`, `-v2.json`); the latest file equals v2.
+5. **Review rounds were not exhausted:** the blocking-only later rounds were never needed, but the
+   j07 situation (important findings using both rounds) cannot recur.
+
+Not exercised on a live run: the restart ask, the AO-03b case (a PASS leaving an important finding
+unlisted; here the verifier listed every finding), and minor-only counting of a FAIL. Tests cover
+all three. This is one run per variant; the verifier and reviewer both vary from run to run.
