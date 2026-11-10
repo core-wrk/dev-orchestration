@@ -7,18 +7,19 @@ Depends on Phases 3a and 3b.
 Handle review findings by rule, at the earliest step that can. Evidence:
 
 - **Important findings wait for verification** (i02, i07, h05): only `blocking` ones trigger
-  review repair, so each costs a verifier call and a verification round.
-- **An important finding shipped unnoticed** (AO-03b): the verifier answered PASS without listing it.
-- **Minor findings forced a repair** (i07): the verifier failed a broad criterion over two of them.
+  review repair, costing a verifier call and a round each.
+- **An important finding shipped unnoticed** (AO-03b): a PASS without listing it was accepted.
+- **Minor findings forced a repair** (i07): the verifier failed a criterion over two.
 - **Restarts cannot use the no-worker ask**, so any rejection fails them.
 - **Earlier verifier answers are overwritten** (i02, i07).
-- **The worker's report misled the verifier** (i02): its sandbox has no network.
+- **The worker's report misled the verifier** (i02): no network.
 
 ## Changes
 
 1. **Repair important findings at review** (`workflow/contract.py`, `runner.py`, `recovery.py`).
-   Review repair also takes `important` findings that name a file, limited to those files, within
-   the existing two review rounds, whatever the review's own label.
+   Only the first review round also takes `important` findings that name a file, limited to those
+   files, whatever the review's label. Later rounds are blocking-only, so a regression the first
+   repair caused still has a round (j07); leftovers go to verification.
 2. **Every finding gets a disposition** (`domain/findings.py`, `roles/verifier.md`). For each
    finding the verifier answers `resolved`, with evidence, or `unresolved`; omitting one gets the
    corrective retry. An unresolved finding that is not minor goes to the findings
@@ -40,7 +41,7 @@ Older saved answers must load and route as today.
 
 - `.venv/bin/python -m pytest -p no:cacheprovider tests/workflow/test_phase4.py` passes and covers:
   - review PASS with an important finding naming a file: one review repair limited to that file,
-    before any verifier call; naming no file, or after two rounds: no review repair;
+    before any verifier call; naming no file, or in a later round: none; blocking still repaired;
   - PASS omitting an important finding's disposition: retried once, then escalates;
   - PASS with an important finding unresolved: a findings repair;
   - FAIL citing only minor findings: completes with a note, no worker call;
@@ -50,12 +51,11 @@ Older saved answers must load and route as today.
   - an answer saved before this phase loads and routes the same way.
 - `.venv/bin/ruff check --no-cache src tests`, `.venv/bin/ruff format --check --no-cache src tests`
   and `.venv/bin/python -m pytest -p no:cacheprovider` exit 0.
-- Measurement, needing approval: one d07 replay (about 12 of 17 remaining calls).
+- Measurement, needing approval: one d07 replay.
 
 ## Risks
 
-- **More review rounds.** Repairs can surface new findings (i07: 3, 1, 2, then 0); the two-round
-  limit bounds it.
+- **A regression from the first repair** escalated j07; later rounds are now blocking-only.
 - **A heavier verifier answer** may raise schema retries; if so, drop step 3's cited findings.
 
 ## Not included

@@ -242,12 +242,13 @@ def validation_repair_scope(
 def review_repair_findings(review: ReviewResult, round_number: int) -> list[Finding]:
     """Findings review repair round ``round_number`` addresses.
 
-    Every blocking finding, plus important findings that name a file while review rounds remain,
-    whatever the review's own label. Important findings left after the last round go on to final
-    verification; blocking findings past the last round still exhaust the budget.
+    Every blocking finding. Important findings that name a file join only the first round, so
+    later rounds stay free for blocking findings, such as a regression the first repair caused
+    (j07). Important findings left after the first round go on to final verification, which has
+    its own repair rounds. Blocking findings past the last round still exhaust the budget.
     """
     blocking = [f for f in review.findings if f.severity is Severity.BLOCKING]
-    if round_number > MAX_REMEDIATION_CYCLES:
+    if round_number != 1:
         return blocking
     important = [f for f in review.findings if f.severity is Severity.IMPORTANT and f.file]
     return blocking + important

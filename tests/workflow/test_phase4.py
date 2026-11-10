@@ -128,13 +128,40 @@ def test_an_important_finding_naming_no_file_goes_straight_to_verification(tmp_p
     assert adapter.worker_calls == 1
 
 
-def test_important_findings_left_after_two_review_rounds_go_on_to_verification(tmp_path):
+def test_important_findings_left_after_the_first_review_round_go_on_to_verification(tmp_path):
+    # Only the first review round repairs important findings; later rounds are for blocking ones,
+    # so a regression found late still has a round. What is left goes to final verification.
     adapter = Run([_review(IMPORTANT)], [_answer])
     outcome = _go(tmp_path, adapter)
 
     assert outcome.final_state is RunState.COMPLETE_LOCAL
-    assert adapter.worker_calls == 3
+    assert adapter.worker_calls == 2
     assert adapter.seen.count("verifier") == 1
+
+
+def test_a_blocking_finding_in_the_second_review_round_is_still_repaired(tmp_path):
+    blocking = IMPORTANT | {"id": "F002", "severity": "blocking", "evidence_required": "a test"}
+    changes = _review(blocking, outcome="CHANGES_REQUIRED")
+    adapter = Run([_review(IMPORTANT), changes, CLEAN], [_answer])
+    outcome = _go(tmp_path, adapter)
+
+    assert outcome.final_state is RunState.COMPLETE_LOCAL
+    assert adapter.worker_calls == 3
+    assert _scope(_workers(adapter)[2])["gate"] == "implementation_review"
+
+
+def test_important_findings_are_repaired_only_in_the_first_review_round():
+    from dev_orchestration.domain.findings import ReviewResult
+    from dev_orchestration.workflow.contract import review_repair_findings
+
+    blocking = {"id": "F002", "severity": "blocking", "summary": "s", "evidence_required": "e"}
+    review = ReviewResult.model_validate(
+        {"outcome": "CHANGES_REQUIRED", "findings": [IMPORTANT, blocking]}
+    )
+
+    assert [f.id for f in review_repair_findings(review, 1)] == ["F002", "F001"]
+    assert [f.id for f in review_repair_findings(review, 2)] == ["F002"]
+    assert [f.id for f in review_repair_findings(review, 3)] == ["F002"]
 
 
 # --- 2. every finding gets a disposition ------------------------------------------------
@@ -162,15 +189,15 @@ def test_an_answer_that_keeps_omitting_a_disposition_escalates(tmp_path):
 
 
 def test_a_pass_with_an_important_finding_unresolved_gets_a_findings_repair(tmp_path):
-    # Two review rounds do not clear it; final verification still finds it open.
+    # The first review round does not clear it; final verification still finds it open.
     adapter = Run(
-        [_review(IMPORTANT), _review(IMPORTANT), _review(IMPORTANT), CLEAN],
+        [_review(IMPORTANT), _review(IMPORTANT), CLEAN],
         [lambda r: _answer(r, unresolved=("important",)), _answer],
     )
     outcome = _go(tmp_path, adapter)
 
     assert outcome.final_state is RunState.COMPLETE_LOCAL
-    findings_repair = _workers(adapter)[3]
+    findings_repair = _workers(adapter)[2]
     scope = _scope(findings_repair)
     assert (scope["gate"], scope["mode"], scope["files"]) == (
         "final_verification",
